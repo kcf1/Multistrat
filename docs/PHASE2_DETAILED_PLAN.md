@@ -30,6 +30,8 @@
 
 ## 3. Postgres schema (Booking / Position Keeper)
 
+**Note:** Postgres schema is **defined and implemented as part of Booking** (see §12.2.1). Position Keeper reads from this schema but does not modify it. This section describes the schema design; implementation happens in the Booking task checklist.
+
 All schema changes are **Alembic revisions** (same as Phase 1). Add one or more revisions for the following.
 
 ### 3.1 Tables (minimal set)
@@ -80,7 +82,9 @@ Indexes: `account_id`, `symbol`, `executed_at` (fills), `(account_id, symbol)` (
 
 ### 4.2 Message schemas (JSON)
 
-**risk_approved (order to execute)**  
+**Note:** Schemas are **defined and implemented per service** (see §12 Task checklist). OMS defines `risk_approved` input and `oms_fills` output; Booking defines `oms_fills` input (must match OMS output). This ensures each service owns its contract.
+
+**risk_approved (order to execute)** — defined in OMS (12.1.5)  
 - `order_id` (internal UUID or string)  
 - `broker` (e.g. `binance`) — OMS uses this to select the broker adapter.  
 - `account_id` (optional; default account if single)  
@@ -88,12 +92,12 @@ Indexes: `account_id`, `symbol`, `executed_at` (fills), `(account_id, symbol)` (
 - `price` (optional; for LIMIT)  
 - `strategy_id` (optional), `created_at` (ISO)
 
-**oms_fills (fill or reject)**  
+**oms_fills (fill or reject)** — defined in OMS (12.1.5), consumed by Booking (12.2.5)  
 - `event_type`: `fill` | `reject`  
 - `order_id` (internal), `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`  
 - `executed_at` (ISO), `fill_id` (broker), optional `reject_reason` for rejections  
 
-Document these in `docs/PHASE2_DETAILED_PLAN.md` (this file) or a small `docs/streams.md` and keep them consistent with OMS and Booking code.
+Each service documents its schemas in code or a service README (e.g. `oms/README.md`, `booking/README.md`). Streams are created on first XADD.
 
 ### 4.3 Consumer groups (optional)
 
@@ -250,34 +254,41 @@ BINANCE_API_SECRET=
 
 **Bottom-up approach:** Build and unit-test each layer before integrating. Start with the lowest-level component (Binance API), then build up: adapter → OMS pieces → OMS integration → Booking pieces → Booking integration → Position Keeper pieces → Position Keeper integration. Each step should have unit tests before moving to the next.
 
+**Schema ownership:** Each service defines and implements its own schemas (SQLite, Postgres, Redis streams, Redis cache keys) as part of its implementation. OMS owns `risk_approved` input and `oms_fills` output schemas; Booking owns Postgres schema (Alembic) and `oms_fills` input schema (must match OMS output); Position Keeper owns its read/write schemas.
+
 ### 12.1 OMS (build backwards: Binance API → adapter → OMS pieces → integration)
 
-- [ ] **12.1.1** Document Redis stream schemas (this doc or `docs/streams.md`): `risk_approved` (include `broker`), `oms_fills`. Streams are created on first XADD.
-- [ ] **12.1.2** **Binance API client** (lowest level): HTTP client for Binance REST (place order, query order, cancel); HMAC-SHA256 signing; support testnet/production URLs. **Unit test:** mock HTTP responses; verify signing, request format, error handling.
-- [ ] **12.1.3** **Binance fills listener** (websocket or poll): subscribe to user data stream or poll “my trades”; parse execution reports. **Unit test:** mock websocket messages or REST responses; verify fill/reject parsing.
-- [ ] **12.1.4** **Binance broker adapter** (uses Binance client): implement adapter interface (`place_order`, `start_fill_listener(callback)`); convert Binance responses to unified fill/reject format. **Unit test:** mock Binance client; verify adapter calls client correctly and formats output.
-- [ ] **12.1.5** **OMS SQLite persistence**: schema (broker-agnostic: `broker`, `account_id`, order fields, status); store/update orders. **Unit test:** in-memory SQLite; verify CRUD operations.
-- [ ] **12.1.6** **OMS Redis consumer** (XREAD from `risk_approved`): parse messages, handle blocking read. **Unit test:** mock Redis client; verify message parsing and error handling.
+- [ ] **12.1.1** **Binance API client** (lowest level): HTTP client for Binance REST (place order, query order, cancel); HMAC-SHA256 signing; support testnet/production URLs. **Unit test:** mock HTTP responses; verify signing, request format, error handling.
+- [ ] **12.1.2** **Binance fills listener** (websocket or poll): subscribe to user data stream or poll “my trades”; parse execution reports. **Unit test:** mock websocket messages or REST responses; verify fill/reject parsing.
+- [ ] **12.1.3** **Binance broker adapter** (uses Binance client): implement adapter interface (`place_order`, `start_fill_listener(callback)`); convert Binance responses to unified fill/reject format. **Unit test:** mock Binance client; verify adapter calls client correctly and formats output.
+- [ ] **12.1.4** **OMS SQLite schema and persistence**: define schema (broker-agnostic: `broker`, `account_id`, order fields, status); implement store/update orders. **Unit test:** in-memory SQLite; verify CRUD operations.
+- [ ] **12.1.5** **OMS Redis stream schemas** (input/output): define `risk_approved` input schema (`broker`, `account_id`, `symbol`, `side`, `quantity`, `order_type`, `price`, etc.); define `oms_fills` output schema (`event_type`, `order_id`, `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `executed_at`, etc.). Document in code or `oms/README.md`. Streams are created on first XADD.
+- [ ] **12.1.6** **OMS Redis consumer** (XREAD from `risk_approved`): parse messages per `risk_approved` schema, handle blocking read. **Unit test:** mock Redis client; verify message parsing and error handling.
 - [ ] **12.1.7** **OMS broker adapter registry**: interface definition; registry (map `broker_name` → adapter); route by `broker`. **Unit test:** mock adapters; verify routing and error handling (unknown broker).
-- [ ] **12.1.8** **OMS Redis producer** (XADD to `oms_fills`): format unified fill/reject events. **Unit test:** mock Redis client; verify message format.
+- [ ] **12.1.8** **OMS Redis producer** (XADD to `oms_fills`): format unified fill/reject events per `oms_fills` schema. **Unit test:** mock Redis client; verify message format.
 - [ ] **12.1.9** **OMS integration** (wire pieces): Redis consumer → SQLite → adapter registry → adapter.place_order → adapter fill callback → SQLite update → Redis producer. **Integration test:** mock Redis streams and adapter; verify full flow for one order.
 - [ ] **12.1.10** Register Binance adapter in OMS; add `BINANCE_*` to `.env.example` and `.env`.
 
 ### 12.2 Booking (build backwards: Postgres writes → Redis cache → consumer → integration)
 
-- [ ] **12.2.1** Add Alembic revision(s) for Postgres: `accounts`, `orders`, `fills`, `positions`, `balances`, optional `margin_snapshots`. Run `alembic upgrade head`.
+- [ ] **12.2.1** **Booking Postgres schema** (Alembic): create revision(s) for `accounts`, `orders`, `fills`, `positions`, `balances`, optional `margin_snapshots`; implement `upgrade()` and `downgrade()`. Run `alembic upgrade head`. **Unit test:** verify schema creation and indexes.
 - [ ] **12.2.2** **Booking Postgres writes**: insert fills, update positions (add/reduce, avg price), update balances. **Unit test:** test Postgres (or test DB); verify SQL, idempotency (duplicate fill_id).
-- [ ] **12.2.3** **Booking Redis cache updates**: write `positions:{account_id}`, `balance:{account_id}:{asset}`, `margin:{account_id}`. **Unit test:** mock Redis client; verify key format and updates.
-- [ ] **12.2.4** **Booking Redis consumer** (XREAD from `oms_fills`): parse fill/reject events. **Unit test:** mock Redis client; verify message parsing.
-- [ ] **12.2.5** **Booking integration** (wire pieces): Redis consumer → Postgres writes → Redis cache updates. **Integration test:** mock Redis stream; verify Postgres and Redis cache updated for one fill.
+- [ ] **12.2.3** **Booking Redis cache schema**: define key formats (`positions:{account_id}`, `balance:{account_id}:{asset}`, `margin:{account_id}`) and value formats (JSON or hash). Document in code or `booking/README.md`.
+- [ ] **12.2.4** **Booking Redis cache updates**: write cache keys per schema. **Unit test:** mock Redis client; verify key format and updates.
+- [ ] **12.2.5** **Booking Redis stream schema** (input): define `oms_fills` input schema (must match OMS output schema from 12.1.5). Document in code or `booking/README.md`.
+- [ ] **12.2.6** **Booking Redis consumer** (XREAD from `oms_fills`): parse fill/reject events per `oms_fills` schema. **Unit test:** mock Redis client; verify message parsing.
+- [ ] **12.2.7** **Booking integration** (wire pieces): Redis consumer → Postgres writes → Redis cache updates. **Integration test:** mock Redis stream; verify Postgres and Redis cache updated for one fill.
 
 ### 12.3 Position Keeper (build backwards: calculations → reads → writes → loop)
 
 - [ ] **12.3.1** **Position Keeper PnL/margin calculation**: realized PnL (from fills), unrealized PnL (mark price), margin (futures). **Unit test:** given positions/balances/fills, verify calculations.
-- [ ] **12.3.2** **Position Keeper Postgres reads**: query positions, balances, fills. **Unit test:** test Postgres; verify queries.
-- [ ] **12.3.3** **Position Keeper Redis reads**: read cache keys (positions, balances). **Unit test:** mock Redis client; verify reads.
-- [ ] **12.3.4** **Position Keeper Postgres/Redis writes**: write PnL/margin snapshots. **Unit test:** test Postgres and mock Redis; verify writes.
-- [ ] **12.3.5** **Position Keeper integration** (loop): periodic read → calculate → write. **Integration test:** mock data; verify loop runs and writes results.
+- [ ] **12.3.2** **Position Keeper Postgres schema** (reads): define queries for positions, balances, fills (uses Booking schema from 12.2.1). Document in code or `position_keeper/README.md`.
+- [ ] **12.3.3** **Position Keeper Postgres reads**: query positions, balances, fills. **Unit test:** test Postgres; verify queries.
+- [ ] **12.3.4** **Position Keeper Redis cache schema** (reads): define key formats to read (`positions:{account_id}`, `balance:{account_id}:{asset}`) — must match Booking cache schema from 12.2.3. Document in code or `position_keeper/README.md`.
+- [ ] **12.3.5** **Position Keeper Redis reads**: read cache keys (positions, balances). **Unit test:** mock Redis client; verify reads.
+- [ ] **12.3.6** **Position Keeper Postgres/Redis schema** (writes): define PnL/margin snapshot schema (Postgres table or Redis keys like `pnl:{account_id}`, `margin:{account_id}`). Document in code or `position_keeper/README.md`.
+- [ ] **12.3.7** **Position Keeper Postgres/Redis writes**: write PnL/margin snapshots. **Unit test:** test Postgres and mock Redis; verify writes.
+- [ ] **12.3.8** **Position Keeper integration** (loop): periodic read → calculate → write. **Integration test:** mock data; verify loop runs and writes results.
 
 ### 12.4 Test harness and deployment
 
