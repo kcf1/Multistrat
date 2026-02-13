@@ -48,7 +48,9 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 ## Phase 2: OMS, Booking, Position (Binance first)
 
-**Goal:** End-to-end order flow for Binance: approved orders → OMS (SQLite + Binance API) → fills → Booking → Postgres positions/balances/margin; Position Keeper for PnL/margin.
+**Goal:** End-to-end order flow: approved orders → **generic OMS** (routes to broker adapters) → **Binance** (first broker) → fills → Booking → Postgres positions/balances/margin; Position Keeper for PnL/margin. OMS is broker-agnostic; Binance is the first adapter.
+
+**Detailed plan:** [docs/PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md) — schema, streams, generic OMS + broker adapters, task order (build OMS first), and acceptance.
 
 ### Dependencies
 
@@ -63,13 +65,11 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 - [ ] **Redis Streams**
   - Define and document stream names: `strategy_orders`, `risk_approved`, `oms_fills`
   - Message schemas (JSON) for: order intent, risk-approved order, fill/reject
-- [ ] **OMS service (Binance)**
-  - Single process, loop: consume from `risk_approved` (XREAD block)
-  - Persist incoming orders to SQLite (staging): orders table, status (pending, sent, filled, rejected)
-  - Binance client: place order (REST), then poll or websocket for fills/cancellations
-  - Publish to `oms_fills`: fill events and rejections (with order id, symbol, side, qty, price, fee, etc.)
-  - Config: Binance base URL, API key/secret, testnet flag
-  - Deploy as Docker service; connect to Redis and (optional) shared volume for SQLite file
+- [ ] **OMS service (generic)**
+  - Single process, loop: consume from `risk_approved` (XREAD block); route by `broker` to a **broker adapter**; stage orders in SQLite (broker-agnostic schema); receive fills/rejects from adapter; publish unified events to `oms_fills`
+  - **Broker adapter interface:** place_order, fill/reject callback; registry (e.g. `broker_name` → adapter). **Binance** is the first adapter: place order (REST), websocket or poll for fills, convert to unified format
+  - Config: REDIS_URL, SQLite path; Binance adapter: base URL, API key/secret, testnet
+  - Deploy as Docker service; connect to Redis and (optional) volume for SQLite
 - [ ] **Booking service**
   - Single process, loop: consume from `oms_fills` (XREAD block)
   - For each fill: update positions (add/subtract), update balances, compute margin if applicable
