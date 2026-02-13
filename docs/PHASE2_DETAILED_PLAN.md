@@ -8,12 +8,12 @@
 
 | Item | Choice |
 |------|--------|
-| **OMS** | Generic order router: consumes `risk_approved`, stages in SQLite, dispatches to a **broker adapter** by `broker`/account; receives fills from adapter and publishes `oms_fills`. Extensible to more brokers later. |
+| **OMS** | Generic order router: consumes `risk_approved`, stages orders in **Redis** (hashes + indexes), dispatches to a **broker adapter** by `broker`/account; receives fills from adapter and publishes `oms_fills`. Periodically syncs orders to Postgres for audit. Extensible to more brokers later. |
 | **Broker adapters** | Pluggable implementations (e.g. Binance first; others later). Each adapter: place order, subscribe to fills/rejects, report back to OMS in a unified format. |
 | **First broker** | Binance (testnet first; spot or futures — decide one for Phase 2). |
 | **Order path** | Redis `risk_approved` → OMS (router) → broker adapter (Binance) → broker API → fills back to OMS → Redis `oms_fills` → Booking → Postgres + Redis cache |
-| **OMS persistence** | SQLite (staging: orders, status); broker-agnostic schema. |
-| **Booking persistence** | Postgres (positions, balances, margin, fills); Redis cache for Risk/Position Keeper |
+| **OMS persistence** | **Redis** (staging: order hashes, status indexes, broker_order_id lookup); **periodic sync to Postgres** `orders` table for audit and recovery. |
+| **Booking persistence** | Postgres (orders, positions, balances, margin, fills); Redis cache for Risk/Position Keeper |
 | **Position Keeper** | Reads Postgres/Redis; aggregates PnL and margin |
 | **Risk (Phase 2)** | Minimal: consume `strategy_orders`, pass through to `risk_approved` (or use test inject for E2E) |
 
@@ -40,9 +40,9 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
   - `id` (PK), `name`, `broker` (e.g. `binance`), `env` (e.g. `testnet`/`mainnet`), `created_at`, optional `config` (JSONB).  
   - One row per broker account if you support multiple; else a single default account.
 
-- **orders** (audit / reference; OMS has its own SQLite copy for staging)  
-  - `id` (PK), `account_id` (FK), `internal_id` (unique, from OMS), `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, `price` (nullable), `status`, `created_at`, `updated_at`.  
-  - Optional: store here when OMS sends to broker, or only in SQLite and rely on fills for audit.
+- **orders** (audit / recovery; populated by OMS from Redis or on status updates)  
+  - See table in §3.1 above: includes `book` (strategy/book id), `comment` (freetext), generic broker fields (`executed_qty`, `time_in_force`, etc.), and Binance-specific columns with `binance_` prefix (`binance_cumulative_quote_qty`, `binance_transact_time`).  
+  - OMS syncs orders to this table for audit, reconciliation, and recovery.
 
 - **fills**  
   - `id` (PK), `order_id` (FK to orders or internal reference), `account_id` (FK), `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `broker_fill_id`, `executed_at`, `created_at`.  
@@ -60,9 +60,46 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
   - `id` (PK), `account_id` (FK), `total_margin`, `available_balance`, `timestamp`.  
   - Position Keeper or Booking can write periodically.
 
-Indexes: `account_id`, `symbol`, `executed_at` (fills), `(account_id, symbol)` (positions).
+**orders** — Extended columns for book (strategy) and freetext comment. Broker-agnostic columns for routing/audit; **Binance-specific** columns use the `binance_` prefix so other brokers can add their own (e.g. `bybit_*`) without collision.
 
-### 3.2 Alembic workflow
+| Column | Type | Source | Notes |
+|--------|------|--------|--------|
+| `id` | BIGSERIAL PK | internal | |
+| `account_id` | FK → accounts | risk_approved / config | |
+| `internal_id` | TEXT UNIQUE | OMS (UUID) | Our order id; sent as clientOrderId to Binance |
+| `broker` | TEXT | risk_approved | e.g. `binance` |
+| `broker_order_id` | TEXT | broker response | Broker’s order id (e.g. Binance `orderId`) |
+| `symbol` | TEXT | risk_approved / broker | |
+| `side` | TEXT | risk_approved / broker | BUY/SELL |
+| `order_type` | TEXT | risk_approved / broker | MARKET, LIMIT, … |
+| `quantity` | NUMERIC | risk_approved / broker | |
+| `price` | NUMERIC NULL | risk_approved / broker | |
+| `time_in_force` | TEXT NULL | broker | GTC, IOC, FOK (generic) |
+| `status` | TEXT | broker | Normalized or broker-specific status |
+| `executed_qty` | NUMERIC NULL | broker | Filled quantity (generic) |
+| **`binance_cumulative_quote_qty`** | NUMERIC NULL | Binance `cumulativeQuoteQty` | Quote asset amount (Binance-specific) |
+| **`binance_transact_time`** | BIGINT NULL | Binance `transactTime` | Order time in ms (Binance-specific) |
+| **`book`** | TEXT NULL | risk_approved | Strategy / book identifier (e.g. `ma_cross`, `manual`) |
+| **`comment`** | TEXT NULL | risk_approved | Freetext comment for the order |
+| `created_at` | TIMESTAMPTZ | internal | |
+| `updated_at` | TIMESTAMPTZ | internal | |
+| `payload` | JSONB NULL | optional | Full broker response or extra; e.g. `payload.binance` for raw Binance blob |
+
+Indexes: `account_id`, `symbol`, `(account_id, book)`, `created_at`, `broker_order_id` (unique per broker if needed).
+
+### 3.2 Order schemas: Binance response → internal mapping
+
+Binance **place_order** returns (relevant): `orderId`, `symbol`, `status`, `clientOrderId`, `side`, `type`, `origQty`, `price`, `executedQty`, `timeInForce`, `transactTime`.  
+Binance **query_order** adds: `cumulativeQuoteQty`, `origQty`, etc.  
+Binance **cancel_order** returns same shape as query.
+
+- **Generic columns** (used for any broker): `internal_id`, `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, `price`, `time_in_force`, `status`, `executed_qty`.
+- **Binance-specific columns** (prefix `binance_`): `binance_cumulative_quote_qty` ← Binance `cumulativeQuoteQty`; `binance_transact_time` ← Binance `transactTime`. Other brokers get their own prefix (e.g. `bybit_*`).
+- Internal `internal_id` = our UUID; we send it as `newClientOrderId` → Binance returns it as `clientOrderId`.
+- Internal `broker_order_id` = Binance `orderId`.
+- `book` and `comment` are **not** sent to Binance; they are carried from `risk_approved` through OMS and stored in Postgres/Redis for audit and strategy attribution.
+
+### 3.3 Alembic workflow
 
 - Create revision: `alembic revision -m "add_booking_tables"` (or split: `add_accounts_orders`, `add_fills_positions_balances`).
 - Implement `upgrade()` and `downgrade()` in the new file under `alembic/versions/`.
@@ -85,17 +122,21 @@ Indexes: `account_id`, `symbol`, `executed_at` (fills), `(account_id, symbol)` (
 **Note:** Schemas are **defined and implemented per service** (see §12 Task checklist). OMS defines `risk_approved` input and `oms_fills` output; Booking defines `oms_fills` input (must match OMS output). This ensures each service owns its contract.
 
 **risk_approved (order to execute)** — defined in OMS (12.1.5)  
-- `order_id` (internal UUID or string)  
+- `order_id` (internal UUID or string; optional, OMS can generate)  
 - `broker` (e.g. `binance`) — OMS uses this to select the broker adapter.  
 - `account_id` (optional; default account if single)  
 - `symbol`, `side` (BUY/SELL), `quantity`, `order_type` (MARKET, LIMIT, etc.)  
-- `price` (optional; for LIMIT)  
+- `price` (optional; for LIMIT), `time_in_force` (optional; GTC, IOC, FOK)  
+- **`book`** (optional) — Strategy / book identifier (e.g. `ma_cross`, `manual`) for attribution.  
+- **`comment`** (optional) — Freetext comment; stored with order in Redis and Postgres.  
 - `strategy_id` (optional), `created_at` (ISO)
 
 **oms_fills (fill or reject)** — defined in OMS (12.1.5), consumed by Booking (12.2.5)  
 - `event_type`: `fill` | `reject`  
 - `order_id` (internal), `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`  
 - `executed_at` (ISO), `fill_id` (broker), optional `reject_reason` for rejections  
+- **`book`** (optional) — Pass-through from order for attribution.  
+- **`comment`** (optional) — Pass-through from order for audit.  
 
 Each service documents its schemas in code or a service README (e.g. `oms/README.md`, `booking/README.md`). Streams are created on first XADD.
 
@@ -112,15 +153,19 @@ The OMS is **broker-agnostic**. It routes orders to the appropriate broker adapt
 ### 5.1 Role
 
 - Consume from Redis stream `risk_approved` (XREAD block).
-- For each message: read `broker` (and optional `account_id`); **select broker adapter** for that broker; generate internal `order_id` if not set; persist to **SQLite** (orders table, status `pending`), including `broker` and `account_id`.
-- Call the adapter’s **place_order** (or equivalent); adapter talks to the broker API; OMS updates SQLite (e.g. `sent`).
-- Adapter notifies OMS of **fills** and **rejects** (unified format); OMS publishes to Redis stream `oms_fills` and updates SQLite status (`filled` / `rejected` / `cancelled`).
+- For each message: read `broker` (and optional `account_id`); **select broker adapter** for that broker; generate internal `order_id` if not set; persist to **Redis** (order hash, status indexes), including `broker` and `account_id`.
+- Call the adapter’s **place_order** (or equivalent); adapter talks to the broker API; OMS updates Redis (e.g. status `sent`).
+- Adapter notifies OMS of **fills** and **rejects** (unified format); OMS publishes to Redis stream `oms_fills` and updates Redis order status (`filled` / `rejected` / `cancelled`).
+- **Periodic sync:** Background job syncs orders from Redis to Postgres `orders` table (completed orders, or all); supports audit, reconciliation, and recovery.
 - If no adapter exists for the message’s `broker`, log and optionally publish a reject to `oms_fills` or a dead-letter stream.
 
-### 5.2 SQLite schema (OMS local, broker-agnostic)
+### 5.2 Redis staging schema (OMS, broker-agnostic)
 
-- **orders:** `id` (PK), `internal_id` (UUID, unique), `broker` (e.g. `binance`), `account_id` (optional), `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, `price`, `status` (pending, sent, filled, rejected, cancelled), `created_at`, `updated_at`, optional payload (JSON).  
-- Same schema regardless of broker; adapter-specific details can live in payload or a separate table if needed.
+- **orders:{order_id}** — Hash: `internal_id`, `broker`, `account_id`, `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, `price`, `time_in_force`, `status` (pending, sent, filled, rejected, cancelled), **`book`**, **`comment`**, `created_at`, `updated_at`, optional `executed_qty`, **`binance_cumulative_quote_qty`**, **`binance_transact_time`**, `payload` (JSON). Broker-agnostic fields plus `binance_*` when broker is Binance; other brokers use their own prefix in payload or separate keys.
+- **orders:by_status:{status}** — Set of order_id; e.g. `orders:by_status:pending`, `orders:by_status:filled`.
+- **orders:by_book:{book}** — Set of order_id; list orders by strategy/book.
+- **orders:by_broker_order_id:{broker_order_id}** — String value = order_id; O(1) lookup when fill event only has broker order id.
+- Use pipelines for atomic multi-key updates. No table structure; Redis hashes are O(1) for get/set.
 
 ### 5.3 Broker adapter interface
 
@@ -131,12 +176,12 @@ The OMS is **broker-agnostic**. It routes orders to the appropriate broker adapt
 
 ### 5.4 Config (generic)
 
-- `REDIS_URL`, SQLite path (e.g. `/data/oms.db`). Per-broker config (e.g. Binance API keys) is loaded by the adapter or via OMS config keyed by broker/account.
+- `REDIS_URL` (required). `DATABASE_URL` (optional; for periodic sync of orders to Postgres). Per-broker config (e.g. Binance API keys) is loaded by the adapter or via OMS config keyed by broker/account.
 
 ### 5.5 Deployment
 
-- Single **loop process**: XREAD `risk_approved` → route to adapter → handle adapter callbacks for fills/rejects → XADD `oms_fills`.  
-- Docker: service `oms`; image from `oms/`; connect to `multistrat` network; env: `REDIS_URL`, SQLite path; optional volume for SQLite. No broker-specific env in the generic OMS image if adapters load their own config (or pass broker vars through env with a prefix, e.g. `BINANCE_*`).
+- Single **loop process**: XREAD `risk_approved` → Redis order store → route to adapter → handle adapter callbacks for fills/rejects → Redis status update → XADD `oms_fills`. Optional background task: sync Redis orders to Postgres (e.g. every 30s or on terminal status).
+- Docker: service `oms`; image from `oms/`; connect to `multistrat` network; env: `REDIS_URL`, `DATABASE_URL` (if sync enabled). No broker-specific env in the generic OMS image if adapters load their own config (or pass broker vars through env with a prefix, e.g. `BINANCE_*`).
 
 ---
 
@@ -220,9 +265,9 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 - **Spot vs Futures:** Choose one for Phase 2 (e.g. **futures** for margin/leverage). Use the corresponding base URL and endpoints (e.g. `/fapi/v1/order` for futures).
 - **Order types:** Implement at least MARKET; add LIMIT and reduce-only (futures) as needed.
-- **Testnet:** Use Binance testnet for API keys and base URL; no real funds.
+- **Testnet:** Use Binance testnet for API keys and base URL; no real funds. For API key, signature, and symbol filter rules (e.g. -2014, -1022, -1013), see **docs/BINANCE_API_RULES.md**.
 - **Rate limits:** Respect Binance weight/limit; back off or queue if needed.
-- **Reconciliation:** Periodically compare OMS SQLite and Postgres fills with Binance “my trades” or order history.
+- **Reconciliation:** Periodically compare OMS Redis orders and Postgres `orders`/fills with Binance “my trades” or order history.
 
 ---
 
@@ -243,7 +288,7 @@ BINANCE_API_SECRET=
 
 ### 11.2 Per-service config
 
-- OMS (generic): `REDIS_URL`, SQLite path. Broker-specific vars (e.g. Binance) are used by the Binance adapter.
+- OMS (generic): `REDIS_URL`, `DATABASE_URL` (optional, for order sync to Postgres). Broker-specific vars (e.g. Binance) are used by the Binance adapter.
 - Binance adapter: `BINANCE_*` vars (or passed from OMS env).
 - Booking: `REDIS_URL`, `DATABASE_URL`.
 - Position Keeper: `DATABASE_URL`, `REDIS_URL`.
@@ -254,24 +299,25 @@ BINANCE_API_SECRET=
 
 **Bottom-up approach:** Build and unit-test each layer before integrating. Start with the lowest-level component (Binance API), then build up: adapter → OMS pieces → OMS integration → Booking pieces → Booking integration → Position Keeper pieces → Position Keeper integration. Each step should have unit tests before moving to the next.
 
-**Schema ownership:** Each service defines and implements its own schemas (SQLite, Postgres, Redis streams, Redis cache keys) as part of its implementation. OMS owns `risk_approved` input and `oms_fills` output schemas; Booking owns Postgres schema (Alembic) and `oms_fills` input schema (must match OMS output); Position Keeper owns its read/write schemas.
+**Schema ownership:** Each service defines and implements its own schemas (Redis structures, Postgres, Redis streams, Redis cache keys) as part of its implementation. OMS owns Redis order staging keys, `risk_approved` input and `oms_fills` output schemas; Booking owns Postgres schema (Alembic) and `oms_fills` input schema (must match OMS output); Position Keeper owns its read/write schemas.
 
 ### 12.1 OMS (build backwards: Binance API → adapter → OMS pieces → integration)
 
-- [ ] **12.1.1** **Binance API client** (lowest level): HTTP client for Binance REST (place order, query order, cancel); HMAC-SHA256 signing; support testnet/production URLs. **Unit test:** mock HTTP responses; verify signing, request format, error handling.
-- [ ] **12.1.2** **Binance fills listener** (websocket or poll): subscribe to user data stream or poll “my trades”; parse execution reports. **Unit test:** mock websocket messages or REST responses; verify fill/reject parsing.
+- [x] **12.1.1** **Binance API client** (lowest level): HTTP client for Binance REST (place order, query order, cancel); HMAC-SHA256 signing; support testnet/production URLs. **Unit test:** mock HTTP responses; verify signing, request format, error handling.
+- [x] **12.1.2** **Binance fills listener** (websocket or poll): subscribe to user data stream or poll “my trades”; parse execution reports. **Unit test:** mock websocket messages or REST responses; verify fill/reject parsing.
 - [ ] **12.1.3** **Binance broker adapter** (uses Binance client): implement adapter interface (`place_order`, `start_fill_listener(callback)`); convert Binance responses to unified fill/reject format. **Unit test:** mock Binance client; verify adapter calls client correctly and formats output.
-- [ ] **12.1.4** **OMS SQLite schema and persistence**: define schema (broker-agnostic: `broker`, `account_id`, order fields, status); implement store/update orders. **Unit test:** in-memory SQLite; verify CRUD operations.
-- [ ] **12.1.5** **OMS Redis stream schemas** (input/output): define `risk_approved` input schema (`broker`, `account_id`, `symbol`, `side`, `quantity`, `order_type`, `price`, etc.); define `oms_fills` output schema (`event_type`, `order_id`, `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `executed_at`, etc.). Document in code or `oms/README.md`. Streams are created on first XADD.
+- [ ] **12.1.4** **OMS Redis order store**: define Redis key layout (`orders:{order_id}` hash, `orders:by_status:{status}` set, `orders:by_broker_order_id:{broker_order_id}` for lookup); implement stage_order, update_status, update_fill_status, get_order, find_order_by_broker_order_id. Use pipelines for atomic updates. **Unit test:** fakeredis or mock Redis; verify CRUD and index updates.
+- [ ] **12.1.5** **OMS Redis stream schemas** (input/output): define `risk_approved` input schema (`broker`, `account_id`, `symbol`, `side`, `quantity`, `order_type`, `price`, `book`, `comment`, etc.); define `oms_fills` output schema (`event_type`, `order_id`, `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `executed_at`, `book`, `comment`, etc.). Align with §3.1 and §4.2. Document in code or `oms/README.md`. Streams are created on first XADD.
 - [ ] **12.1.6** **OMS Redis consumer** (XREAD from `risk_approved`): parse messages per `risk_approved` schema, handle blocking read. **Unit test:** mock Redis client; verify message parsing and error handling.
 - [ ] **12.1.7** **OMS broker adapter registry**: interface definition; registry (map `broker_name` → adapter); route by `broker`. **Unit test:** mock adapters; verify routing and error handling (unknown broker).
 - [ ] **12.1.8** **OMS Redis producer** (XADD to `oms_fills`): format unified fill/reject events per `oms_fills` schema. **Unit test:** mock Redis client; verify message format.
-- [ ] **12.1.9** **OMS integration** (wire pieces): Redis consumer → SQLite → adapter registry → adapter.place_order → adapter fill callback → SQLite update → Redis producer. **Integration test:** mock Redis streams and adapter; verify full flow for one order.
-- [ ] **12.1.10** Register Binance adapter in OMS; add `BINANCE_*` to `.env.example` and `.env`.
+- [ ] **12.1.9** **OMS integration** (wire pieces): Redis consumer → Redis order store → adapter registry → adapter.place_order → adapter fill callback → Redis status update → Redis producer. **Integration test:** mock Redis streams and adapter; verify full flow for one order.
+- [ ] **12.1.10** **OMS → Postgres order sync**: background task that syncs orders from Redis to Postgres `orders` table (e.g. completed orders only, or all; interval e.g. 30s). UPSERT by `internal_id`. **Unit test:** verify sync writes correct rows; idempotent on re-run.
+- [ ] **12.1.11** Register Binance adapter in OMS; add `BINANCE_*` to `.env.example` and `.env`.
 
 ### 12.2 Booking (build backwards: Postgres writes → Redis cache → consumer → integration)
 
-- [ ] **12.2.1** **Booking Postgres schema** (Alembic): create revision(s) for `accounts`, `orders`, `fills`, `positions`, `balances`, optional `margin_snapshots`; implement `upgrade()` and `downgrade()`. Run `alembic upgrade head`. **Unit test:** verify schema creation and indexes.
+- [ ] **12.2.1** **Booking Postgres schema** (Alembic): create revision(s) for `accounts`, `orders` (with `book`, `comment`, and Binance-mapped columns per §3.1), `fills`, `positions`, `balances`, optional `margin_snapshots`; implement `upgrade()` and `downgrade()`. Run `alembic upgrade head`. **Unit test:** verify schema creation and indexes.
 - [ ] **12.2.2** **Booking Postgres writes**: insert fills, update positions (add/reduce, avg price), update balances. **Unit test:** test Postgres (or test DB); verify SQL, idempotency (duplicate fill_id).
 - [ ] **12.2.3** **Booking Redis cache schema**: define key formats (`positions:{account_id}`, `balance:{account_id}:{asset}`, `margin:{account_id}`) and value formats (JSON or hash). Document in code or `booking/README.md`.
 - [ ] **12.2.4** **Booking Redis cache updates**: write cache keys per schema. **Unit test:** mock Redis client; verify key format and updates.
@@ -304,9 +350,10 @@ BINANCE_API_SECRET=
 - [ ] `docker compose up -d` brings up infra + OMS, Booking, Position Keeper (and optionally Risk).
 - [ ] **Test script** runs successfully: connects to Redis, XADDs one test order to `risk_approved` with `broker: "binance"`.
 - [ ] One test order injected via script flows: OMS routes to Binance adapter → Binance testnet → fill (or reject) → OMS publishes to `oms_fills` → Booking writes to Postgres (fills, positions, balances) and updates Redis cache.
+- [ ] OMS sync job (if enabled) populates Postgres `orders` from Redis; after sync, `orders` table has the test order row.
 - [ ] Position Keeper reads positions/balances and writes PnL/margin to Postgres or Redis.
-- [ ] In pgAdmin: `fills`, `positions`, `balances` (and optional `margin_snapshots`) reflect the test fill.
-- [ ] In RedisInsight: `oms_fills` stream has the fill event; cache keys (e.g. `positions:1`) are present and updated.
+- [ ] In pgAdmin: `orders`, `fills`, `positions`, `balances` (and optional `margin_snapshots`) reflect the test order and fill.
+- [ ] In RedisInsight: OMS order hashes (e.g. `orders:*`); `oms_fills` stream has the fill event; cache keys (e.g. `positions:1`) are present and updated.
 
 ---
 
@@ -322,12 +369,12 @@ multistrat/
 ├── oms/
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   ├── main.py             # generic loop: risk_approved → SQLite → adapter.place_order → adapter fills → oms_fills
+│   ├── main.py             # loop: risk_approved → Redis order store → adapter → fills → oms_fills; optional sync to Postgres
 │   ├── adapter.py          # broker adapter interface + registry
+│   ├── storage/            # optional: redis_order_store.py, sync job
 │   ├── brokers/
 │   │   ├── __init__.py
 │   │   └── binance.py      # Binance adapter (first broker)
-│   └── oms.db              # SQLite (or mount volume)
 ├── booking/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -360,7 +407,7 @@ multistrat/
 
 - **Binance API client:** Mock HTTP (e.g. `responses` in Python, `nock` in Node); test signing, request format, error handling, response parsing.
 - **Binance adapter:** Mock Binance client; test adapter calls client correctly, converts responses to unified format, handles errors.
-- **OMS SQLite:** In-memory SQLite; test CRUD, queries, idempotency.
+- **OMS Redis order store:** Mock Redis or fakeredis; test stage_order, update_status, update_fill_status, get_order, find_order_by_broker_order_id; verify index updates and pipelines.
 - **OMS Redis consumer/producer:** Mock Redis client (e.g. `fakeredis`); test XREAD parsing, XADD formatting, error handling.
 - **OMS adapter registry:** Mock adapters; test routing by `broker`, unknown broker handling.
 - **Booking Postgres writes:** Test Postgres (or testcontainers/test DB); test SQL, idempotency (duplicate fill_id).
@@ -370,7 +417,7 @@ multistrat/
 
 ### 16.2 Integration tests (wire pieces)
 
-- **OMS integration:** Mock Redis streams (`risk_approved`) and adapter; verify: consumer → SQLite → adapter.place_order → adapter callback → SQLite update → producer (`oms_fills`).
+- **OMS integration:** Mock Redis streams (`risk_approved`) and adapter; verify: consumer → Redis order store → adapter.place_order → adapter callback → Redis status update → producer (`oms_fills`).
 - **Booking integration:** Mock Redis stream (`oms_fills`); verify: consumer → Postgres writes → Redis cache updates.
 - **Position Keeper integration:** Mock Postgres/Redis data; verify: read → calculate → write loop.
 

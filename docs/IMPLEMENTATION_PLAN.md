@@ -66,10 +66,10 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
   - Define and document stream names: `strategy_orders`, `risk_approved`, `oms_fills`
   - Message schemas (JSON) for: order intent, risk-approved order, fill/reject
 - [ ] **OMS service (generic)**
-  - Single process, loop: consume from `risk_approved` (XREAD block); route by `broker` to a **broker adapter**; stage orders in SQLite (broker-agnostic schema); receive fills/rejects from adapter; publish unified events to `oms_fills`
+  - Single process, loop: consume from `risk_approved` (XREAD block); route by `broker` to a **broker adapter**; stage orders in **Redis** (hashes + status indexes, broker-agnostic); receive fills/rejects from adapter; publish unified events to `oms_fills`. **Periodic sync** of orders from Redis to Postgres `orders` table for audit and recovery.
   - **Broker adapter interface:** place_order, fill/reject callback; registry (e.g. `broker_name` → adapter). **Binance** is the first adapter: place order (REST), websocket or poll for fills, convert to unified format
-  - Config: REDIS_URL, SQLite path; Binance adapter: base URL, API key/secret, testnet
-  - Deploy as Docker service; connect to Redis and (optional) volume for SQLite
+  - Config: REDIS_URL, DATABASE_URL (optional, for order sync); Binance adapter: base URL, API key/secret, testnet
+  - Deploy as Docker service; connect to Redis and Postgres (for sync)
 - [ ] **Booking service**
   - Single process, loop: consume from `oms_fills` (XREAD block)
   - For each fill: update positions (add/subtract), update balances, compute margin if applicable
@@ -88,7 +88,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 - **Spot vs Futures:** Decide one first (e.g. futures for margin/leverage). Implement order types used (market, limit, reduce-only if futures).
 - **Auth:** Use API key + secret; sign REST requests; support testnet and production base URLs.
 - **Fills:** Prefer websocket for fills (e.g. user data stream) to reduce latency; fallback to REST poll.
-- **Ids:** Map Binance `clientOrderId` / `orderId` to internal order id in SQLite and Postgres for idempotency and reconciliation.
+- **Ids:** Map Binance `clientOrderId` / `orderId` to internal order id in Redis (and Postgres via sync) for idempotency and reconciliation.
 
 ### Acceptance
 
@@ -209,7 +209,7 @@ The plans do not yet define automated tests for every deliverable. Below is a su
 | Phase | Suggested tests | Notes |
 |-------|-----------------|--------|
 | **1** | **Smoke / verification:** Compose up succeeds; Postgres accepts connections; Redis `PING`; `alembic upgrade head` idempotent. | Can be a small script or CI step (e.g. `docker-compose up -d && psql $DATABASE_URL -c 'SELECT 1' && redis-cli -u $REDIS_URL ping && alembic current`). |
-| **2** | **Integration:** OMS consumes from `risk_approved`, writes SQLite, calls Binance (testnet), publishes to `oms_fills`; Booking consumes `oms_fills`, updates Postgres/Redis. **E2E:** One test order → fill → positions/balances updated. | Mock or testnet only; avoid real money. |
+| **2** | **Integration:** OMS consumes from `risk_approved`, stages in Redis, syncs to Postgres orders; calls Binance (testnet), publishes to `oms_fills`; Booking consumes `oms_fills`, updates Postgres/Redis. **E2E:** One test order → fill → positions/balances/orders updated. | Mock or testnet only; avoid real money. |
 | **3** | **Integration:** Admin publishes command to stream; target service consumes and reacts. **Smoke:** Manual order and cancel from CLI or GUI. | |
 | **4** | **Integration:** Market data service writes candles to Postgres and latest to Redis; query by symbol/interval. **Smoke:** After run, candles exist for configured symbols. | |
 | **5** | **Unit:** Strategy `next_signal()` given mock state; Risk checks (limits, margin). **Integration:** Strategy → Risk → `risk_approved`; full E2E with testnet. | |
@@ -229,7 +229,7 @@ multistrat/
 ├── docs/
 │   └── IMPLEMENTATION_PLAN.md
 ├── migrations/          # Postgres migrations
-├── oms/                  # OMS service (Binance + SQLite)
+├── oms/                  # OMS service (Redis staging + Postgres sync, Binance adapter)
 ├── booking/              # Booking service
 ├── position_keeper/      # Position Keeper service
 ├── risk/                 # Risk service (minimal in P2, full in P5)

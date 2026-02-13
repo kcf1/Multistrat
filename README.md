@@ -13,8 +13,8 @@ The system is built on a microservices architecture with event-driven communicat
   - `strategy_orders`: Order intents from strategies
   - `risk_approved`: Risk-approved orders
   - `oms_fills`: Order fills from the Order Management System
-- **Postgres**: Central database for persistent data storage
-- **SQLite**: Staging database within the OMS for order management
+- **Postgres**: Central database for persistent data storage (orders audit, fills, positions, balances)
+- **Redis**: OMS order staging (hashes + indexes); periodic sync of orders to Postgres for audit
 
 ## Core Services
 
@@ -38,7 +38,7 @@ All core services operate as infinite loop-based processes that consume and prod
 
 ### Order Management System (OMS)
 - Consumes approved orders from `risk_approved` stream
-- Stages orders in SQLite database
+- Stages orders in Redis (fast updates); periodically syncs to Postgres `orders` table for audit
 - Executes orders via broker API (polling/websocket)
 - Publishes fills and rejections to `oms_fills` stream
 

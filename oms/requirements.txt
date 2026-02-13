@@ -1,0 +1,8 @@
+# OMS service dependencies
+requests>=2.31.0
+redis>=5.0.0
+websocket-client>=1.6.0
+
+# Testing (for unit tests)
+pytest>=7.4.0
+responses>=0.24.0
