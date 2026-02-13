@@ -11,6 +11,8 @@
 | **Orchestration** | Docker Compose |
 | **Postgres** | 16-alpine, with version-controlled migrations only (no schema in Phase 2 yet) |
 | **Redis** | 7-alpine |
+| **pgAdmin** | dpage/pgadmin4 — web UI for Postgres (optional; useful for inspecting DB and running SQL) |
+| **Redis GUI** | redis/redisinsight — web UI for Redis (optional; browse keys, streams, CLI) |
 | **Postgres versioning** | [Alembic](https://alembic.sqlalchemy.org/) — migrations in repo; single source of truth for schema |
 
 ---
@@ -116,7 +118,7 @@ No tables for booking, positions, or market data in Phase 1; those are added in 
 
 ### 4.1 File: `docker-compose.yml`
 
-- **Services:** `postgres`, `redis`.
+- **Services:** `postgres`, `redis`, `pgadmin`, `redisinsight`.
 - **Network:** One custom network (e.g. `multistrat`) so future app containers can attach and reach both.
 
 Example structure:
@@ -155,18 +157,58 @@ services:
     networks:
       - multistrat
 
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    ports:
+      - "5050:80"
+    restart: unless-stopped
+    networks:
+      - multistrat
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redisinsight:
+    image: redis/redisinsight:latest
+    ports:
+      - "5540:5540"
+    volumes:
+      - redisinsight_data:/data
+    restart: unless-stopped
+    networks:
+      - multistrat
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
+  redisinsight_data:
 
 networks:
   multistrat:
     driver: bridge
 ```
 
-- Use `.env` for `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` so no secrets in the file.
+- Use `.env` for `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `PGADMIN_DEFAULT_EMAIL`, `PGADMIN_DEFAULT_PASSWORD` so no secrets in the file.
 - No Redis volume in Phase 1 (add later if you want AOF).
 
-### 4.2 No init SQL for schema
+### 4.2 pgAdmin
+
+- **Image:** `dpage/pgadmin4:latest`. Web UI for Postgres; useful for browsing tables, running SQL, and inspecting migrations.
+- **Login:** Open http://localhost:5050 and sign in with `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD`.
+- **Add server:** In pgAdmin, register a new server; host is `postgres` (Docker service name), port `5432`, username/password/database from `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`.
+
+### 4.3 RedisInsight (Redis GUI)
+
+- **Image:** `redis/redisinsight:latest`. Web UI for Redis; browse keys, inspect streams, use CLI.
+- **URL:** http://localhost:5540. First time: add a Redis database; host is `redis` (Docker service name), port `6379` (no password unless you add one later).
+- **Volume:** `redisinsight_data` persists added connections and settings.
+
+### 4.4 No init SQL for schema
 
 - Do **not** put application schema in `/docker-entrypoint-initdb.d/`. Schema is managed only by Alembic and `alembic/versions/` so it stays version-controlled and repeatable.
 
@@ -193,6 +235,10 @@ POSTGRES_USER=multistrat
 POSTGRES_PASSWORD=changeme
 POSTGRES_DB=multistrat
 
+# pgAdmin (web UI: http://localhost:5050)
+PGADMIN_DEFAULT_EMAIL=admin@local.dev
+PGADMIN_DEFAULT_PASSWORD=admin
+
 # Connection strings (for apps and Alembic)
 DATABASE_URL=postgresql://multistrat:changeme@localhost:5432/multistrat
 REDIS_URL=redis://localhost:6379
@@ -212,7 +258,7 @@ REDIS_URL=redis://localhost:6379
 
 Execute in this order: define and start the stack first so Postgres is running and reachable, then set up Alembic and run migrations.
 
-- [ ] **7.1** Add `docker-compose.yml` with `postgres` and `redis` as above; use `.env` for Postgres vars.
+- [ ] **7.1** Add `docker-compose.yml` with `postgres`, `redis`, `pgadmin`, and `redisinsight`; use `.env` for Postgres and pgAdmin vars.
 - [ ] **7.2** Add `.env.example` and ensure `.env` is in `.gitignore` (copy to `.env` and set values).
 - [ ] **7.3** Start stack: `docker-compose up -d` (Compose will pull images if needed); wait for Postgres and Redis to be healthy. Verify with `docker-compose ps` and e.g. `psql "$DATABASE_URL" -c 'SELECT 1'`.
 - [ ] **7.4** Add `requirements.txt` (alembic, psycopg2-binary, optional python-dotenv). Then install: `pip install -r requirements.txt` — use a venv (e.g. `python -m venv .venv`) if you want isolation, or system Python is fine.
@@ -227,7 +273,9 @@ Execute in this order: define and start the stack first so Postgres is running a
 
 These can be run manually or turned into a small script/CI step (see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md#testing-corresponding-to-each-phase)).
 
-- [ ] `docker-compose up -d` succeeds; `docker-compose ps` shows both services healthy.
+- [ ] `docker-compose up -d` succeeds; `docker-compose ps` shows postgres, redis, pgadmin, and redisinsight healthy (or running).
+- [ ] pgAdmin: http://localhost:5050 — login with `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD`; add server host `postgres`, port 5432, user/password/db from `.env`.
+- [ ] RedisInsight: http://localhost:5540 — add Redis database host `redis`, port 6379; browse keys and streams.
 - [ ] From host: `psql "$DATABASE_URL" -c '\dt'` shows `alembic_version` (and default `pg_*` catalogs). No application tables yet if using Option B with empty initial revision.
 - [ ] `psql "$DATABASE_URL" -c 'SELECT * FROM alembic_version;'` shows one row (revision id).
 - [ ] `alembic current` matches that revision; running `alembic upgrade head` again does nothing (idempotent).

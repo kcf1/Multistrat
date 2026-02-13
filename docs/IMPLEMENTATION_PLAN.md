@@ -13,7 +13,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 ### Deliverables
 
 - [ ] **Docker Compose stack**
-  - `docker-compose.yml` with services: `postgres`, `redis`
+  - `docker-compose.yml` with services: `postgres`, `redis`, `pgadmin` (Postgres UI at http://localhost:5050), `redisinsight` (Redis UI at http://localhost:5540)
   - Health checks and restart policies
   - Named volumes for Postgres data; (optional) Redis persistence later
 - [ ] **Postgres (version-controlled)**
@@ -40,7 +40,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 ### Acceptance
 
-- [ ] `docker-compose up -d` succeeds; `docker-compose ps` shows postgres and redis healthy
+- [ ] `docker-compose up -d` succeeds; `docker-compose ps` shows postgres, redis, pgadmin, and redisinsight healthy (or running)
 - [ ] Alembic applies initial revision; `alembic_version` has one row; `alembic upgrade head` re-run is idempotent
 - [ ] Can connect to Postgres and Redis from host (e.g. psql, redis-cli) using `.env` values
 

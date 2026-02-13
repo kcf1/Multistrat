@@ -107,20 +107,42 @@ See **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** for detailed 
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- Access to market data feeds
-- Broker API credentials
+- **Docker** and **Docker Compose** (or `docker compose` v2)
+- **Python 3.x** (for Alembic migrations; optional for later phases)
 
-### Installation
+### Installation (Phase 1: infra + migrations)
 
-1. Clone the repository
-2. Configure environment variables (see `.env.example`)
-3. Start services with Docker Compose:
+1. **Clone the repository**
    ```bash
-   docker-compose up -d
+   git clone <repo-url>
+   cd Multistrat
    ```
 
-### Configuration
+2. **Configure environment**
+   - Copy `.env.example` to `.env`
+   - Edit `.env` if you need different Postgres/pgAdmin credentials or ports
+
+3. **Start the stack**
+   ```bash
+   docker compose up -d
+   ```
+   This starts Postgres, Redis, pgAdmin, and RedisInsight. Images are pulled automatically if missing.
+
+4. **Run database migrations**
+   ```bash
+   pip install -r requirements.txt
+   python -m alembic upgrade head
+   ```
+   (Use a virtualenv if you prefer: `python -m venv .venv`, then activate and run the same commands.)
+
+5. **Verify**
+   - **Compose:** `docker compose ps` — all services should be up (and healthy where applicable).
+   - **Postgres:** `docker compose exec postgres psql -U multistrat -d multistrat -c "SELECT 1"`
+   - **Redis:** `docker compose exec redis redis-cli ping` (should return `PONG`)
+   - **pgAdmin:** http://localhost:5050 — log in with `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` from `.env`; add server host `postgres`, port `5432`, user/password/db from `.env`.
+   - **RedisInsight:** http://localhost:5540 — add Redis host `redis`, port `6379`.
+
+### Configuration (later phases)
 
 - Configure market data sources in `config/market_data.yml`
 - Set broker API credentials in environment variables
