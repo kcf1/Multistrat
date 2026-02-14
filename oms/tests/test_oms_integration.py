@@ -104,7 +104,7 @@ def test_oms_integration_sent_then_fill_callback_produces(redis_client, store):
     order = store.get_order(result["order_id"])
     assert order["status"] == "sent"
 
-    # Simulate fill callback (as adapter would call it)
+    # Simulate fill callback (as adapter would call it; Binance sends order_status + cumulative)
     fill_cb = make_fill_callback(redis_client, store)
     fill_cb({
         "event_type": "fill",
@@ -118,6 +118,8 @@ def test_oms_integration_sent_then_fill_callback_produces(redis_client, store):
         "fee_asset": "BNB",
         "executed_at": "2025-01-01T12:00:00Z",
         "fill_id": "trade-1",
+        "order_status": "FILLED",
+        "executed_qty_cumulative": 0.001,
     })
 
     order2 = store.get_order(result["order_id"])
@@ -156,3 +158,104 @@ def test_oms_integration_unknown_broker_rejects(redis_client, store):
     entries = read_latest(redis_client, OMS_FILLS_STREAM, count=1)
     assert len(entries) == 1
     assert entries[0][1]["event_type"] == "reject"
+
+
+def test_oms_integration_partial_then_full_fill_status_and_cumulative(redis_client, store):
+    """Fill callback: Binance order_status PARTIALLY_FILLED -> partially_filled + cumulative; FILLED -> filled."""
+    from oms.redis_flow import make_fill_callback
+
+    order_id = "ord-partial-full"
+    store.stage_order(order_id, {
+        "broker": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 1.0,
+        "order_type": "LIMIT",
+        "book": "test",
+    })
+    store.update_status(order_id, "sent", "pending", extra_fields={"broker_order_id": "b-123"})
+
+    fill_cb = make_fill_callback(redis_client, store)
+
+    # First fill: PARTIALLY_FILLED, cumulative 0.3
+    fill_cb({
+        "event_type": "fill",
+        "order_id": order_id,
+        "broker_order_id": "b-123",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 0.3,
+        "price": 50000,
+        "fee": 0,
+        "fee_asset": "BNB",
+        "executed_at": "2025-01-01T12:00:00Z",
+        "fill_id": "t1",
+        "order_status": "PARTIALLY_FILLED",
+        "executed_qty_cumulative": 0.3,
+    })
+    order = store.get_order(order_id)
+    assert order["status"] == "partially_filled"
+    assert order.get("executed_qty") == 0.3
+
+    # Second fill: FILLED, cumulative 1.0
+    fill_cb({
+        "event_type": "fill",
+        "order_id": order_id,
+        "broker_order_id": "b-123",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 0.7,
+        "price": 50010,
+        "fee": 0,
+        "fee_asset": "BNB",
+        "executed_at": "2025-01-01T12:00:01Z",
+        "fill_id": "t2",
+        "order_status": "FILLED",
+        "executed_qty_cumulative": 1.0,
+    })
+    order2 = store.get_order(order_id)
+    assert order2["status"] == "filled"
+    assert order2.get("executed_qty") == 1.0
+
+
+def test_oms_integration_fill_callback_accumulates_when_no_cumulative(redis_client, store):
+    """When event has no executed_qty_cumulative, callback accumulates incremental quantity."""
+    from oms.redis_flow import make_fill_callback
+
+    order_id = "ord-accum"
+    store.stage_order(order_id, {"broker": "binance", "symbol": "BTCUSDT", "side": "BUY", "quantity": 1.0})
+    store.update_status(order_id, "sent", "pending", extra_fields={"broker_order_id": "b-accum"})
+
+    fill_cb = make_fill_callback(redis_client, store)
+
+    fill_cb({
+        "event_type": "fill",
+        "order_id": order_id,
+        "broker_order_id": "b-accum",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 0.2,
+        "price": 50000,
+        "order_status": "PARTIALLY_FILLED",
+        "executed_at": "2025-01-01T12:00:00Z",
+        "fill_id": "t1",
+    })
+    order = store.get_order(order_id)
+    assert order["status"] == "partially_filled"
+    assert order.get("executed_qty") == 0.2
+
+    fill_cb({
+        "event_type": "fill",
+        "order_id": order_id,
+        "broker_order_id": "b-accum",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 0.5,
+        "price": 50010,
+        "order_status": "FILLED",
+        "executed_at": "2025-01-01T12:00:01Z",
+        "fill_id": "t2",
+    })
+    order2 = store.get_order(order_id)
+    assert order2["status"] == "filled"
+    assert order2.get("executed_qty") == 0.7

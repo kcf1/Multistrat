@@ -99,6 +99,29 @@ EXECUTION_REPORT_REJECTED = {
     "V": "NONE",
 }
 
+EXECUTION_REPORT_TRADE_FILLED = {
+    "e": "executionReport",
+    "E": 1499405658659,
+    "s": "ETHBTC",
+    "c": "my-internal-order-uuid-123",
+    "S": "BUY",
+    "o": "LIMIT",
+    "f": "GTC",
+    "q": "1.00000000",
+    "p": "0.10264410",
+    "x": "TRADE",
+    "X": "FILLED",
+    "r": "NONE",
+    "i": 4293153,
+    "l": "0.50000000",
+    "z": "1.00000000",
+    "L": "0.10264410",
+    "n": "0.0001",
+    "N": "BNB",
+    "T": 1499405658658,
+    "t": 12346,
+}
+
 EXECUTION_REPORT_NEW = {
     "e": "executionReport",
     "E": 1499405658650,
@@ -138,6 +161,8 @@ class TestParseExecutionReport:
         assert out["fill_id"] == "12345"
         assert "executed_at" in out
         assert out["executed_at"].endswith("Z") or "+" in out["executed_at"]
+        assert out.get("order_status") == "PARTIALLY_FILLED"
+        assert out.get("executed_qty_cumulative") == 0.5
 
     def test_rejected_returns_reject(self):
         """REJECTED execution type produces event_type=reject with reject_reason."""
@@ -153,6 +178,16 @@ class TestParseExecutionReport:
         assert out["price"] == 0.0
         assert out["fee"] == 0.0
         assert out["fee_asset"] is None
+
+    def test_trade_filled_returns_order_status_and_cumulative(self):
+        """TRADE with X=FILLED returns order_status FILLED and executed_qty_cumulative."""
+        out = parse_execution_report(EXECUTION_REPORT_TRADE_FILLED)
+        assert out is not None
+        assert out["event_type"] == "fill"
+        assert out.get("order_status") == "FILLED"
+        assert out.get("executed_qty_cumulative") == 1.0
+        assert out["quantity"] == 0.5
+        assert out["broker_order_id"] == "4293153"
 
     def test_new_returns_none(self):
         """NEW execution type is not a fill or reject -> None."""

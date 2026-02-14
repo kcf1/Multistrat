@@ -33,8 +33,36 @@ def make_fill_callback(
         if not order_id:
             return
 
-        status = "filled" if event.get("event_type") == "fill" else "rejected"
-        executed_qty = event.get("quantity") if status == "filled" else None
+        if event.get("event_type") != "fill":
+            status = "rejected"
+            executed_qty = None
+        else:
+            # Map Binance order_status (X) to Redis status; use cumulative qty or accumulate
+            binance_order_status = (event.get("order_status") or "").strip().upper()
+            if binance_order_status == "FILLED":
+                status = "filled"
+            elif binance_order_status == "PARTIALLY_FILLED":
+                status = "partially_filled"
+            else:
+                status = "partially_filled"  # NEW or unknown: treat as partial
+
+            cumulative = event.get("executed_qty_cumulative")
+            if cumulative is not None:
+                executed_qty = float(cumulative)
+            else:
+                order = store.get_order(order_id) or {}
+                current = order.get("executed_qty")
+                try:
+                    prev = float(current) if current is not None else 0.0
+                except (TypeError, ValueError):
+                    prev = 0.0
+                incremental = event.get("quantity") or 0
+                try:
+                    inc = float(incremental) if incremental is not None else 0.0
+                except (TypeError, ValueError):
+                    inc = 0.0
+                executed_qty = prev + inc
+
         store.update_fill_status(order_id, status, executed_qty=executed_qty)
 
         order = store.get_order(order_id) or {}

@@ -127,6 +127,13 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         else:
             executed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+        # Binance order status X: NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED
+        # z: cumulative executed quantity (for partial/full fill handling in OMS)
+        try:
+            executed_qty_cumulative = float(event.get("z", 0) or 0)
+        except (TypeError, ValueError):
+            executed_qty_cumulative = None
+
         return {
             "event_type": "fill",
             "order_id": event.get("c") or "",  # clientOrderId
@@ -139,6 +146,8 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "fee_asset": fee_asset,
             "executed_at": executed_at,
             "fill_id": str(event.get("t", "")),  # trade id
+            "order_status": order_status or "",  # X: PARTIALLY_FILLED, FILLED
+            "executed_qty_cumulative": executed_qty_cumulative,  # z: cumulative filled qty
         }
 
     # Reject: execution type REJECTED or order status REJECTED

@@ -156,13 +156,14 @@ The OMS is **broker-agnostic**. It routes orders to the appropriate broker adapt
 - For each message: read `broker` (and optional `account_id`); **select broker adapter** for that broker; generate internal `order_id` if not set; persist to **Redis** (order hash, status indexes), including `broker` and `account_id`.
 - Call the adapter’s **place_order** (or equivalent); adapter talks to the broker API; OMS updates Redis (e.g. status `sent`).
 - Adapter notifies OMS of **fills** and **rejects** (unified format); OMS publishes to Redis stream `oms_fills` and updates Redis order status (`filled` / `rejected` / `cancelled`).
+- **Partial/full fill:** Listener (Binance) exposes broker order status (`X`: PARTIALLY_FILLED, FILLED) and cumulative executed qty (`z`) in the unified event. OMS callback maps `X` to Redis status `partially_filled` or `filled`; uses cumulative qty when present, otherwise accumulates per-fill quantity so `executed_qty` in Redis is always cumulative.
 - **Periodic sync:** Background job syncs orders from Redis to Postgres `orders` table (completed orders, or all); supports audit, reconciliation, and recovery.
 - If no adapter exists for the message’s `broker`, log and optionally publish a reject to `oms_fills` or a dead-letter stream.
 
 ### 5.2 Redis staging schema (OMS, broker-agnostic)
 
-- **orders:{order_id}** — Hash: `internal_id`, `broker`, `account_id`, `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, `price`, `time_in_force`, `status` (pending, sent, filled, rejected, cancelled), **`book`**, **`comment`**, `created_at`, `updated_at`, optional `executed_qty`, **`binance_cumulative_quote_qty`**, **`binance_transact_time`**, `payload` (JSON). Broker-agnostic fields plus `binance_*` when broker is Binance; other brokers use their own prefix in payload or separate keys.
-- **orders:by_status:{status}** — Set of order_id; e.g. `orders:by_status:pending`, `orders:by_status:filled`.
+- **orders:{order_id}** — Hash: `internal_id`, `broker`, `account_id`, `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, `price`, `time_in_force`, `status` (pending, sent, **partially_filled**, filled, rejected, cancelled), **`book`**, **`comment`**, `created_at`, `updated_at`, optional **`executed_qty`** (cumulative), **`binance_cumulative_quote_qty`**, **`binance_transact_time`**, `payload` (JSON). Broker-agnostic fields plus `binance_*` when broker is Binance; other brokers use their own prefix in payload or separate keys.
+- **orders:by_status:{status}** — Set of order_id; e.g. `orders:by_status:pending`, `orders:by_status:partially_filled`, `orders:by_status:filled`.
 - **orders:by_book:{book}** — Set of order_id; list orders by strategy/book.
 - **orders:by_broker_order_id:{broker_order_id}** — String value = order_id; O(1) lookup when fill event only has broker order id.
 - Use pipelines for atomic multi-key updates. No table structure; Redis hashes are O(1) for get/set.
@@ -312,6 +313,7 @@ BINANCE_API_SECRET=
 - [x] **12.1.7** **OMS broker adapter registry**: interface definition; registry (map `broker_name` → adapter); route by `broker`. **Unit test:** mock adapters; verify routing and error handling (unknown broker).
 - [x] **12.1.8** **OMS Redis producer** (XADD to `oms_fills`): format unified fill/reject events per `oms_fills` schema. **Unit test:** mock Redis client; verify message format.
 - [x] **12.1.9** **OMS integration** (wire pieces): Redis consumer → Redis order store → adapter registry → adapter.place_order → adapter fill callback → Redis status update → Redis producer. **Integration test:** mock Redis streams and adapter; verify full flow for one order.
+- [x] **Partial/full fill (OMS + Binance listener):** Listener exposes Binance `order_status` (X) and `executed_qty_cumulative` (z); OMS callback maps to Redis status `partially_filled` | `filled` and stores cumulative `executed_qty` (or accumulates when z absent). See §5.1. **Unit test:** fills listener parser (order_status, executed_qty_cumulative); OMS integration (partial then full, accumulate fallback).
 - [ ] **12.1.10** **OMS → Postgres order sync**: background task that syncs orders from Redis to Postgres `orders` table (e.g. completed orders only, or all; interval e.g. 30s). UPSERT by `internal_id`. **Unit test:** verify sync writes correct rows; idempotent on re-run.
 - [ ] **12.1.11** Register Binance adapter in OMS; add `BINANCE_*` to `.env.example` and `.env`.
 
