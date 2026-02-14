@@ -10,6 +10,7 @@ Tests use mocked HTTP responses to verify:
 import hashlib
 import hmac
 import json
+import time
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -18,6 +19,16 @@ import requests.exceptions
 import responses
 
 from oms.brokers.binance.api_client import BinanceAPIClient, BinanceAPIError
+
+
+@pytest.fixture(autouse=True)
+def disable_time_sync():
+    """Disable server-time sync in unit tests so only the mocked API request is made."""
+    def _no_sync(self):
+        self._time_offset_ms = 0
+        self._time_offset_fetched_at = time.time()
+    with patch.object(BinanceAPIClient, '_ensure_time_sync', _no_sync):
+        yield
 
 
 @pytest.fixture

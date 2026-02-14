@@ -5,9 +5,12 @@ Generic order router that consumes from `risk_approved` stream and dispatches to
 ## Structure
 
 - `brokers/` - Broker adapter implementations
-  - `binance/` - Binance broker adapter
-    - `api_client.py` - Low-level Binance REST API client (task 12.1.1)
-    - `tests/` - Unit tests
+  - `base.py` - Broker adapter interface (Protocol: `place_order`, `start_fill_listener`)
+  - `binance/` - Binance broker adapter (task 12.1.3)
+    - `api_client.py` - Low-level Binance REST API client; server-time sync (task 12.1.1)
+    - `fills_listener.py` - User data stream (ws-api or listenKey); unified fill/reject parsing (task 12.1.2)
+    - `adapter.py` - BinanceBrokerAdapter: place_order, start_fill_listener, stop_fill_listener
+    - `tests/` - Unit tests (mocked) and testnet integration tests
 
 ## Development
 
@@ -33,7 +36,7 @@ set RUN_BINANCE_TESTNET=1
 pytest oms/brokers/binance/tests/test_testnet.py -v
 ```
 
-Set `RUN_BINANCE_TESTNET=1` and `BINANCE_API_KEY` / `BINANCE_API_SECRET` (and optionally `BINANCE_BASE_URL`). If `python-dotenv` is installed, variables are loaded from the repo root `.env`.
+Set `RUN_BINANCE_TESTNET=1` and `BINANCE_API_KEY` / `BINANCE_API_SECRET` (and optionally `BINANCE_BASE_URL`). If `python-dotenv` is installed, variables are loaded from the repo root `.env`. Fill listener uses WebSocket API (ws-api) by default; if ws-api does not connect on testnet, see `docs/BINANCE_API_RULES.md` §6 (timestamp sync, network, testnet availability).
 
 ## Redis Stream Schemas
 

@@ -337,6 +337,8 @@ class BinanceFillsListenerWsApi:
             raise ValueError("No callback provided (constructor or start())")
 
         self._stop.clear()
+        # Pre-sync in this thread so on_open has a valid offset even if GET fails from WS thread
+        self._client._ensure_time_sync()
         ws_url = self._ws_api_url
         logger.info("Binance WS API user data stream, connecting to %s", ws_url[:50] + "...")
 
@@ -370,9 +372,13 @@ class BinanceFillsListenerWsApi:
 
         def on_open(_ws: Any) -> None:
             # Build and send userDataStream.subscribe.signature (HMAC)
+            # Use server-time-synced timestamp so Binance does not reject with timestamp error
+            self._client._ensure_time_sync()
+            local_ms = int(time.time() * 1000)
+            timestamp = local_ms + (self._client._time_offset_ms or 0)
             params = {
                 "apiKey": self._client.api_key,
-                "timestamp": int(time.time() * 1000),
+                "timestamp": timestamp,
                 "recvWindow": 5000,
             }
             params["signature"] = self._client._sign_request(params)

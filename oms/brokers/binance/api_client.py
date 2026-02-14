@@ -3,6 +3,7 @@ Binance API client (lowest level).
 
 HTTP client for Binance REST API with HMAC-SHA256 signing.
 Supports testnet and production URLs.
+Syncs request timestamp with Binance server time to avoid -1021 (timestamp ahead/behind).
 """
 
 import hashlib
@@ -12,6 +13,10 @@ from typing import Dict, Optional
 from urllib.parse import urlencode
 
 import requests
+
+
+# Refresh server-time offset after this many seconds
+TIME_OFFSET_REFRESH_INTERVAL = 300
 
 
 class BinanceAPIError(Exception):
@@ -26,6 +31,7 @@ class BinanceAPIClient:
     Handles:
     - HMAC-SHA256 request signing
     - Testnet vs production URLs
+    - Server time sync (avoids -1021 timestamp errors)
     - Place order, query order, cancel order endpoints
     """
     
@@ -63,7 +69,38 @@ class BinanceAPIClient:
         self.session.headers.update({
             'X-MBX-APIKEY': self.api_key
         })
-    
+        # Server time sync: offset in ms to add to local time to get Binance server time
+        self._time_offset_ms: Optional[int] = None
+        self._time_offset_fetched_at: Optional[float] = None
+
+    def _fetch_time_offset(self) -> None:
+        """Fetch Binance server time and set _time_offset_ms (server - local)."""
+        endpoint = '/api/v3/time'
+        url = f"{self.base_url}{endpoint}"
+        try:
+            response = self.session.get(url, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            server_time_ms = int(data.get('serverTime', 0))
+            local_ms = int(time.time() * 1000)
+            self._time_offset_ms = server_time_ms - local_ms
+            self._time_offset_fetched_at = time.time()
+        except Exception:
+            # On failure, preserve existing offset so REST/wsapi can keep using last good sync
+            if self._time_offset_ms is None:
+                self._time_offset_ms = 0
+            # Do not update _time_offset_fetched_at so next _ensure_time_sync will retry
+
+    def _ensure_time_sync(self) -> None:
+        """Refresh server-time offset if not set or stale."""
+        now = time.time()
+        if (
+            self._time_offset_ms is None
+            or self._time_offset_fetched_at is None
+            or (now - self._time_offset_fetched_at) > TIME_OFFSET_REFRESH_INTERVAL
+        ):
+            self._fetch_time_offset()
+
     def _sign_request(self, params: Dict) -> str:
         """
         Generate HMAC-SHA256 signature for request parameters.
@@ -84,7 +121,7 @@ class BinanceAPIClient:
     
     def _prepare_params(self, params: Dict) -> Dict:
         """
-        Prepare parameters: add timestamp and signature.
+        Prepare parameters: add timestamp (synced with Binance server) and signature.
         
         Args:
             params: Request parameters
@@ -92,8 +129,10 @@ class BinanceAPIClient:
         Returns:
             Parameters with timestamp and signature
         """
+        self._ensure_time_sync()
+        local_ms = int(time.time() * 1000)
         params = params.copy()
-        params['timestamp'] = int(time.time() * 1000)
+        params['timestamp'] = local_ms + (self._time_offset_ms or 0)
         params['signature'] = self._sign_request(params)
         return params
     

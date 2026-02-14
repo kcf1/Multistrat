@@ -17,6 +17,7 @@ What the tests do (no mocks):
 - test_user_data_stream_*: create listen key, keepalive, close (no order).
 - test_place_order_then_cancel: place a limit BUY far from market, then cancel (no fill).
 - test_fills_listener_*: connect WebSocket to user stream, run briefly, stop (no order).
+- test_adapter_*: BinanceBrokerAdapter place_order and start_fill_listener against testnet.
 """
 
 import os
@@ -310,15 +311,15 @@ class TestBinanceTestnetFillsListener:
 
         thread = threading.Thread(target=run_listener, daemon=True)
         thread.start()
-        # Wait for WebSocket to open so we know the stream is connected to this account
-        for _ in range(50):
+        # Wait for WebSocket to open and subscription confirm (ws-api can be slow on testnet)
+        for _ in range(225):
             time.sleep(0.2)
             if listener.stream_connected:
                 break
         if not listener.stream_connected:
             listener.stop()
             thread_done.wait(timeout=5)
-            pytest.skip("WebSocket did not connect within 10s (stream not bound to account yet)")
+            pytest.skip("WebSocket did not connect within 45s (stream not bound to account yet)")
 
         try:
             # Minimal market BUY; may fail with -2010 insufficient balance on testnet
@@ -343,8 +344,8 @@ class TestBinanceTestnetFillsListener:
 
         broker_order_id = str(order_resp.get("orderId") or order_resp.get("orderid") or "")
 
-        # Wait up to 8s for fill event
-        for _ in range(80):
+        # Wait up to 15s for fill event (testnet can be slow to push executionReport)
+        for _ in range(150):
             time.sleep(0.1)
             if received and received[-1].get("event_type") == "fill":
                 break
@@ -382,3 +383,128 @@ class TestBinanceTestnetFillsListener:
             assert fill.get("side") == side
             assert fill.get("quantity", 0) > 0
             assert fill.get("quantity", 0) <= quantity + 1e-9  # allow tiny precision
+
+
+@skip_unless_testnet
+class TestBinanceTestnetAdapter:
+    """BinanceBrokerAdapter against testnet: place_order (unified response) and start_fill_listener."""
+
+    @pytest.fixture
+    def client(self):
+        from oms.brokers.binance.api_client import BinanceAPIClient
+        return BinanceAPIClient(
+            api_key=BINANCE_API_KEY,
+            api_secret=BINANCE_API_SECRET,
+            base_url=BINANCE_BASE_URL,
+            testnet=True,
+        )
+
+    @pytest.fixture
+    def adapter(self, client):
+        from oms.brokers.binance.adapter import BinanceBrokerAdapter
+        return BinanceBrokerAdapter(client=client)
+
+    def test_adapter_place_order_then_cancel(self, adapter, client):
+        """Adapter place_order returns unified response; cancel via client (adapter has no cancel)."""
+        import requests as _requests
+        symbol = "BTCUSDT"
+        ticker = _requests.get(
+            f"{client.base_url}/api/v3/ticker/price",
+            params={"symbol": symbol},
+            timeout=10,
+        )
+        ticker.raise_for_status()
+        last_price = float(ticker.json()["price"])
+        price = round(last_price * 0.95, 2)
+        quantity = 0.0001
+        order_id = f"testnet-adapter-{int(time.time() * 1000)}"
+        order = {
+            "order_id": order_id,
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": quantity,
+            "order_type": "LIMIT",
+            "price": price,
+            "time_in_force": "GTC",
+        }
+        result = adapter.place_order(order)
+        assert "rejected" not in result or result.get("rejected") is not True, (
+            f"Adapter place_order rejected: {result.get('reject_reason', result)}"
+        )
+        assert result.get("broker_order_id"), f"Missing broker_order_id in {result}"
+        assert result.get("status") in ("NEW", "PENDING", "EXPIRED", "FILLED")
+        assert result.get("symbol") == symbol
+        assert result.get("side") == "BUY"
+        assert result.get("client_order_id") == order_id
+        # Clean up: cancel via raw client (adapter does not expose cancel)
+        client.cancel_order(symbol=symbol, client_order_id=order_id)
+
+    def test_adapter_fill_listener_receives_fill(self, adapter, client):
+        """Adapter start_fill_listener: place market order via adapter, receive unified fill, then stop."""
+        import threading
+        from oms.brokers.binance.api_client import BinanceAPIError
+
+        symbol = "BTCUSDT"
+        side = "BUY"
+        quantity = 0.0001
+        order_id = "adapter_fill_" + str(int(time.time() * 1000))
+
+        received = []
+        adapter.start_fill_listener(received.append)
+
+        # Wait for WebSocket to connect (testnet can be slow; allow up to 25s)
+        for _ in range(125):
+            time.sleep(0.2)
+            if adapter._listener and getattr(adapter._listener, "stream_connected", False):
+                break
+        if not adapter._listener or not getattr(adapter._listener, "stream_connected", False):
+            adapter.stop_fill_listener()
+            pytest.skip("Adapter fill listener WebSocket did not connect within 25s")
+
+        try:
+            order = {
+                "order_id": order_id,
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "order_type": "MARKET",
+            }
+            result = adapter.place_order(order)
+        except BinanceAPIError as e:
+            adapter.stop_fill_listener()
+            if "insufficient" in str(e).lower() or "balance" in str(e).lower() or "-2010" in str(e):
+                pytest.skip("Testnet account has insufficient balance for market order")
+            raise
+
+        assert "rejected" not in result or result.get("rejected") is not True
+        broker_order_id = str(result.get("broker_order_id", ""))
+
+        # Wait up to 15s for fill event (testnet can be slow)
+        for _ in range(150):
+            time.sleep(0.1)
+            if received and received[-1].get("event_type") == "fill":
+                break
+        adapter.stop_fill_listener()
+
+        if not received:
+            pytest.skip("No events received from adapter fill listener")
+        fills = [r for r in received if r.get("event_type") == "fill"]
+        if not fills:
+            pytest.skip(
+                f"Market order placed via adapter but no fill event (got {received}); "
+                "testnet may not have pushed executionReport in time"
+            )
+        our_fills = [
+            f for f in fills
+            if f.get("order_id") == order_id or f.get("broker_order_id") == broker_order_id
+        ]
+        assert our_fills, (
+            f"No fill matched our order (order_id={order_id!r}, broker_order_id={broker_order_id!r}); fills={fills}"
+        )
+        for fill in our_fills:
+            assert fill.get("order_id") == order_id
+            assert fill.get("broker_order_id") == broker_order_id
+            assert fill.get("symbol") == symbol
+            assert fill.get("side") == side
+            assert fill.get("quantity", 0) > 0
+            assert fill.get("quantity", 0) <= quantity + 1e-9
