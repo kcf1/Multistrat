@@ -152,7 +152,7 @@ The OMS is **broker-agnostic**. It routes orders to the appropriate broker adapt
 
 ### 5.1 Role
 
-- Consume from Redis stream `risk_approved` (XREAD block).
+- Consume from Redis stream `risk_approved` using a **consumer group** (XREADGROUP + XACK) so each message is delivered once; no double-processing when OMS reads again. Create group with XGROUP CREATE … MKSTREAM if needed; XACK after successful process.
 - For each message: read `broker` (and optional `account_id`); **select broker adapter** for that broker; generate internal `order_id` if not set; persist to **Redis** (order hash, status indexes), including `broker` and `account_id`.
 - Call the adapter’s **place_order** (or equivalent); adapter talks to the broker API; OMS updates Redis (e.g. status `sent`).
 - Adapter notifies OMS of **fills** and **rejects** (unified format); OMS publishes to Redis stream `oms_fills` and updates Redis order status (`filled` / `rejected` / `cancelled`).
@@ -181,7 +181,7 @@ The OMS is **broker-agnostic**. It routes orders to the appropriate broker adapt
 
 ### 5.5 Deployment
 
-- Single **loop process**: XREAD `risk_approved` → Redis order store → route to adapter → handle adapter callbacks for fills/rejects → Redis status update → XADD `oms_fills`. Optional background task: sync Redis orders to Postgres (e.g. every 30s or on terminal status).
+- Single **loop process**: XREADGROUP `risk_approved` (consumer group) → Redis order store → route to adapter → handle adapter callbacks for fills/rejects → Redis status update → XADD `oms_fills` → XACK. Optional background task: sync Redis orders to Postgres (e.g. every 30s or on terminal status).
 - Docker: service `oms`; image from `oms/`; connect to `multistrat` network; env: `REDIS_URL`, `DATABASE_URL` (if sync enabled). No broker-specific env in the generic OMS image if adapters load their own config (or pass broker vars through env with a prefix, e.g. `BINANCE_*`).
 
 ---
@@ -310,12 +310,19 @@ BINANCE_API_SECRET=
 - [x] **12.1.4** **OMS Redis order store**: define Redis key layout (`orders:{order_id}` hash, `orders:by_status:{status}` set, `orders:by_broker_order_id:{broker_order_id}` for lookup); implement stage_order, update_status, update_fill_status, get_order, find_order_by_broker_order_id. Use pipelines for atomic updates. **Adapter alignment:** Order hash holds risk_approved fields plus adapter place_order response (`broker_order_id`, `status`, `executed_qty`, `binance_transact_time`, `binance_cumulative_quote_qty`); `find_order_by_broker_order_id` supports fill callback lookup when event has only `broker_order_id`; `update_fill_status` for status/executed_qty on fill/reject. See §5.2. **Unit test:** fakeredis or mock Redis; verify CRUD and index updates.
 - [x] **12.1.5** **OMS Redis stream schemas** (input/output): define `risk_approved` input schema (`broker`, `account_id`, `symbol`, `side`, `quantity`, `order_type`, `price`, `book`, `comment`, etc.); define `oms_fills` output schema (`event_type`, `order_id`, `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `executed_at`, `fill_id`, `reject_reason`, `book`, `comment`, etc.). **Adapter alignment:** risk_approved fields match adapter place_order input; oms_fills fields match adapter fill/reject callback (book/comment added by OMS from order store when publishing). Align with §3.1 and §4.2. Document in code or `oms/README.md`. Streams are created on first XADD.
 - [x] **12.1.6** **OMS Redis consumer** (XREAD from `risk_approved`): parse messages per `risk_approved` schema, handle blocking read. **Unit test:** mock Redis client; verify message parsing and error handling.
+- [x] **risk_approved consumer group:** Use XREADGROUP + XACK so each message is delivered once; XGROUP CREATE with MKSTREAM; XACK after process_one success. Prevents double-processing when OMS reads again; extendable for multiple OMS. **Unit test:** consumer group read/ack; **integration test:** no double-process (read two messages in order, second read returns next message not first).
 - [x] **12.1.7** **OMS broker adapter registry**: interface definition; registry (map `broker_name` → adapter); route by `broker`. **Unit test:** mock adapters; verify routing and error handling (unknown broker).
 - [x] **12.1.8** **OMS Redis producer** (XADD to `oms_fills`): format unified fill/reject events per `oms_fills` schema. **Unit test:** mock Redis client; verify message format.
 - [x] **12.1.9** **OMS integration** (wire pieces): Redis consumer → Redis order store → adapter registry → adapter.place_order → adapter fill callback → Redis status update → Redis producer. **Integration test:** mock Redis streams and adapter; verify full flow for one order.
 - [x] **Partial/full fill (OMS + Binance listener):** Listener exposes Binance `order_status` (X) and `executed_qty_cumulative` (z); OMS callback maps to Redis status `partially_filled` | `filled` and stores cumulative `executed_qty` (or accumulates when z absent). See §5.1. **Unit test:** fills listener parser (order_status, executed_qty_cumulative); OMS integration (partial then full, accumulate fallback).
-- [ ] **12.1.10** **OMS → Postgres order sync**: background task that syncs orders from Redis to Postgres `orders` table (e.g. completed orders only, or all; interval e.g. 30s). UPSERT by `internal_id`. **Unit test:** verify sync writes correct rows; idempotent on re-run.
-- [ ] **12.1.11** Register Binance adapter in OMS; add `BINANCE_*` to `.env.example` and `.env`.
+- [x] **12.1.9a** **Config:** Add `RUN_BINANCE_TESTNET=0` to `.env.example` so testnet test gate is documented. **Test:** N/A (doc/config).
+- [x] **12.1.9b** **Redis/stream cleanup:** XTRIM `risk_approved` and `oms_fills` (e.g. MAXLEN ~ 10000); optional TTL on terminal order keys (e.g. after sync or on status filled/rejected/cancelled). **Unit test:** `oms/tests/test_cleanup.py` (fakeredis): trim_oms_streams trims both streams, respects maxlen/flags; set_order_key_ttl sets EXPIRE on order key, returns False when key missing. **Call sites (in task list):** main loop (12.1.11b) calls `trim_oms_streams(redis)` periodically (e.g. each N iterations or timer); fill callback or Postgres sync calls `set_order_key_ttl(redis, order_id, ttl_seconds)` when order reaches terminal status (filled/rejected/cancelled/expired).
+- [ ] **12.1.9c** **CANCELED/EXPIRED handling:** Listener parses executionReport with exec_type CANCELED or order_status EXPIRED; return unified event (e.g. event_type `cancelled`); OMS callback updates Redis status to `cancelled`/`expired` and optionally publishes to `oms_fills`. When callback sets any terminal status (filled/rejected/cancelled/expired), optionally call `set_order_key_ttl(redis, order_id, ttl_seconds)` (12.1.9b). **Unit test:** parser returns event for CANCELED/EXPIRED payload; **integration test:** fill callback updates store to cancelled/expired.
+- [ ] **12.1.9d** **process_one error handling:** When `adapter.place_order` raises, do not XACK (message stays in PEL); optionally update store to rejected and publish reject to `oms_fills` or dead-letter stream. **Unit test:** mock adapter that raises; verify no XACK, optional store/stream reject.
+- [ ] **12.1.9e** **Cancel order:** Add `cancel_order(order_id)` or `cancel_order(broker_order_id, symbol)` to broker adapter interface; Binance adapter calls client.cancel_order; OMS (or admin) can call adapter.cancel_order for open orders. **Unit test:** mock client; adapter cancel_order calls client with correct args; **testnet:** place limit order then cancel, verify cancelled.
+- [ ] **12.1.10** **OMS → Postgres order sync**: background task that syncs orders from Redis to Postgres `orders` table (e.g. completed orders only, or all; interval e.g. 30s). UPSERT by `internal_id`. After syncing an order, optionally call `set_order_key_ttl(redis, order_id, ttl_seconds)` so Redis can expire the key. **Unit test:** verify sync writes correct rows; idempotent on re-run.
+- [ ] **12.1.11a** **Fill listener started by OMS:** Bootstrap code starts fill listener for each registered adapter (e.g. one callback from `make_fill_callback(redis, store)` per adapter). **Integration test:** OMS bootstrap starts listener; inject order; assert fill path (mock or testnet).
+- [ ] **12.1.11b** **OMS main loop and Binance registration:** Runnable entrypoint (e.g. `oms/main.py`) that loads REDIS_URL, creates store and registry, registers Binance adapter, starts fill listener(s), then loop: `process_one(redis, store, registry, block_ms=5000)` until shutdown. In the loop (or on a timer), call `trim_oms_streams(redis)` periodically to cap stream length (12.1.9b). Add `BINANCE_*` to `.env.example` (already present); document in README. **Integration test:** run main with fakeredis + mock adapter; inject one message to `risk_approved`; assert order in store and/or oms_fills. **E2E:** run OMS with real Redis + testnet; inject script; assert fill on `oms_fills`.
 
 ### 12.2 Booking (build backwards: Postgres writes → Redis cache → consumer → integration)
 
@@ -412,6 +419,12 @@ multistrat/
 - **OMS Redis order store:** Mock Redis or fakeredis; test stage_order, update_status, update_fill_status, get_order, find_order_by_broker_order_id; verify index updates and pipelines.
 - **OMS Redis consumer/producer:** Mock Redis client (e.g. `fakeredis`); test XREAD parsing, XADD formatting, error handling.
 - **OMS adapter registry:** Mock adapters; test routing by `broker`, unknown broker handling.
+- **OMS stream/Redis cleanup:** Mock Redis; verify XTRIM and TTL on terminal order keys (12.1.9b).
+- **OMS CANCELED/EXPIRED:** Parser unit test for CANCELED/EXPIRED; integration: callback updates store to cancelled/expired (12.1.9c).
+- **OMS process_one error:** Mock adapter that raises; verify no XACK and optional reject/store (12.1.9d).
+- **OMS cancel order:** Mock client; adapter cancel_order calls client; testnet: place then cancel (12.1.9e).
+- **OMS → Postgres sync:** Unit test: sync writes correct rows; idempotent (12.1.10).
+- **OMS main loop:** Integration: fakeredis + mock adapter, inject one message, assert process_one and XACK; E2E: real Redis + testnet, inject script, assert oms_fills (12.1.11a/12.1.11b).
 - **Booking Postgres writes:** Test Postgres (or testcontainers/test DB); test SQL, idempotency (duplicate fill_id).
 - **Booking Redis cache:** Mock Redis; test key format, updates.
 - **Position Keeper calculations:** Pure functions; test PnL/margin math given positions/balances/fills.
@@ -420,6 +433,8 @@ multistrat/
 ### 16.2 Integration tests (wire pieces)
 
 - **OMS integration:** Mock Redis streams (`risk_approved`) and adapter; verify: consumer → Redis order store → adapter.place_order → adapter callback → Redis status update → producer (`oms_fills`).
+- **OMS bootstrap and main loop:** Start fill listener(s) and run process_one loop; inject one message; assert processed and (with mock) no double-process (12.1.11a, 12.1.11b).
+- **OMS error path:** Adapter place_order raises → no XACK; optional reject to store/oms_fills (12.1.9d).
 - **Booking integration:** Mock Redis stream (`oms_fills`); verify: consumer → Postgres writes → Redis cache updates.
 - **Position Keeper integration:** Mock Postgres/Redis data; verify: read → calculate → write loop.
 

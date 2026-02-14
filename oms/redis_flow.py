@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from redis import Redis
 
-from oms.consumer import read_one_risk_approved
+from oms.consumer import ack_risk_approved, read_one_risk_approved, read_one_risk_approved_cg
 from oms.producer import produce_oms_fill
 from oms.registry import AdapterRegistry
 from oms.storage.redis_order_store import RedisOrderStore
@@ -112,21 +112,27 @@ def process_one(
     registry: AdapterRegistry,
     start_id: str = "0",
     block_ms: Optional[int] = None,
+    consumer_group: Optional[str] = "oms",
+    consumer_name: Optional[str] = "oms-1",
 ) -> Optional[Dict[str, Any]]:
     """
     One iteration of OMS loop (12.1.9): consumer → store → registry → place_order → producer.
 
     Reads one risk_approved message (12.1.6), stages in store, routes by registry (12.1.7),
     places order, updates store; on reject produces to oms_fills (12.1.8).
+    When consumer_group is set, uses XREADGROUP + XACK so message is not redelivered.
     Does not start the fill listener; caller must run the listener with make_fill_callback.
 
     Returns:
         Dict with order_id, broker_order_id, rejected, reject_reason; or None if no message.
     """
-    out = read_one_risk_approved(redis, start_id=start_id, block_ms=block_ms)
+    if consumer_group and consumer_name:
+        out = read_one_risk_approved_cg(redis, consumer_group, consumer_name, block_ms=block_ms)
+    else:
+        out = read_one_risk_approved(redis, start_id=start_id, block_ms=block_ms)
     if not out:
         return None
-    _entry_id, order = out
+    entry_id, order = out
     order_id = order.get("order_id") or str(uuid.uuid4())
     order["order_id"] = order_id
 
@@ -136,6 +142,8 @@ def process_one(
     if not adapter:
         store.update_fill_status(order_id, "rejected")
         produce_oms_fill(redis, _reject_event(order_id, order, reject_reason="No adapter for broker"))
+        if consumer_group and consumer_name:
+            ack_risk_approved(redis, consumer_group, entry_id)
         return {"order_id": order_id, "rejected": True, "reject_reason": "No adapter for broker"}
 
     response = adapter.place_order(order)
@@ -150,6 +158,8 @@ def process_one(
                 reject_reason=response.get("reject_reason", "rejected"),
             ),
         )
+        if consumer_group and consumer_name:
+            ack_risk_approved(redis, consumer_group, entry_id)
         return {
             "order_id": order_id,
             "rejected": True,
@@ -167,6 +177,8 @@ def process_one(
             "binance_cumulative_quote_qty": response.get("binance_cumulative_quote_qty"),
         },
     )
+    if consumer_group and consumer_name:
+        ack_risk_approved(redis, consumer_group, entry_id)
     return {
         "order_id": order_id,
         "broker_order_id": response.get("broker_order_id"),

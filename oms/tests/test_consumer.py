@@ -111,3 +111,21 @@ class TestReadRiskApproved:
         redis.xadd(RISK_APPROVED_STREAM, {"broker": "binance", "symbol": "BTCUSDT", "side": "BUY"})  # no quantity
         messages = read_risk_approved(redis, start_id="0", count=5)
         assert messages == []
+
+
+class TestConsumerGroup:
+    """Consumer group: read_one_risk_approved_cg and ack_risk_approved."""
+
+    def test_read_cg_returns_message_then_none_after_ack(self):
+        from fakeredis import FakeRedis
+        from oms.consumer import ack_risk_approved, read_one_risk_approved_cg
+        from oms.schemas import RISK_APPROVED_STREAM
+        redis = FakeRedis(decode_responses=True)
+        redis.xadd(RISK_APPROVED_STREAM, {"broker": "binance", "symbol": "BTCUSDT", "side": "BUY", "quantity": "0.001"})
+        out = read_one_risk_approved_cg(redis, "oms", "oms-1")
+        assert out is not None
+        entry_id, order = out
+        assert order["symbol"] == "BTCUSDT"
+        ack_risk_approved(redis, "oms", entry_id)
+        out2 = read_one_risk_approved_cg(redis, "oms", "oms-1")
+        assert out2 is None

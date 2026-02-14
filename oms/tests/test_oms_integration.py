@@ -218,6 +218,45 @@ def test_oms_integration_partial_then_full_fill_status_and_cumulative(redis_clie
     assert order2.get("executed_qty") == 1.0
 
 
+def test_oms_integration_consumer_group_no_double_process(redis_client, store):
+    """Consumer group: each message delivered once; second read returns next message, not first."""
+    from oms.registry import AdapterRegistry
+
+    registry = AdapterRegistry()
+    registry.register("binance", _mock_adapter({"broker_order_id": "b-1", "status": "NEW"}))
+
+    add_message(redis_client, RISK_APPROVED_STREAM, {
+        "broker": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": "0.001",
+        "order_type": "MARKET",
+        "order_id": "order-first",
+    })
+    add_message(redis_client, RISK_APPROVED_STREAM, {
+        "broker": "binance",
+        "symbol": "ETHUSDT",
+        "side": "SELL",
+        "quantity": "0.01",
+        "order_type": "MARKET",
+        "order_id": "order-second",
+    })
+
+    result1 = process_one(redis_client, store, registry)
+    assert result1 is not None
+    assert result1["order_id"] == "order-first"
+
+    result2 = process_one(redis_client, store, registry)
+    assert result2 is not None
+    assert result2["order_id"] == "order-second", "Second read must return second message, not first (no double-process)"
+
+    result3 = process_one(redis_client, store, registry)
+    assert result3 is None, "No more messages after two"
+
+    assert store.get_order("order-first") is not None
+    assert store.get_order("order-second") is not None
+
+
 def test_oms_integration_fill_callback_accumulates_when_no_cumulative(redis_client, store):
     """When event has no executed_qty_cumulative, callback accumulates incremental quantity."""
     from oms.redis_flow import make_fill_callback

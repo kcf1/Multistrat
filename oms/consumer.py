@@ -2,15 +2,15 @@
 OMS Redis consumer (task 12.1.6).
 
 XREAD from risk_approved stream; parse messages per risk_approved schema.
-Supports blocking read for the main loop.
+Supports blocking read and consumer group (XREADGROUP + XACK) for no double-processing.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 from redis import Redis
 
-from oms.schemas import RISK_APPROVED_FIELDS, RISK_APPROVED_STREAM
-from oms.streams import read_messages
+from oms.schemas import RISK_APPROVED_STREAM
+from oms.streams import ack_message, ensure_consumer_group, read_messages, read_messages_group
 
 
 class RiskApprovedParseError(Exception):
@@ -121,7 +121,7 @@ def read_one_risk_approved(
     block_ms: Optional[int] = None,
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
-    Read at most one risk_approved message; parse per schema.
+    Read at most one risk_approved message; parse per schema (XREAD).
 
     Returns:
         (entry_id, order_dict) or None if no message (or parse failed).
@@ -130,3 +130,42 @@ def read_one_risk_approved(
     if not messages:
         return None
     return messages[0]
+
+
+def ensure_risk_approved_consumer_group(redis: Redis, group: str = "oms", start_id: str = "0") -> None:
+    """Ensure consumer group exists on risk_approved stream (idempotent)."""
+    ensure_consumer_group(redis, RISK_APPROVED_STREAM, group, start_id=start_id)
+
+
+def read_one_risk_approved_cg(
+    redis: Redis,
+    group: str,
+    consumer: str,
+    block_ms: Optional[int] = None,
+) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """
+    Read at most one risk_approved message via consumer group (XREADGROUP ">").
+    Ensures group exists first. Returns (entry_id, order_dict) or None.
+    """
+    ensure_risk_approved_consumer_group(redis, group)
+    raw = read_messages_group(
+        redis,
+        RISK_APPROVED_STREAM,
+        group,
+        consumer,
+        id=">",
+        count=1,
+        block_ms=block_ms,
+    )
+    for entry_id, fields in raw:
+        try:
+            order = parse_risk_approved_message(fields)
+            return (entry_id, order)
+        except RiskApprovedParseError:
+            continue
+    return None
+
+
+def ack_risk_approved(redis: Redis, group: str, entry_id: str) -> int:
+    """XACK risk_approved message so it is not redelivered. Returns count acked."""
+    return ack_message(redis, RISK_APPROVED_STREAM, group, entry_id)
