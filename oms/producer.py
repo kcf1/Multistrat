@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 from redis import Redis
 
+from oms.log import logger
 from oms.schemas import OMS_FILLS_FIELDS, OMS_FILLS_STREAM
 from oms.streams import add_message
 
@@ -74,4 +75,9 @@ def produce_oms_fill(redis: Redis, event: Dict[str, Any]) -> str:
     for k, v in event.items():
         if k not in out:
             out[k] = v
-    return add_message(redis, OMS_FILLS_STREAM, out)
+    entry_id = add_message(redis, OMS_FILLS_STREAM, out)
+    logger.debug(
+        "produce_oms_fill order_id={} event_type={} entry_id={}",
+        out.get("order_id"), out.get("event_type"), entry_id,
+    )
+    return entry_id

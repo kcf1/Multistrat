@@ -10,6 +10,8 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from redis import Redis
 
+from oms.log import logger
+
 from oms.cleanup import set_order_key_ttl
 from oms.redis_flow import TERMINAL_STATUSES
 from oms.storage.redis_order_store import RedisOrderStore
@@ -65,6 +67,10 @@ def sync_one_order(
         return False
 
     row = _order_to_row(order, order_id)
+    logger.info(
+        "sync_one_order: order_id={} status={} symbol={}",
+        order_id, order.get("status"), order.get("symbol"),
+    )
 
     we_opened = False
     if callable(pg_connect):
@@ -76,9 +82,10 @@ def sync_one_order(
 
     try:
         cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO orders (
+        try:
+            cur.execute(
+                """
+                INSERT INTO orders (
                 internal_id, broker, account_id, broker_order_id, symbol, side, order_type,
                 quantity, price, limit_price, time_in_force, status, executed_qty, book, comment,
                 created_at, updated_at, binance_cumulative_quote_qty, binance_transact_time, payload
@@ -107,10 +114,13 @@ def sync_one_order(
                 binance_cumulative_quote_qty = EXCLUDED.binance_cumulative_quote_qty,
                 binance_transact_time = EXCLUDED.binance_transact_time,
                 payload = EXCLUDED.payload
-            """,
-            _pg_params(row),
-        )
-        conn.commit()
+                """,
+                _pg_params(row),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.warning("sync_one_order failed order_id={} error={!s}", order_id, e)
+            raise
     finally:
         if we_opened:
             conn.close()
@@ -160,4 +170,6 @@ def sync_terminal_orders(
     for order_id in order_ids:
         if sync_one_order(redis, store, pg_connect, order_id, ttl_after_sync_seconds):
             count += 1
+    if count:
+        logger.info("sync_terminal_orders synced {} order(s)", count)
     return count

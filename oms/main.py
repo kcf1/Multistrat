@@ -12,6 +12,8 @@ from typing import Callable, Optional
 
 from redis import Redis
 
+from oms.log import logger
+
 from oms.cancel_consumer import ensure_cancel_requested_consumer_group
 from oms.cleanup import trim_oms_streams
 from oms.consumer import ensure_risk_approved_consumer_group
@@ -153,7 +155,8 @@ def run_oms_loop(
 
         iteration += 1
         if trim_every_n and iteration % trim_every_n == 0:
-            trim_oms_streams(redis)
+            removed = trim_oms_streams(redis)
+            logger.debug("trim_oms_streams removed {} entries", removed)
 
         if run_until is not None and run_until():
             break
@@ -171,8 +174,10 @@ def main() -> int:
     registry = get_registry()
 
     if not registry.broker_names():
-        print("oms.main: no adapters registered (set BINANCE_API_KEY for Binance)", file=sys.stderr)
+        logger.warning("No adapters registered (set BINANCE_API_KEY for Binance)")
         return 1
+
+    logger.info("OMS starting brokers={}", registry.broker_names())
 
     database_url = _env("DATABASE_URL")
     sync_ttl = 3600
@@ -186,6 +191,7 @@ def main() -> int:
             sync_one_order(redis, store, database_url, order_id, ttl_after_sync_seconds=sync_ttl)
 
     start_fill_listeners(redis, store, registry, on_terminal_sync=on_terminal_sync)
+    logger.info("Fill listeners started for brokers={}", registry.broker_names())
 
     shutdown = [False]
 
@@ -209,6 +215,7 @@ def main() -> int:
         pass
     finally:
         stop_fill_listeners(registry)
+        logger.info("OMS shutdown complete")
 
     return 0
 

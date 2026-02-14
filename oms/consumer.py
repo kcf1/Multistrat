@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from redis import Redis
 
+from oms.log import logger
 from oms.schemas import RISK_APPROVED_STREAM
 from oms.streams import ack_message, ensure_consumer_group, read_messages, read_messages_group
 
@@ -111,7 +112,8 @@ def read_risk_approved(
         try:
             order = parse_risk_approved_message(fields)
             result.append((entry_id, order))
-        except RiskApprovedParseError:
+        except RiskApprovedParseError as e:
+            logger.warning("risk_approved parse error entry_id={} error={!s}", entry_id, e)
             continue
     return result
 
@@ -165,7 +167,8 @@ def read_one_risk_approved_cg(
         try:
             order = parse_risk_approved_message(fields)
             return (entry_id, order)
-        except RiskApprovedParseError:
+        except RiskApprovedParseError as e:
+            logger.warning("risk_approved parse error entry_id={} error={!s}", entry_id, e)
             continue
     return None
 

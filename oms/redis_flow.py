@@ -9,6 +9,8 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from redis import Redis
 
+from oms.log import logger
+
 from oms.cancel_consumer import ack_cancel_requested, read_one_cancel_request, read_one_cancel_request_cg
 from oms.cleanup import set_order_key_ttl
 from oms.consumer import ack_risk_approved, read_one_risk_approved, read_one_risk_approved_cg, read_one_risk_approved_pending
@@ -42,6 +44,10 @@ def make_fill_callback(
         if not order_id and broker_order_id:
             order_id = store.find_order_by_broker_order_id(broker_order_id) or ""
         if not order_id:
+            logger.warning(
+                "Fill callback: no order_id (broker_order_id={}), skipping",
+                broker_order_id or "(empty)",
+            )
             return
 
         event_type = (event.get("event_type") or "fill").strip().lower()
@@ -89,6 +95,12 @@ def make_fill_callback(
             order_id, status, executed_qty=executed_qty,
             **({"price": fill_price} if fill_price is not None else {}),
         )
+        logger.info(
+            "Fill callback: order_id={} broker_order_id={} event_type={} status={} executed_qty={}",
+            order_id, broker_order_id, event.get("event_type", "fill"), status, executed_qty,
+        )
+        if status in TERMINAL_STATUSES:
+            logger.info("Fill callback: order_id={} terminal status={}", order_id, status)
 
         order = store.get_order(order_id) or {}
         payload: Dict[str, Any] = {
@@ -170,12 +182,17 @@ def process_one(
     entry_id, order = out
     order_id = order.get("order_id") or str(uuid.uuid4())
     order["order_id"] = order_id
+    logger.info(
+        "process_one: read risk_approved order_id={} broker={} symbol={} side={} quantity={}",
+        order_id, order.get("broker"), order.get("symbol"), order.get("side"), order.get("quantity"),
+    )
 
     if not store.get_order(order_id):
         store.stage_order(order_id, order)
     broker = order.get("broker", "") or "binance"
     adapter = registry.get(broker)
     if not adapter:
+        logger.warning("process_one: no adapter for broker={} order_id={}", broker, order_id)
         store.update_fill_status(order_id, "rejected")
         produce_oms_fill(redis, _reject_event(order_id, order, reject_reason="No adapter for broker"))
         if consumer_group and consumer_name:
@@ -194,7 +211,15 @@ def process_one(
             attempts = max(retry_count, delivery_count)
         else:
             attempts = retry_count
+        logger.warning(
+            "process_one: place_order raised order_id={} attempt={} error={!s}",
+            order_id, attempts, e,
+        )
         if attempts >= OMS_PLACE_ORDER_MAX_RETRIES:
+            logger.warning(
+                "process_one: max retries reached order_id={} rejecting and XACK",
+                order_id,
+            )
             store.update_fill_status(order_id, "rejected")
             produce_oms_fill(
                 redis,
@@ -217,6 +242,10 @@ def process_one(
         return {"order_id": order_id, "rejected": False, "retry_later": True}
 
     if response.get("rejected"):
+        logger.info(
+            "process_one: broker rejected order_id={} broker_order_id={} reason={}",
+            order_id, response.get("broker_order_id"), response.get("reject_reason", "rejected"),
+        )
         store.update_fill_status(order_id, "rejected")
         produce_oms_fill(
             redis,
@@ -237,6 +266,10 @@ def process_one(
             "reject_reason": response.get("reject_reason", "rejected"),
         }
 
+    logger.info(
+        "process_one: order placed order_id={} broker_order_id={} symbol={} status={}",
+        order_id, response.get("broker_order_id"), order.get("symbol"), response.get("status", ""),
+    )
     store.update_status(
         order_id,
         "sent",
@@ -325,10 +358,15 @@ def process_one_cancel(
     broker_order_id = req.get("broker_order_id") or ""
     symbol = (req.get("symbol") or "").strip()
     broker = (req.get("broker") or "binance").strip()
+    logger.info(
+        "process_one_cancel: read cancel_request order_id={} broker_order_id={} symbol={} broker={}",
+        order_id, broker_order_id, symbol, broker,
+    )
 
     if order_id:
         order = store.get_order(order_id)
         if not order:
+            logger.warning("process_one_cancel: order not found order_id={}", order_id)
             if consumer_group and consumer_name:
                 ack_cancel_requested(redis, consumer_group, entry_id)
             return {"order_id": order_id, "cancelled": False, "reject_reason": "Order not found in store"}
@@ -348,16 +386,25 @@ def process_one_cancel(
 
     adapter = registry.get(broker)
     if not adapter:
+        logger.warning("process_one_cancel: no adapter for broker={} order_id={}", broker, order_id)
         if consumer_group and consumer_name:
             ack_cancel_requested(redis, consumer_group, entry_id)
         return {"order_id": order_id, "cancelled": False, "reject_reason": "No adapter for broker"}
 
     response = adapter.cancel_order(broker_order_id=broker_order_id, symbol=symbol)
     if response.get("rejected"):
+        logger.info(
+            "process_one_cancel: broker reject order_id={} broker_order_id={} reason={}",
+            order_id, broker_order_id, response.get("reject_reason", "rejected"),
+        )
         if consumer_group and consumer_name:
             ack_cancel_requested(redis, consumer_group, entry_id)
         return {"order_id": order_id, "cancelled": False, "reject_reason": response.get("reject_reason", "rejected")}
 
+    logger.info(
+        "process_one_cancel: cancelled order_id={} broker_order_id={} symbol={}",
+        order_id, broker_order_id, symbol,
+    )
     if order_id:
         store.update_fill_status(order_id, "cancelled")
         if publish_to_oms_fills:

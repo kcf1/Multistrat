@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from redis import Redis
 
+from oms.log import logger
 from oms.schemas import CANCEL_REQUESTED_STREAM
 from oms.streams import ack_message, ensure_consumer_group, read_messages, read_messages_group
 
@@ -95,7 +96,8 @@ def read_one_cancel_request_cg(
         try:
             req = parse_cancel_request_message(fields or {})
             return (entry_id, req)
-        except CancelRequestParseError:
+        except CancelRequestParseError as e:
+            logger.warning("cancel_requested parse error entry_id={} error={!s}", entry_id, e)
             continue
     return None
 

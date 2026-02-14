@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional
 
 from redis import Redis
 
+from oms.log import logger
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -122,6 +124,10 @@ class RedisOrderStore:
         if book:
             pipe.sadd(_book_set_key(book), order_id)
         pipe.execute()
+        logger.debug(
+            "stage_order order_id={} broker={} symbol={}",
+            order_id, order.get("broker"), order.get("symbol"),
+        )
 
     def update_status(
         self,
@@ -147,6 +153,10 @@ class RedisOrderStore:
         if broker_order_id:
             pipe.set(_broker_order_id_key(str(broker_order_id)), order_id)
         pipe.execute()
+        logger.debug(
+            "update_status order_id={} {} -> {} broker_order_id={}",
+            order_id, old_status, new_status, broker_order_id,
+        )
 
     def update_fill_status(
         self,
