@@ -172,3 +172,83 @@ class TestOmsRedisTestnet:
             assert float(qty) > 0
         except (TypeError, ValueError):
             assert float(qty) > 0
+
+    def test_full_pipeline_place_then_cancel_via_redis(self, redis_client, store, adapter):
+        """Full pipeline: risk_approved -> place order -> cancel_requested -> cancel at broker -> store updated."""
+        import requests as _requests
+        from oms.registry import AdapterRegistry
+        from oms.schemas import CANCEL_REQUESTED_STREAM, RISK_APPROVED_STREAM
+        from oms.redis_flow import process_one_cancel, process_one_risk_approved
+        from oms.streams import add_message, read_latest
+
+        symbol = "BTCUSDT"
+        # Limit price below market so order stays open (won't fill)
+        try:
+            ticker = _requests.get(
+                f"{_env('BINANCE_BASE_URL') or 'https://testnet.binance.vision'}/api/v3/ticker/price",
+                params={"symbol": symbol},
+                timeout=10,
+            )
+            ticker.raise_for_status()
+            last_price = float(ticker.json()["price"])
+            price = round(last_price * 0.95, 2)
+        except Exception as e:
+            pytest.skip(f"Could not get ticker for limit price: {e}")
+
+        redis_client.delete(RISK_APPROVED_STREAM)
+        redis_client.delete(CANCEL_REQUESTED_STREAM)
+
+        order_id = f"redis-cancel-{int(time.time() * 1000)}"
+        risk_order = {
+            "order_id": order_id,
+            "broker": "binance",
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": 0.0001,
+            "order_type": "LIMIT",
+            "price": price,
+            "time_in_force": "GTC",
+            "book": "redis_cancel_test",
+        }
+        add_message(redis_client, RISK_APPROVED_STREAM, risk_order)
+
+        registry = AdapterRegistry()
+        registry.register("binance", adapter)
+
+        # Place order
+        result = process_one_risk_approved(redis_client, store, registry)
+        assert result is not None, "No message read from risk_approved"
+        assert result.get("rejected") is not True, (
+            f"Place rejected: {result.get('reject_reason', result)}"
+        )
+        broker_order_id = result.get("broker_order_id")
+        assert broker_order_id, "Missing broker_order_id after place"
+
+        order_before = store.get_order(order_id)
+        assert order_before is not None
+        assert order_before.get("status") == "sent"
+
+        # Request cancel via Redis
+        add_message(redis_client, CANCEL_REQUESTED_STREAM, {"order_id": order_id, "broker": "binance"})
+
+        # Cancel (consumer group so message consumed once)
+        cancel_result = process_one_cancel(
+            redis_client, store, registry,
+            consumer_group="oms", consumer_name="oms-1",
+        )
+        assert cancel_result is not None, "No message read from cancel_requested"
+        assert cancel_result.get("cancelled") is True, (
+            f"Cancel failed: {cancel_result.get('reject_reason', cancel_result)}"
+        )
+        assert cancel_result.get("order_id") == order_id
+        assert cancel_result.get("broker_order_id") == broker_order_id
+
+        order_after = store.get_order(order_id)
+        assert order_after is not None
+        assert order_after.get("status") == "cancelled", (
+            f"Expected status cancelled, got {order_after.get('status')}"
+        )
+
+        # Second process_one_cancel should get no message (consumer group already acked)
+        no_msg = process_one_cancel(redis_client, store, registry, consumer_group="oms", consumer_name="oms-1")
+        assert no_msg is None

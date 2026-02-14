@@ -4,18 +4,18 @@ Integration test for OMS (task 12.1.9): wire consumer → store → registry →
 Mock Redis (fakeredis) and mock adapter; verify full flow for one order.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pytest
 
-from oms.redis_flow import make_fill_callback, process_one
-from oms.schemas import OMS_FILLS_STREAM, RISK_APPROVED_STREAM
+from oms.redis_flow import make_fill_callback, process_one, process_one_cancel
+from oms.schemas import CANCEL_REQUESTED_STREAM, OMS_FILLS_STREAM, RISK_APPROVED_STREAM
 from oms.streams import add_message, read_latest
 from oms.storage.redis_order_store import RedisOrderStore
 
 
-def _mock_adapter(place_result: Dict[str, Any]):
-    """Return a mock adapter that place_order returns place_result."""
+def _mock_adapter(place_result: Dict[str, Any], cancel_result: Optional[Dict[str, Any]] = None):
+    """Return a mock adapter that place_order returns place_result; optional cancel_order."""
 
     class MockAdapter:
         def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
@@ -23,6 +23,11 @@ def _mock_adapter(place_result: Dict[str, Any]):
 
         def start_fill_listener(self, callback) -> None:
             pass
+
+        def cancel_order(self, broker_order_id: str, symbol: str) -> Dict[str, Any]:
+            if cancel_result is None:
+                return {"rejected": True, "reject_reason": "cancel not implemented"}
+            return cancel_result
     return MockAdapter()
 
 
@@ -216,6 +221,155 @@ def test_oms_integration_partial_then_full_fill_status_and_cumulative(redis_clie
     order2 = store.get_order(order_id)
     assert order2["status"] == "filled"
     assert order2.get("executed_qty") == 1.0
+
+
+def test_oms_integration_fill_callback_cancelled_expired_updates_store(redis_client, store):
+    """Fill callback: event_type cancelled/expired updates store and publishes to oms_fills (12.1.9c)."""
+    from oms.redis_flow import make_fill_callback
+
+    order_id = "ord-cancel-1"
+    store.stage_order(order_id, {
+        "broker": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 0.001,
+        "order_type": "LIMIT",
+        "book": "test",
+    })
+    store.update_status(order_id, "sent", "pending", extra_fields={"broker_order_id": "binance-999"})
+
+    fill_cb = make_fill_callback(redis_client, store)
+
+    fill_cb({
+        "event_type": "cancelled",
+        "order_id": order_id,
+        "broker_order_id": "binance-999",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 0.001,
+        "price": 50000,
+        "reject_reason": "USER_CANCEL",
+    })
+    order = store.get_order(order_id)
+    assert order["status"] == "cancelled"
+    entries = read_latest(redis_client, OMS_FILLS_STREAM, count=1)
+    assert len(entries) == 1
+    assert entries[0][1]["event_type"] == "cancelled"
+    assert entries[0][1]["reject_reason"] == "USER_CANCEL"
+
+    order_id2 = "ord-expired-1"
+    store.stage_order(order_id2, {
+        "broker": "binance",
+        "symbol": "ETHUSDT",
+        "side": "SELL",
+        "quantity": 0.01,
+        "order_type": "LIMIT",
+        "book": "test",
+    })
+    store.update_status(order_id2, "sent", "pending", extra_fields={"broker_order_id": "binance-1000"})
+    fill_cb({
+        "event_type": "expired",
+        "order_id": order_id2,
+        "broker_order_id": "binance-1000",
+        "symbol": "ETHUSDT",
+        "side": "SELL",
+        "quantity": 0.01,
+        "price": 3000,
+        "reject_reason": "GTX",
+    })
+    order2 = store.get_order(order_id2)
+    assert order2["status"] == "expired"
+    entries2 = read_latest(redis_client, OMS_FILLS_STREAM, count=2)
+    event_types = {e[1]["event_type"] for e in entries2}
+    assert "expired" in event_types
+
+
+def test_oms_integration_process_one_cancel_from_redis(redis_client, store):
+    """Cancel command from Redis: XADD cancel_requested → process_one_cancel → store cancelled, oms_fills (12.1.9f)."""
+    from oms.registry import AdapterRegistry
+
+    order_id = "ord-to-cancel"
+    broker_order_id = "binance-555"
+    store.stage_order(order_id, {
+        "broker": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 0.001,
+        "order_type": "LIMIT",
+        "book": "test",
+    })
+    store.update_status(order_id, "sent", "pending", extra_fields={"broker_order_id": broker_order_id})
+
+    mock_cancel_result = {"status": "CANCELED", "broker_order_id": broker_order_id, "symbol": "BTCUSDT"}
+    adapter = _mock_adapter(place_result={}, cancel_result=mock_cancel_result)
+    registry = AdapterRegistry()
+    registry.register("binance", adapter)
+
+    add_message(redis_client, CANCEL_REQUESTED_STREAM, {"order_id": order_id, "broker": "binance"})
+
+    result = process_one_cancel(redis_client, store, registry, start_id="0")
+    assert result is not None
+    assert result.get("cancelled") is True
+    assert result.get("order_id") == order_id
+    assert result.get("broker_order_id") == broker_order_id
+
+    order = store.get_order(order_id)
+    assert order["status"] == "cancelled"
+
+    entries = read_latest(redis_client, OMS_FILLS_STREAM, count=1)
+    assert len(entries) == 1
+    assert entries[0][1]["event_type"] == "cancelled"
+    assert entries[0][1]["order_id"] == order_id
+
+
+def test_oms_integration_process_one_cancel_by_broker_order_id(redis_client, store):
+    """Cancel by broker_order_id + symbol when order_id not in message."""
+    from oms.registry import AdapterRegistry
+
+    order_id = "ord-internal"
+    broker_order_id = "binance-777"
+    store.stage_order(order_id, {"broker": "binance", "symbol": "ETHUSDT", "side": "SELL", "quantity": 0.01, "order_type": "MARKET"})
+    store.update_status(order_id, "sent", "pending", extra_fields={"broker_order_id": broker_order_id})
+
+    adapter = _mock_adapter(place_result={}, cancel_result={"status": "CANCELED", "broker_order_id": broker_order_id, "symbol": "ETHUSDT"})
+    registry = AdapterRegistry()
+    registry.register("binance", adapter)
+
+    add_message(redis_client, CANCEL_REQUESTED_STREAM, {
+        "broker_order_id": broker_order_id,
+        "symbol": "ETHUSDT",
+        "broker": "binance",
+    })
+
+    result = process_one_cancel(redis_client, store, registry, start_id="0")
+    assert result is not None
+    assert result.get("cancelled") is True
+    assert result.get("order_id") == order_id
+    order = store.get_order(order_id)
+    assert order["status"] == "cancelled"
+
+
+def test_oms_integration_process_one_cancel_consumer_group_no_double_process(redis_client, store):
+    """Cancel with consumer group: each message delivered once; second read returns next message (12.1.9f)."""
+    from oms.registry import AdapterRegistry
+
+    for i, oid in enumerate(("ord-cancel-a", "ord-cancel-b")):
+        store.stage_order(oid, {"broker": "binance", "symbol": "BTCUSDT", "side": "BUY", "quantity": 0.001, "order_type": "LIMIT"})
+        store.update_status(oid, "sent", "pending", extra_fields={"broker_order_id": f"binance-{100+i}"})
+
+    adapter = _mock_adapter(place_result={}, cancel_result={"status": "CANCELED"})
+    registry = AdapterRegistry()
+    registry.register("binance", adapter)
+
+    add_message(redis_client, CANCEL_REQUESTED_STREAM, {"order_id": "ord-cancel-a", "broker": "binance"})
+    add_message(redis_client, CANCEL_REQUESTED_STREAM, {"order_id": "ord-cancel-b", "broker": "binance"})
+
+    r1 = process_one_cancel(redis_client, store, registry, consumer_group="oms", consumer_name="oms-1")
+    assert r1 is not None and r1.get("order_id") == "ord-cancel-a" and r1.get("cancelled") is True
+    r2 = process_one_cancel(redis_client, store, registry, consumer_group="oms", consumer_name="oms-1")
+    assert r2 is not None and r2.get("order_id") == "ord-cancel-b" and r2.get("cancelled") is True
+    r3 = process_one_cancel(redis_client, store, registry, consumer_group="oms", consumer_name="oms-1")
+    assert r3 is None
 
 
 def test_oms_integration_consumer_group_no_double_process(redis_client, store):

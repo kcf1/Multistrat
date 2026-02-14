@@ -194,6 +194,80 @@ class TestBinanceBrokerAdapterPlaceOrder:
         mock_client.place_order.assert_not_called()
 
 
+# --- BinanceBrokerAdapter.cancel_order (12.1.9e) ---
+
+
+class TestBinanceBrokerAdapterCancelOrder:
+    """Test adapter cancel_order with mocked Binance client."""
+
+    @pytest.fixture
+    def mock_client(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def adapter(self, mock_client):
+        return BinanceBrokerAdapter(client=mock_client)
+
+    def test_cancel_order_calls_client_with_order_id_and_symbol(self, adapter, mock_client):
+        """Adapter cancel_order(broker_order_id, symbol) calls client.cancel_order(symbol=..., order_id=...)."""
+        mock_client.cancel_order.return_value = {
+            "orderId": 4293156,
+            "symbol": "BTCUSDT",
+            "status": "CANCELED",
+            "clientOrderId": "internal-1",
+            "side": "BUY",
+            "type": "LIMIT",
+            "origQty": "0.001",
+            "price": "50000",
+            "executedQty": "0",
+            "transactTime": 1499405658800,
+        }
+        result = adapter.cancel_order("4293156", "BTCUSDT")
+        mock_client.cancel_order.assert_called_once_with(symbol="BTCUSDT", order_id=4293156)
+        assert result.get("rejected") is not True
+        assert result["broker_order_id"] == "4293156"
+        assert result["status"] == "CANCELED"
+        assert result["symbol"] == "BTCUSDT"
+
+    def test_cancel_order_client_order_id_string_calls_client_with_orig_client_order_id(self, adapter, mock_client):
+        """When broker_order_id is not numeric, adapter uses client_order_id parameter."""
+        mock_client.cancel_order.return_value = {
+            "orderId": 999,
+            "symbol": "ETHUSDT",
+            "status": "CANCELED",
+            "clientOrderId": "my-custom-id",
+            "side": "SELL",
+            "type": "LIMIT",
+            "origQty": "0.01",
+            "price": "3000",
+            "executedQty": "0",
+            "transactTime": 1499405658900,
+        }
+        result = adapter.cancel_order("my-custom-id", "ETHUSDT")
+        mock_client.cancel_order.assert_called_once_with(symbol="ETHUSDT", client_order_id="my-custom-id")
+        assert result["status"] == "CANCELED"
+        assert result["broker_order_id"] == "999"
+
+    def test_cancel_order_api_error_returns_reject(self, adapter, mock_client):
+        """BinanceAPIError from cancel_order results in reject dict."""
+        mock_client.cancel_order.side_effect = BinanceAPIError("Order does not exist.")
+        result = adapter.cancel_order("12345", "BTCUSDT")
+        assert result["rejected"] is True
+        assert "reject_reason" in result
+        assert "Order does not exist" in result["reject_reason"]
+
+    def test_cancel_order_missing_args_returns_reject(self, adapter, mock_client):
+        """Missing symbol or broker_order_id returns reject without calling client."""
+        result = adapter.cancel_order("", "BTCUSDT")
+        assert result["rejected"] is True
+        assert "reject_reason" in result
+        mock_client.cancel_order.assert_not_called()
+
+        result2 = adapter.cancel_order("123", "")
+        assert result2["rejected"] is True
+        mock_client.cancel_order.assert_not_called()
+
+
 # --- BinanceBrokerAdapter.start_fill_listener ---
 
 

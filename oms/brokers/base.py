@@ -42,3 +42,17 @@ class BrokerAdapter(Protocol):
         Typically runs in a background thread.
         """
         ...
+
+    def cancel_order(self, broker_order_id: str, symbol: str) -> Dict[str, Any]:
+        """
+        Cancel an open order by broker order id and symbol.
+
+        Args:
+            broker_order_id: Broker's order id (e.g. Binance orderId).
+            symbol: Trading symbol (e.g. BTCUSDT).
+
+        Returns:
+            Unified response dict with status (e.g. CANCELED), broker_order_id, symbol,
+            or dict with "rejected": True and "reject_reason" on failure.
+        """
+        ...

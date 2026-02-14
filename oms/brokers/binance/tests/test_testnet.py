@@ -405,7 +405,7 @@ class TestBinanceTestnetAdapter:
         return BinanceBrokerAdapter(client=client)
 
     def test_adapter_place_order_then_cancel(self, adapter, client):
-        """Adapter place_order returns unified response; cancel via client (adapter has no cancel)."""
+        """Adapter place_order returns unified response; cancel via adapter.cancel_order (12.1.9e)."""
         import requests as _requests
         symbol = "BTCUSDT"
         ticker = _requests.get(
@@ -436,8 +436,12 @@ class TestBinanceTestnetAdapter:
         assert result.get("symbol") == symbol
         assert result.get("side") == "BUY"
         assert result.get("client_order_id") == order_id
-        # Clean up: cancel via raw client (adapter does not expose cancel)
-        client.cancel_order(symbol=symbol, client_order_id=order_id)
+        # Clean up: cancel via adapter (12.1.9e)
+        cancel_result = adapter.cancel_order(broker_order_id=result["broker_order_id"], symbol=symbol)
+        assert cancel_result.get("rejected") is not True, (
+            f"Adapter cancel_order failed: {cancel_result.get('reject_reason', cancel_result)}"
+        )
+        assert cancel_result.get("status") in ("CANCELED", "PENDING_CANCEL")
 
     def test_adapter_fill_listener_receives_fill(self, adapter, client):
         """Adapter start_fill_listener: place market order via adapter, receive unified fill, then stop."""

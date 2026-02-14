@@ -9,20 +9,26 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from redis import Redis
 
+from oms.cancel_consumer import ack_cancel_requested, read_one_cancel_request, read_one_cancel_request_cg
+from oms.cleanup import set_order_key_ttl
 from oms.consumer import ack_risk_approved, read_one_risk_approved, read_one_risk_approved_cg
 from oms.producer import produce_oms_fill
 from oms.registry import AdapterRegistry
 from oms.storage.redis_order_store import RedisOrderStore
 
+TERMINAL_STATUSES = ("filled", "rejected", "cancelled", "expired")
+
 
 def make_fill_callback(
     redis: Redis,
     store: RedisOrderStore,
+    terminal_order_ttl_seconds: Optional[int] = None,
 ) -> Callable[[Dict[str, Any]], None]:
     """
     Return a callback suitable for adapter.start_fill_listener(callback).
 
-    On each fill/reject: updates order store and produces to oms_fills (12.1.8).
+    On each fill/reject/cancelled/expired: updates order store and produces to oms_fills (12.1.8).
+    When status is terminal (filled, rejected, cancelled, expired), optionally sets TTL on order key (12.1.9b).
     """
 
     def on_fill_or_reject(event: Dict[str, Any]) -> None:
@@ -33,10 +39,20 @@ def make_fill_callback(
         if not order_id:
             return
 
-        if event.get("event_type") != "fill":
-            status = "rejected"
+        event_type = (event.get("event_type") or "fill").strip().lower()
+        if event_type == "fill":
+            pass  # status set below from order_status / cumulative
+        elif event_type == "cancelled":
+            status = "cancelled"
+            executed_qty = None
+        elif event_type == "expired":
+            status = "expired"
             executed_qty = None
         else:
+            status = "rejected"
+            executed_qty = None
+
+        if event_type == "fill":
             # Map Binance order_status (X) to Redis status; use cumulative qty or accumulate
             binance_order_status = (event.get("order_status") or "").strip().upper()
             if binance_order_status == "FILLED":
@@ -83,6 +99,9 @@ def make_fill_callback(
             "comment": order.get("comment", ""),
         }
         produce_oms_fill(redis, payload)
+
+        if status in TERMINAL_STATUSES and terminal_order_ttl_seconds is not None and terminal_order_ttl_seconds > 0:
+            set_order_key_ttl(redis, order_id, terminal_order_ttl_seconds)
 
     return on_fill_or_reject
 
@@ -209,3 +228,96 @@ def process_one_risk_approved(
         def get(self, broker_name: str) -> Optional[Any]:
             return self._fn(broker_name)
     return process_one(redis, store, _Registry(get_adapter), start_id=start_id, block_ms=block_ms)
+
+
+def process_one_cancel(
+    redis: Redis,
+    store: RedisOrderStore,
+    registry: AdapterRegistry,
+    start_id: str = "0",
+    block_ms: Optional[int] = None,
+    publish_to_oms_fills: bool = True,
+    consumer_group: Optional[str] = "oms",
+    consumer_name: Optional[str] = "oms-1",
+) -> Optional[Dict[str, Any]]:
+    """
+    Read one cancel_requested message, resolve order, call adapter.cancel_order, update store (12.1.9f).
+
+    When consumer_group and consumer_name are set, uses XREADGROUP + XACK so each message
+    is delivered once (same pattern as process_one for risk_approved).
+
+    Resolves order by order_id (from message) or by broker_order_id (lookup in store).
+    Updates store to cancelled and optionally publishes cancelled event to oms_fills.
+
+    Returns:
+        Dict with order_id, broker_order_id, cancelled, reject_reason; or None if no message.
+    """
+    if consumer_group and consumer_name:
+        out = read_one_cancel_request_cg(redis, consumer_group, consumer_name, block_ms=block_ms)
+    else:
+        out = read_one_cancel_request(redis, start_id=start_id, block_ms=block_ms)
+    if not out:
+        return None
+    entry_id, req = out
+    order_id = req.get("order_id")
+    broker_order_id = req.get("broker_order_id") or ""
+    symbol = (req.get("symbol") or "").strip()
+    broker = (req.get("broker") or "binance").strip()
+
+    if order_id:
+        order = store.get_order(order_id)
+        if not order:
+            if consumer_group and consumer_name:
+                ack_cancel_requested(redis, consumer_group, entry_id)
+            return {"order_id": order_id, "cancelled": False, "reject_reason": "Order not found in store"}
+        broker_order_id = (order.get("broker_order_id") or "").strip()
+        symbol = (order.get("symbol") or "").strip()
+        if not broker_order_id or not symbol:
+            if consumer_group and consumer_name:
+                ack_cancel_requested(redis, consumer_group, entry_id)
+            return {"order_id": order_id, "cancelled": False, "reject_reason": "Order has no broker_order_id/symbol"}
+    else:
+        if not broker_order_id or not symbol:
+            if consumer_group and consumer_name:
+                ack_cancel_requested(redis, consumer_group, entry_id)
+            return {"cancelled": False, "reject_reason": "Missing broker_order_id or symbol"}
+        order_id = store.find_order_by_broker_order_id(broker_order_id)
+        order = store.get_order(order_id) if order_id else None
+
+    adapter = registry.get(broker)
+    if not adapter:
+        if consumer_group and consumer_name:
+            ack_cancel_requested(redis, consumer_group, entry_id)
+        return {"order_id": order_id, "cancelled": False, "reject_reason": "No adapter for broker"}
+
+    response = adapter.cancel_order(broker_order_id=broker_order_id, symbol=symbol)
+    if response.get("rejected"):
+        if consumer_group and consumer_name:
+            ack_cancel_requested(redis, consumer_group, entry_id)
+        return {"order_id": order_id, "cancelled": False, "reject_reason": response.get("reject_reason", "rejected")}
+
+    if order_id:
+        store.update_fill_status(order_id, "cancelled")
+        if publish_to_oms_fills:
+            order = order or store.get_order(order_id) or {}
+            produce_oms_fill(redis, {
+                "event_type": "cancelled",
+                "order_id": order_id,
+                "broker_order_id": broker_order_id,
+                "symbol": order.get("symbol", symbol),
+                "side": order.get("side", ""),
+                "quantity": order.get("quantity", ""),
+                "price": order.get("price", ""),
+                "fee": "", "fee_asset": "", "executed_at": "", "fill_id": "",
+                "reject_reason": response.get("reject_reason", "CANCELED"),
+                "book": order.get("book", ""),
+                "comment": order.get("comment", ""),
+            })
+    if consumer_group and consumer_name:
+        ack_cancel_requested(redis, consumer_group, entry_id)
+    return {
+        "order_id": order_id,
+        "broker_order_id": broker_order_id,
+        "cancelled": True,
+        "status": response.get("status", "CANCELED"),
+    }

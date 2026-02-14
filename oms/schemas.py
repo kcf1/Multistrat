@@ -24,6 +24,16 @@ RISK_APPROVED_FIELDS = (
     "created_at",    # optional ISO
 )
 
+# cancel_requested: request to cancel an order (produced by Risk/admin, consumed by OMS)
+# At least one of order_id (internal) or (broker_order_id + symbol) required; broker for adapter routing.
+CANCEL_REQUESTED_STREAM = "cancel_requested"
+CANCEL_REQUESTED_FIELDS = (
+    "order_id",         # internal OMS order_id (optional if broker_order_id + symbol provided)
+    "broker_order_id",  # broker's order id (optional if order_id provided)
+    "symbol",           # e.g. BTCUSDT (required if using broker_order_id)
+    "broker",           # e.g. "binance" — OMS selects adapter by this
+)
+
 # oms_fills: fill or reject event (produced by OMS, consumed by Booking)
 OMS_FILLS_STREAM = "oms_fills"
 OMS_FILLS_FIELDS = (

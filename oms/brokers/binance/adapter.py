@@ -142,3 +142,41 @@ class BinanceBrokerAdapter:
         if self._listener:
             self._listener.stop()
             self._listener = None
+
+    def cancel_order(self, broker_order_id: str, symbol: str) -> Dict[str, Any]:
+        """
+        Cancel an open order via Binance API.
+
+        Args:
+            broker_order_id: Binance orderId (numeric string).
+            symbol: Trading symbol (e.g. BTCUSDT).
+
+        Returns:
+            Unified response (status, broker_order_id, symbol, ...) or
+            reject dict (rejected=True, reject_reason=...) on failure.
+        """
+        if not symbol or not broker_order_id:
+            return {
+                "rejected": True,
+                "reject_reason": "Missing symbol or broker_order_id",
+            }
+        try:
+            order_id_int = int(broker_order_id)
+        except (TypeError, ValueError):
+            # Binance also accepts origClientOrderId (string)
+            try:
+                resp = self._client.cancel_order(symbol=symbol, client_order_id=broker_order_id)
+                return binance_order_response_to_unified(resp)
+            except BinanceAPIError as e:
+                return {
+                    "rejected": True,
+                    "reject_reason": str(e),
+                }
+        try:
+            resp = self._client.cancel_order(symbol=symbol, order_id=order_id_int)
+            return binance_order_response_to_unified(resp)
+        except BinanceAPIError as e:
+            return {
+                "rejected": True,
+                "reject_reason": str(e),
+            }

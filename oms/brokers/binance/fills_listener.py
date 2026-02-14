@@ -167,6 +167,56 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "reject_reason": event.get("r") or "REJECTED",
         }
 
+    # Cancelled: exec_type CANCELED or order status CANCELED
+    if exec_type == "CANCELED" or order_status == "CANCELED":
+        try:
+            qty = float(event.get("q", 0) or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        try:
+            price = float(event.get("p", 0) or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        return {
+            "event_type": "cancelled",
+            "order_id": event.get("c") or "",
+            "broker_order_id": str(event.get("i", "")),
+            "symbol": event.get("s", ""),
+            "side": event.get("S", ""),
+            "quantity": qty,
+            "price": price,
+            "fee": 0.0,
+            "fee_asset": None,
+            "executed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "fill_id": "",
+            "reject_reason": event.get("r") or "CANCELED",
+        }
+
+    # Expired: exec_type EXPIRED or order status EXPIRED
+    if exec_type == "EXPIRED" or order_status == "EXPIRED":
+        try:
+            qty = float(event.get("q", 0) or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        try:
+            price = float(event.get("p", 0) or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        return {
+            "event_type": "expired",
+            "order_id": event.get("c") or "",
+            "broker_order_id": str(event.get("i", "")),
+            "symbol": event.get("s", ""),
+            "side": event.get("S", ""),
+            "quantity": qty,
+            "price": price,
+            "fee": 0.0,
+            "fee_asset": None,
+            "executed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "fill_id": "",
+            "reject_reason": event.get("r") or "EXPIRED",
+        }
+
     return None
 
 

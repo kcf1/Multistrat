@@ -141,6 +141,46 @@ EXECUTION_REPORT_NEW = {
     "r": "NONE",
 }
 
+EXECUTION_REPORT_CANCELED = {
+    "e": "executionReport",
+    "E": 1499405658700,
+    "s": "ETHBTC",
+    "c": "internal-order-789",
+    "S": "SELL",
+    "o": "LIMIT",
+    "x": "CANCELED",
+    "X": "CANCELED",
+    "r": "USER_CANCEL",
+    "i": 4293154,
+    "l": "0.00000000",
+    "z": "0.00000000",
+    "L": "0.00000000",
+    "q": "1.00000000",
+    "p": "0.10264410",
+    "T": 1499405658699,
+    "t": -1,
+}
+
+EXECUTION_REPORT_EXPIRED = {
+    "e": "executionReport",
+    "E": 1499405658750,
+    "s": "BTCUSDT",
+    "c": "internal-order-exp-1",
+    "S": "BUY",
+    "o": "LIMIT",
+    "f": "GTX",
+    "x": "EXPIRED",
+    "X": "EXPIRED",
+    "r": "GTX",
+    "i": 4293155,
+    "l": "0.00000000",
+    "z": "0.00000000",
+    "q": "0.001",
+    "p": "45000",
+    "T": 1499405658749,
+    "t": -1,
+}
+
 
 class TestParseExecutionReport:
     """Test fill/reject parsing from executionReport payloads."""
@@ -211,6 +251,32 @@ class TestParseExecutionReport:
         """TRADE with last executed quantity 0 does not emit fill."""
         payload = {**EXECUTION_REPORT_TRADE, "l": "0.00000000", "z": "0"}
         assert parse_execution_report(payload) is None
+
+    def test_canceled_returns_cancelled_event(self):
+        """CANCELED exec_type / order_status produces event_type=cancelled (12.1.9c)."""
+        out = parse_execution_report(EXECUTION_REPORT_CANCELED)
+        assert out is not None
+        assert out["event_type"] == "cancelled"
+        assert out["order_id"] == "internal-order-789"
+        assert out["broker_order_id"] == "4293154"
+        assert out["symbol"] == "ETHBTC"
+        assert out["side"] == "SELL"
+        assert out["reject_reason"] == "USER_CANCEL"
+        assert out["quantity"] == 1.0
+        assert out["price"] == 0.10264410
+
+    def test_expired_returns_expired_event(self):
+        """EXPIRED exec_type / order_status produces event_type=expired (12.1.9c)."""
+        out = parse_execution_report(EXECUTION_REPORT_EXPIRED)
+        assert out is not None
+        assert out["event_type"] == "expired"
+        assert out["order_id"] == "internal-order-exp-1"
+        assert out["broker_order_id"] == "4293155"
+        assert out["symbol"] == "BTCUSDT"
+        assert out["side"] == "BUY"
+        assert out["reject_reason"] == "GTX"
+        assert out["quantity"] == 0.001
+        assert out["price"] == 45000.0
 
 
 class TestStreamUrlFromBaseUrl:
