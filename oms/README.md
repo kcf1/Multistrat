@@ -38,15 +38,17 @@ pytest oms/brokers/binance/tests/test_testnet.py -v
 
 Set `RUN_BINANCE_TESTNET=1` and `BINANCE_API_KEY` / `BINANCE_API_SECRET` (and optionally `BINANCE_BASE_URL`). If `python-dotenv` is installed, variables are loaded from the repo root `.env`. Fill listener uses WebSocket API (ws-api) by default; if ws-api does not connect on testnet, see `docs/BINANCE_API_RULES.md` §6 (timestamp sync, network, testnet availability).
 
-## Redis Stream Schemas
+## Redis Stream Schemas (task 12.1.5)
+
+Defined in `oms/schemas.py`; see PHASE2_DETAILED_PLAN §4.2.
 
 ### Input: `risk_approved`
-Defined in OMS (see task 12.1.5).
+Fields: `order_id`, `broker`, `account_id`, `symbol`, `side`, `quantity`, `order_type`, `price`, `time_in_force`, `book`, `comment`, `strategy_id`, `created_at`. Consumed by OMS; order payload is passed to adapter `place_order`.
 
 ### Output: `oms_fills`
-Defined in OMS (see task 12.1.5).
+Fields: `event_type` (fill|reject), `order_id`, `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `executed_at`, `fill_id`, `reject_reason`, `book`, `comment`. Produced by OMS from adapter fill/reject callback; Booking consumes.
 
 ## Order staging (Redis + Postgres sync)
 
-- **Redis:** `orders:{order_id}` (hash), `orders:by_status:{status}` (set), `orders:by_broker_order_id:{broker_order_id}` (lookup). O(1) updates; see PHASE2_DETAILED_PLAN §5.2.
-- **Postgres:** Periodic sync (e.g. completed orders) to `orders` table for audit and recovery.
+- **Redis order store** (`oms/storage/redis_order_store.py`, task 12.1.4): `orders:{order_id}` (hash), `orders:by_status:{status}` (set), `orders:by_book:{book}` (set), `orders:by_broker_order_id:{broker_order_id}` (lookup). Operations: stage_order, update_status, update_fill_status, get_order, find_order_by_broker_order_id. Pipelines for atomic updates.
+- **Postgres:** Periodic sync (e.g. completed orders) to `orders` table for audit and recovery (task 12.1.10).

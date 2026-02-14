@@ -6,3 +6,4 @@ websocket-client>=1.6.0
 # Testing (for unit tests)
 pytest>=7.4.0
 responses>=0.24.0
+fakeredis>=2.20.0
