@@ -12,7 +12,7 @@ Uses pipelines for atomic multi-key updates.
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from redis import Redis
 
@@ -179,3 +179,11 @@ class RedisOrderStore:
         if order_id is None:
             return None
         return order_id.decode() if isinstance(order_id, bytes) else order_id
+
+    def get_order_ids_in_status(self, status: str) -> List[str]:
+        """Return list of order_id in the given status set (e.g. for sync by status)."""
+        key = _status_set_key(status)
+        members = self._redis.smembers(key)
+        if not members:
+            return []
+        return [m.decode() if isinstance(m, bytes) else m for m in members]

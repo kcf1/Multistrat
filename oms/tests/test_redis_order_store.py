@@ -120,3 +120,16 @@ class TestIdempotentIndexUpdates:
         store.update_status(order_id, "sent", "sent")
         assert redis_client.scard("orders:by_status:sent") == 1
         assert redis_client.sismember("orders:by_status:sent", order_id)
+
+
+class TestGetOrderIdsInStatus:
+    def test_returns_empty_for_empty_status(self, store):
+        assert store.get_order_ids_in_status("filled") == []
+
+    def test_returns_order_ids_in_status(self, store):
+        store.stage_order("a", {"broker": "binance", "symbol": "BTCUSDT", "side": "BUY", "quantity": 0.001})
+        store.stage_order("b", {"broker": "binance", "symbol": "ETHUSDT", "side": "SELL", "quantity": 0.01})
+        store.update_fill_status("a", "filled")
+        store.update_fill_status("b", "filled")
+        ids = store.get_order_ids_in_status("filled")
+        assert set(ids) == {"a", "b"}

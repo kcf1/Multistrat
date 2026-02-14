@@ -26,12 +26,14 @@ def make_fill_callback(
     redis: Redis,
     store: RedisOrderStore,
     terminal_order_ttl_seconds: Optional[int] = None,
+    on_terminal_sync: Optional[Callable[[str], None]] = None,
 ) -> Callable[[Dict[str, Any]], None]:
     """
     Return a callback suitable for adapter.start_fill_listener(callback).
 
     On each fill/reject/cancelled/expired: updates order store and produces to oms_fills (12.1.8).
-    When status is terminal (filled, rejected, cancelled, expired), optionally sets TTL on order key (12.1.9b).
+    When status is terminal (filled, rejected, cancelled, expired): if on_terminal_sync is set,
+    calls it (sync to Postgres + TTL); else optionally sets TTL only (12.1.9b, 12.1.10).
     """
 
     def on_fill_or_reject(event: Dict[str, Any]) -> None:
@@ -103,8 +105,11 @@ def make_fill_callback(
         }
         produce_oms_fill(redis, payload)
 
-        if status in TERMINAL_STATUSES and terminal_order_ttl_seconds is not None and terminal_order_ttl_seconds > 0:
-            set_order_key_ttl(redis, order_id, terminal_order_ttl_seconds)
+        if status in TERMINAL_STATUSES:
+            if on_terminal_sync is not None:
+                on_terminal_sync(order_id)
+            elif terminal_order_ttl_seconds is not None and terminal_order_ttl_seconds > 0:
+                set_order_key_ttl(redis, order_id, terminal_order_ttl_seconds)
 
     return on_fill_or_reject
 
@@ -136,6 +141,7 @@ def process_one(
     block_ms: Optional[int] = None,
     consumer_group: Optional[str] = "oms",
     consumer_name: Optional[str] = "oms-1",
+    on_terminal_sync: Optional[Callable[[str], None]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     One iteration of OMS loop (12.1.9): consumer → store → registry → place_order → producer.
@@ -143,6 +149,7 @@ def process_one(
     Reads one risk_approved message (12.1.6), stages in store, routes by registry (12.1.7),
     places order, updates store; on reject produces to oms_fills (12.1.8).
     When consumer_group is set, uses XREADGROUP + XACK so message is not redelivered.
+    When order is rejected, if on_terminal_sync is set, calls it (sync to Postgres + TTL, 12.1.10).
     Does not start the fill listener; caller must run the listener with make_fill_callback.
 
     Returns:
@@ -169,6 +176,8 @@ def process_one(
         produce_oms_fill(redis, _reject_event(order_id, order, reject_reason="No adapter for broker"))
         if consumer_group and consumer_name:
             ack_risk_approved(redis, consumer_group, entry_id)
+        if on_terminal_sync is not None:
+            on_terminal_sync(order_id)
         return {"order_id": order_id, "rejected": True, "reject_reason": "No adapter for broker"}
 
     try:
@@ -194,6 +203,8 @@ def process_one(
             if consumer_group and consumer_name:
                 ack_risk_approved(redis, consumer_group, entry_id)
             redis.delete(retry_key)
+            if on_terminal_sync is not None:
+                on_terminal_sync(order_id)
             return {
                 "order_id": order_id,
                 "rejected": True,
@@ -214,6 +225,8 @@ def process_one(
         )
         if consumer_group and consumer_name:
             ack_risk_approved(redis, consumer_group, entry_id)
+        if on_terminal_sync is not None:
+            on_terminal_sync(order_id)
         return {
             "order_id": order_id,
             "rejected": True,
@@ -246,15 +259,20 @@ def process_one_risk_approved(
     get_adapter: Union[Callable[[str], Any], AdapterRegistry],
     start_id: str = "0",
     block_ms: Optional[int] = None,
+    on_terminal_sync: Optional[Callable[[str], None]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Read one risk_approved, stage, place via adapter, update store.
 
     get_adapter: either a callable (broker_name -> adapter) or an AdapterRegistry.
     Does not start the fill listener; use make_fill_callback for that.
+    When order is terminal (reject path), on_terminal_sync(order_id) is called if set (12.1.10).
     """
     if isinstance(get_adapter, AdapterRegistry):
-        return process_one(redis, store, get_adapter, start_id=start_id, block_ms=block_ms)
+        return process_one(
+            redis, store, get_adapter,
+            start_id=start_id, block_ms=block_ms, on_terminal_sync=on_terminal_sync,
+        )
     # Legacy: wrap callable as a one-off registry
     class _Registry(AdapterRegistry):
         def __init__(self, fn: Callable[[str], Any]) -> None:
@@ -262,7 +280,10 @@ def process_one_risk_approved(
             self._fn = fn
         def get(self, broker_name: str) -> Optional[Any]:
             return self._fn(broker_name)
-    return process_one(redis, store, _Registry(get_adapter), start_id=start_id, block_ms=block_ms)
+    return process_one(
+        redis, store, _Registry(get_adapter),
+        start_id=start_id, block_ms=block_ms, on_terminal_sync=on_terminal_sync,
+    )
 
 
 def process_one_cancel(

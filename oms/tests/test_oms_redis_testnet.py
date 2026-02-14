@@ -38,6 +38,7 @@ def _env(key: str, default: str = "") -> str:
 
 RUN_TESTNET = _env("RUN_BINANCE_TESTNET").lower() in ("1", "true", "yes")
 REDIS_URL = _env("REDIS_URL")
+DATABASE_URL = _env("DATABASE_URL")
 
 skip_unless_testnet = pytest.mark.skipif(
     not RUN_TESTNET or not _env("BINANCE_API_KEY") or not _env("BINANCE_API_SECRET"),
@@ -47,6 +48,20 @@ skip_unless_redis = pytest.mark.skipif(
     not REDIS_URL,
     reason="Set REDIS_URL to run Redis-through-testnet test",
 )
+skip_unless_database = pytest.mark.skipif(
+    not DATABASE_URL,
+    reason="Set DATABASE_URL to run full pipeline test with Postgres sync",
+)
+
+
+def _pg_available() -> bool:
+    try:
+        import psycopg2
+        c = psycopg2.connect(DATABASE_URL)
+        c.close()
+        return True
+    except Exception:
+        return False
 
 
 def _redis_available() -> bool:
@@ -380,3 +395,100 @@ class TestOmsRedisTestnet:
         # Message was acked (reject path acks)
         result2 = process_one(redis_client, store, registry, consumer_group="oms", consumer_name="oms-1")
         assert result2 is None
+
+    @skip_unless_testnet
+    @skip_unless_redis
+    @skip_unless_database
+    @pytest.mark.skipif(not _redis_available(), reason="Redis not reachable at REDIS_URL")
+    @pytest.mark.skipif(not _pg_available(), reason="Postgres not reachable at DATABASE_URL")
+    def test_full_pipeline_redis_order_testnet_status_sync_to_postgres(self, redis_client, store, adapter):
+        """Full pipeline: risk_approved -> testnet -> Redis order status -> sync to Postgres (12.1.10)."""
+        from oms.redis_flow import TERMINAL_STATUSES, make_fill_callback, process_one_risk_approved
+        from oms.schemas import OMS_FILLS_STREAM, RISK_APPROVED_STREAM
+        from oms.streams import add_message, read_latest
+        from oms.sync import sync_one_order, sync_terminal_orders
+
+        redis_client.delete(RISK_APPROVED_STREAM)
+        redis_client.delete(OMS_FILLS_STREAM)
+
+        order_id = f"redis-pg-{int(time.time() * 1000)}"
+        risk_order = {
+            "order_id": order_id,
+            "broker": "binance",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "quantity": 0.0001,
+            "order_type": "MARKET",
+            "book": "full_pipeline",
+            "comment": "redis testnet postgres sync",
+        }
+
+        def on_terminal_sync(oid: str) -> None:
+            sync_one_order(redis_client, store, DATABASE_URL, oid, ttl_after_sync_seconds=60)
+
+        fill_cb = make_fill_callback(redis_client, store, on_terminal_sync=on_terminal_sync)
+        adapter.start_fill_listener(fill_cb)
+
+        for _ in range(125):
+            time.sleep(0.2)
+            if adapter._listener and getattr(adapter._listener, "stream_connected", False):
+                break
+        if not adapter._listener or not getattr(adapter._listener, "stream_connected", False):
+            adapter.stop_fill_listener()
+            pytest.skip("Fill listener WebSocket did not connect within 25s")
+
+        try:
+            add_message(redis_client, RISK_APPROVED_STREAM, risk_order)
+
+            def get_adapter(broker: str):
+                return adapter if broker == "binance" else None
+
+            result = process_one_risk_approved(
+                redis_client, store, get_adapter, on_terminal_sync=on_terminal_sync,
+            )
+            assert result is not None
+            if result.get("rejected"):
+                # Rejected by testnet: sync runs in process_one via on_terminal_sync
+                pass
+            else:
+                assert result.get("broker_order_id")
+
+            entries = []
+            for _ in range(150):
+                time.sleep(0.1)
+                entries = read_latest(redis_client, OMS_FILLS_STREAM, count=10)
+                if entries:
+                    break
+
+            adapter.stop_fill_listener()
+        except Exception:
+            adapter.stop_fill_listener()
+            raise
+
+        assert entries, "No message on oms_fills (timeout)"
+        _eid, fields = entries[-1]
+        assert fields.get("order_id") == order_id
+
+        # Ensure any terminal order is synced (callback may have run; periodic catch-up)
+        sync_terminal_orders(redis_client, store, DATABASE_URL, ttl_after_sync_seconds=None)
+
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT internal_id, status, symbol, side, book, comment FROM orders WHERE internal_id = %s",
+                (order_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        assert len(rows) == 1, f"Expected one order row in Postgres for {order_id}, got {len(rows)}"
+        row = rows[0]
+        assert row[0] == order_id
+        assert row[1] in TERMINAL_STATUSES, f"Expected terminal status in Postgres, got {row[1]}"
+        assert row[2] == "BTCUSDT"
+        assert row[3] == "BUY"
+        assert row[4] == "full_pipeline"
+        assert "postgres sync" in (row[5] or "")
