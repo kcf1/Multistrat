@@ -142,9 +142,12 @@ def read_one_risk_approved_cg(
     group: str,
     consumer: str,
     block_ms: Optional[int] = None,
+    read_id: str = ">",
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
-    Read at most one risk_approved message via consumer group (XREADGROUP ">").
+    Read at most one risk_approved message via consumer group (XREADGROUP).
+
+    read_id: ">" = new messages only; "0" = pending messages for this consumer.
     Ensures group exists first. Returns (entry_id, order_dict) or None.
     """
     ensure_risk_approved_consumer_group(redis, group)
@@ -153,7 +156,7 @@ def read_one_risk_approved_cg(
         RISK_APPROVED_STREAM,
         group,
         consumer,
-        id=">",
+        id=read_id,
         count=1,
         block_ms=block_ms,
     )
@@ -164,6 +167,19 @@ def read_one_risk_approved_cg(
         except RiskApprovedParseError:
             continue
     return None
+
+
+def read_one_risk_approved_pending(
+    redis: Redis,
+    group: str,
+    consumer: str,
+) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """
+    Read at most one pending risk_approved message (XREADGROUP id="0", no block).
+
+    Used to retry messages that were not acked (e.g. place_order raised). Returns (entry_id, order) or None.
+    """
+    return read_one_risk_approved_cg(redis, group, consumer, block_ms=0, read_id="0")
 
 
 def ack_risk_approved(redis: Redis, group: str, entry_id: str) -> int:

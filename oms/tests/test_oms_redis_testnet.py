@@ -252,3 +252,131 @@ class TestOmsRedisTestnet:
         # Second process_one_cancel should get no message (consumer group already acked)
         no_msg = process_one_cancel(redis_client, store, registry, consumer_group="oms", consumer_name="oms-1")
         assert no_msg is None
+
+    def test_place_order_raises_retry_then_reject_consumer_group(self, redis_client, store):
+        """12.1.9d with real Redis: consumer group, place_order raises -> no XACK until max retries, then reject + XACK."""
+        from typing import Any, Dict
+
+        from oms.consumer import ensure_risk_approved_consumer_group
+        from oms.registry import AdapterRegistry
+        from oms.redis_flow import process_one
+        from oms.schemas import OMS_FILLS_STREAM, RISK_APPROVED_STREAM
+        from oms.streams import add_message, read_latest
+
+        redis_client.delete(RISK_APPROVED_STREAM)
+        redis_client.delete(OMS_FILLS_STREAM)
+        # Clear any leftover retry keys and order from previous runs
+        for key in redis_client.scan_iter("oms:retry:risk_approved:*"):
+            redis_client.delete(key)
+        order_id = f"ord-retry-redis-{int(time.time() * 1000)}"
+        redis_client.delete(f"orders:{order_id}")
+
+        # Consumer group created before add so ">" sees the message (real Redis)
+        ensure_risk_approved_consumer_group(redis_client, "oms", "0")
+        add_message(redis_client, RISK_APPROVED_STREAM, {
+            "broker": "binance",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "quantity": "0.001",
+            "order_type": "MARKET",
+            "order_id": order_id,
+        })
+
+        class RaisingAdapter:
+            def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
+                raise RuntimeError("broker down")
+            def start_fill_listener(self, callback: Any) -> None:
+                pass
+            def cancel_order(self, broker_order_id: str, symbol: str) -> Dict[str, Any]:
+                return {"rejected": True}
+
+        registry = AdapterRegistry()
+        registry.register("binance", RaisingAdapter())
+
+        # First two: retry_later, no ack (message stays in PEL)
+        for _ in range(2):
+            result = process_one(
+                redis_client, store, registry,
+                consumer_group="oms", consumer_name="oms-1",
+            )
+            assert result is not None
+            assert result.get("retry_later") is True
+            assert result.get("rejected") is False
+            order = store.get_order(order_id)
+            assert order is not None
+            assert order["status"] == "pending"
+
+        # Third: reject + ack (Option B)
+        result3 = process_one(
+            redis_client, store, registry,
+            consumer_group="oms", consumer_name="oms-1",
+        )
+        assert result3 is not None
+        assert result3.get("rejected") is True
+        assert "retries" in result3.get("reject_reason", "").lower()
+        order = store.get_order(order_id)
+        assert order is not None
+        assert order["status"] == "rejected"
+
+        entries = read_latest(redis_client, OMS_FILLS_STREAM, count=5)
+        assert any(e[1].get("event_type") == "reject" and e[1].get("order_id") == order_id for e in entries)
+
+        # Fourth: no message (acked)
+        result4 = process_one(
+            redis_client, store, registry,
+            consumer_group="oms", consumer_name="oms-1",
+        )
+        assert result4 is None
+
+    def test_error_order_rejected_via_redis_testnet(self, redis_client, store, adapter):
+        """Send an order that testnet will reject (invalid symbol); assert reject flows to store and oms_fills."""
+        from oms.consumer import ensure_risk_approved_consumer_group
+        from oms.registry import AdapterRegistry
+        from oms.redis_flow import process_one
+        from oms.schemas import OMS_FILLS_STREAM, RISK_APPROVED_STREAM
+        from oms.streams import add_message, read_latest
+
+        redis_client.delete(RISK_APPROVED_STREAM)
+        redis_client.delete(OMS_FILLS_STREAM)
+        order_id = f"ord-error-redis-{int(time.time() * 1000)}"
+        redis_client.delete(f"orders:{order_id}")
+
+        ensure_risk_approved_consumer_group(redis_client, "oms", "0")
+        add_message(redis_client, RISK_APPROVED_STREAM, {
+            "broker": "binance",
+            "symbol": "INVALIDPAIR",
+            "side": "BUY",
+            "quantity": "0.0001",
+            "order_type": "MARKET",
+            "order_id": order_id,
+            "book": "redis_error_test",
+            "comment": "error order test",
+        })
+
+        registry = AdapterRegistry()
+        registry.register("binance", adapter)
+
+        result = process_one(
+            redis_client, store, registry,
+            consumer_group="oms", consumer_name="oms-1",
+        )
+        assert result is not None
+        assert result.get("rejected") is True
+        assert result.get("order_id") == order_id
+        assert result.get("reject_reason")
+
+        order = store.get_order(order_id)
+        assert order is not None
+        assert order["status"] == "rejected"
+
+        entries = read_latest(redis_client, OMS_FILLS_STREAM, count=5)
+        assert any(
+            e[1].get("event_type") == "reject" and e[1].get("order_id") == order_id
+            for e in entries
+        ), f"Expected reject on oms_fills, got {[e[1].get('event_type') for e in entries]}"
+        reject_entry = next(e for e in entries if e[1].get("order_id") == order_id and e[1].get("event_type") == "reject")
+        assert "INVALIDPAIR" in str(reject_entry[1].get("reject_reason", "")) or "symbol" in str(reject_entry[1].get("reject_reason", "")).lower()
+
+        # Message was acked (reject path acks)
+        result2 = process_one(redis_client, store, registry, consumer_group="oms", consumer_name="oms-1")
+        assert result2 is None

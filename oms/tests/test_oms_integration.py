@@ -14,11 +14,13 @@ from oms.streams import add_message, read_latest
 from oms.storage.redis_order_store import RedisOrderStore
 
 
-def _mock_adapter(place_result: Dict[str, Any], cancel_result: Optional[Dict[str, Any]] = None):
-    """Return a mock adapter that place_order returns place_result; optional cancel_order."""
+def _mock_adapter(place_result: Dict[str, Any], cancel_result: Optional[Dict[str, Any]] = None, place_raises: Optional[Exception] = None):
+    """Return a mock adapter; place_order returns place_result or raises place_raises if set."""
 
     class MockAdapter:
         def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
+            if place_raises is not None:
+                raise place_raises
             return place_result
 
         def start_fill_listener(self, callback) -> None:
@@ -137,6 +139,49 @@ def test_oms_integration_sent_then_fill_callback_produces(redis_client, store):
     assert fields["event_type"] == "fill"
     assert fields["order_id"] == result["order_id"]
     assert fields["broker_order_id"] == "mock-123"
+
+
+def test_oms_integration_place_order_raises_retry_then_reject_after_max(redis_client, store):
+    """12.1.9d: When place_order raises, retry up to max then reject (Option B with ack in CG mode).
+
+    Uses XREAD (no consumer group) so FakeRedis is reliable; same message is read each time,
+    retry count is per entry_id via Redis INCR; after max retries we reject and clear the key.
+    """
+    from oms.registry import AdapterRegistry
+
+    add_message(redis_client, RISK_APPROVED_STREAM, {
+        "broker": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": "0.001",
+        "order_type": "MARKET",
+        "order_id": "ord-retry-1",
+    })
+
+    registry = AdapterRegistry()
+    registry.register("binance", _mock_adapter(place_result={}, place_raises=RuntimeError("broker down")))
+
+    # No consumer_group: XREAD start_id="0" returns same message each time (FakeRedis XREADGROUP ">" is buggy)
+    for _ in range(2):
+        result = process_one(redis_client, store, registry, start_id="0", consumer_group=None, consumer_name=None)
+        assert result is not None
+        assert result.get("retry_later") is True
+        assert result.get("rejected") is False
+        order = store.get_order("ord-retry-1")
+        assert order is not None
+        assert order["status"] == "pending"
+
+    # Third: reject after max retries
+    result3 = process_one(redis_client, store, registry, start_id="0", consumer_group=None, consumer_name=None)
+    assert result3 is not None
+    assert result3.get("rejected") is True
+    assert "retries" in result3.get("reject_reason", "")
+    order = store.get_order("ord-retry-1")
+    assert order["status"] == "rejected"
+    entries = read_latest(redis_client, OMS_FILLS_STREAM, count=1)
+    assert len(entries) == 1
+    assert entries[0][1]["event_type"] == "reject"
+    assert entries[0][1]["order_id"] == "ord-retry-1"
 
 
 def test_oms_integration_unknown_broker_rejects(redis_client, store):

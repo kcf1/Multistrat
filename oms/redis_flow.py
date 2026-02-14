@@ -11,12 +11,15 @@ from redis import Redis
 
 from oms.cancel_consumer import ack_cancel_requested, read_one_cancel_request, read_one_cancel_request_cg
 from oms.cleanup import set_order_key_ttl
-from oms.consumer import ack_risk_approved, read_one_risk_approved, read_one_risk_approved_cg
+from oms.consumer import ack_risk_approved, read_one_risk_approved, read_one_risk_approved_cg, read_one_risk_approved_pending
 from oms.producer import produce_oms_fill
 from oms.registry import AdapterRegistry
+from oms.schemas import RISK_APPROVED_STREAM
 from oms.storage.redis_order_store import RedisOrderStore
+from oms.streams import get_pending_delivery_count
 
 TERMINAL_STATUSES = ("filled", "rejected", "cancelled", "expired")
+OMS_PLACE_ORDER_MAX_RETRIES = 3  # 12.1.9d: after this many deliveries, reject and XACK
 
 
 def make_fill_callback(
@@ -147,6 +150,8 @@ def process_one(
     """
     if consumer_group and consumer_name:
         out = read_one_risk_approved_cg(redis, consumer_group, consumer_name, block_ms=block_ms)
+        if not out:
+            out = read_one_risk_approved_pending(redis, consumer_group, consumer_name)
     else:
         out = read_one_risk_approved(redis, start_id=start_id, block_ms=block_ms)
     if not out:
@@ -155,7 +160,8 @@ def process_one(
     order_id = order.get("order_id") or str(uuid.uuid4())
     order["order_id"] = order_id
 
-    store.stage_order(order_id, order)
+    if not store.get_order(order_id):
+        store.stage_order(order_id, order)
     broker = order.get("broker", "") or "binance"
     adapter = registry.get(broker)
     if not adapter:
@@ -165,7 +171,36 @@ def process_one(
             ack_risk_approved(redis, consumer_group, entry_id)
         return {"order_id": order_id, "rejected": True, "reject_reason": "No adapter for broker"}
 
-    response = adapter.place_order(order)
+    try:
+        response = adapter.place_order(order)
+    except Exception as e:
+        retry_key = f"oms:retry:risk_approved:{entry_id}"
+        retry_count = redis.incr(retry_key)
+        if consumer_group and consumer_name:
+            delivery_count = get_pending_delivery_count(redis, RISK_APPROVED_STREAM, consumer_group, entry_id)
+            attempts = max(retry_count, delivery_count)
+        else:
+            attempts = retry_count
+        if attempts >= OMS_PLACE_ORDER_MAX_RETRIES:
+            store.update_fill_status(order_id, "rejected")
+            produce_oms_fill(
+                redis,
+                _reject_event(
+                    order_id,
+                    order,
+                    reject_reason=f"place_order failed after {OMS_PLACE_ORDER_MAX_RETRIES} retries: {e!s}",
+                ),
+            )
+            if consumer_group and consumer_name:
+                ack_risk_approved(redis, consumer_group, entry_id)
+            redis.delete(retry_key)
+            return {
+                "order_id": order_id,
+                "rejected": True,
+                "reject_reason": f"place_order failed after {OMS_PLACE_ORDER_MAX_RETRIES} retries: {e!s}",
+            }
+        return {"order_id": order_id, "rejected": False, "retry_later": True}
+
     if response.get("rejected"):
         store.update_fill_status(order_id, "rejected")
         produce_oms_fill(

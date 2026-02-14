@@ -115,6 +115,22 @@ def ensure_consumer_group(redis: Redis, stream: str, group: str, start_id: str =
         raise
 
 
+def get_pending_delivery_count(redis: Redis, stream: str, group: str, entry_id: str) -> int:
+    """
+    Return the delivery count (times_delivered) for a pending message, or 0 if not in PEL.
+
+    Uses XPENDING range with min=max=entry_id to get the single entry's delivery count.
+    Used for retry limit (12.1.9d): when place_order raises, check count vs max_retries.
+    """
+    try:
+        pending = redis.xpending_range(stream, group, min=entry_id, max=entry_id, count=1)
+        if pending and len(pending) > 0:
+            return int(pending[0].get("times_delivered", 0))
+    except Exception:
+        pass
+    return 0
+
+
 def read_latest(redis: Redis, stream: str, count: int = 10) -> List[Tuple[str, Dict[str, str]]]:
     """XRANGE stream - + COUNT count. Returns last `count` entries (oldest first in slice)."""
     raw = redis.xrange(stream, min="-", max="+", count=count)
