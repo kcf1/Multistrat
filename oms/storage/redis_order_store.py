@@ -2,7 +2,7 @@
 OMS Redis order store (task 12.1.4).
 
 Key layout:
-- orders:{order_id} — Hash (internal_id, broker, account_id, broker_order_id, symbol, side, order_type, quantity, price, time_in_force, status, book, comment, created_at, updated_at, executed_qty, binance_*, payload)
+- orders:{order_id} — Hash (internal_id, broker, account_id, broker_order_id, symbol, side, order_type, quantity, price (executed), limit_price, time_in_force, status, book, comment, created_at, updated_at, executed_qty, binance_*, payload)
 - orders:by_status:{status} — Set of order_id
 - orders:by_book:{book} — Set of order_id
 - orders:by_broker_order_id:{broker_order_id} — String = order_id
@@ -61,7 +61,7 @@ def _unflatten_order(raw: Dict[Any, Any]) -> Dict[str, Any]:
                 out[key] = json.loads(val) if val else None
             except (json.JSONDecodeError, TypeError):
                 out[key] = val
-        elif key in ("quantity", "price", "executed_qty", "binance_cumulative_quote_qty"):
+        elif key in ("quantity", "price", "limit_price", "executed_qty", "binance_cumulative_quote_qty"):
             try:
                 out[key] = float(val) if val else None
             except (TypeError, ValueError):
@@ -99,7 +99,8 @@ class RedisOrderStore:
             "side": order_data.get("side", ""),
             "order_type": order_data.get("order_type", ""),
             "quantity": order_data.get("quantity", ""),
-            "price": order_data.get("price", ""),
+            "price": order_data.get("price", ""),  # executed (from broker/fills); may be None at stage
+            "limit_price": order_data.get("limit_price", ""),
             "time_in_force": order_data.get("time_in_force", ""),
             "status": "pending",
             "book": order_data.get("book", ""),

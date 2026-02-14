@@ -30,7 +30,7 @@ class TestStageOrder:
             "side": "BUY",
             "order_type": "LIMIT",
             "quantity": 0.01,
-            "price": 50000,
+            "limit_price": 50000,
             "time_in_force": "GTC",
             "book": "ma_cross",
             "comment": "test",
@@ -42,6 +42,7 @@ class TestStageOrder:
         assert order["broker"] == "binance"
         assert order["symbol"] == "BTCUSDT"
         assert order["status"] == "pending"
+        assert order["limit_price"] == 50000.0
         assert order["book"] == "ma_cross"
         assert "created_at" in order
         assert "updated_at" in order
@@ -84,10 +85,11 @@ class TestUpdateFillStatus:
         order_id = "ord-5"
         store.stage_order(order_id, {"broker": "binance", "symbol": "BTCUSDT", "side": "BUY", "order_type": "MARKET", "quantity": 0.001})
         store.update_status(order_id, "sent", "pending", extra_fields={"broker_order_id": "b-5"})
-        store.update_fill_status(order_id, "filled", executed_qty=0.001)
+        store.update_fill_status(order_id, "filled", executed_qty=0.001, price=50100.0)
         order = store.get_order(order_id)
         assert order["status"] == "filled"
         assert order["executed_qty"] == 0.001
+        assert order["price"] == 50100.0
         assert redis_client.sismember("orders:by_status:filled", order_id)
         assert not redis_client.sismember("orders:by_status:sent", order_id)
 

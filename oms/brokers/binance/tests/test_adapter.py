@@ -51,7 +51,7 @@ class TestBinanceOrderResponseToUnified:
         assert out["binance_transact_time"] == 1499405658658
 
     def test_limit_order_with_optional_fields(self):
-        """Limit order with timeInForce and cumulativeQuoteQty."""
+        """Limit order: limit_price from Binance price, price (executed) 0 when unfilled."""
         resp = {
             "orderId": 999,
             "symbol": "ETHUSDT",
@@ -70,10 +70,32 @@ class TestBinanceOrderResponseToUnified:
         assert out["broker_order_id"] == "999"
         assert out["order_type"] == "LIMIT"
         assert out["quantity"] == 1.5
-        assert out["price"] == 3000.0
+        assert out["limit_price"] == 3000.0
+        assert out["price"] == 0.0
         assert out["time_in_force"] == "GTC"
         assert out["binance_transact_time"] == 1600000000000
         assert out.get("binance_cumulative_quote_qty") == 0.0
+
+    def test_order_response_price_from_avgPrice(self):
+        """Unified price = executed (avgPrice); limit_price = order limit (12.1.12)."""
+        resp = {
+            "orderId": 100,
+            "symbol": "BTCUSDT",
+            "status": "FILLED",
+            "clientOrderId": "fill-1",
+            "side": "BUY",
+            "type": "LIMIT",
+            "origQty": "0.01",
+            "price": "50000",
+            "executedQty": "0.01",
+            "cumulativeQuoteQty": "50100",
+            "avgPrice": "5010.00000000",
+            "transactTime": 1600000000000,
+        }
+        out = binance_order_response_to_unified(resp)
+        assert out["limit_price"] == 50000.0
+        assert out["price"] == 5010.0
+        assert out["executed_qty"] == 0.01
 
 
 # --- BinanceBrokerAdapter.place_order ---
@@ -91,7 +113,7 @@ class TestBinanceBrokerAdapterPlaceOrder:
         return BinanceBrokerAdapter(client=mock_client)
 
     def test_place_order_calls_client_with_correct_args(self, adapter, mock_client):
-        """Adapter passes symbol, side, order_type, quantity, price, time_in_force, client_order_id."""
+        """Adapter passes symbol, side, order_type, quantity, limit_price or price, time_in_force, client_order_id."""
         mock_client.place_order.return_value = {
             "orderId": 42,
             "symbol": "BTCUSDT",
@@ -110,7 +132,7 @@ class TestBinanceBrokerAdapterPlaceOrder:
             "side": "BUY",
             "quantity": 0.01,
             "order_type": "LIMIT",
-            "price": 50000.0,
+            "limit_price": 50000.0,
             "time_in_force": "GTC",
             "book": "ma_cross",
             "comment": "test",
@@ -127,6 +149,7 @@ class TestBinanceBrokerAdapterPlaceOrder:
         assert call_kw["client_order_id"] == "oms-order-1"
         assert result["broker_order_id"] == "42"
         assert result["status"] == "NEW"
+        assert result["limit_price"] == 50000.0
         assert result["client_order_id"] == "oms-order-1"
         assert "rejected" not in result
 

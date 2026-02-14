@@ -33,10 +33,11 @@ class TestParseRiskApprovedMessage:
         assert order["order_type"] == "MARKET"
         assert order["book"] == "ma_cross"
         assert order["comment"] == "test"
-        assert order["price"] is None
+        assert order.get("limit_price") is None
         assert "order_id" not in order
 
-    def test_parses_with_order_id_and_price(self):
+    def test_parses_with_order_id_and_limit_price(self):
+        """risk_approved 'price' is limit price -> stored as limit_price (12.1.12)."""
         fields = {
             "broker": "binance",
             "symbol": "ETHUSDT",
@@ -48,7 +49,7 @@ class TestParseRiskApprovedMessage:
         }
         order = parse_risk_approved_message(fields)
         assert order["order_id"] == "ord-123"
-        assert order["price"] == 3000.0
+        assert order["limit_price"] == 3000.0
 
     def test_missing_broker_raises(self):
         fields = {"symbol": "BTCUSDT", "side": "BUY", "quantity": "0.01"}

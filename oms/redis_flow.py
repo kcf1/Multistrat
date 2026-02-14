@@ -84,7 +84,11 @@ def make_fill_callback(
                     inc = 0.0
                 executed_qty = prev + inc
 
-        store.update_fill_status(order_id, status, executed_qty=executed_qty)
+        fill_price = event.get("price")
+        store.update_fill_status(
+            order_id, status, executed_qty=executed_qty,
+            **({"price": fill_price} if fill_price is not None else {}),
+        )
 
         order = store.get_order(order_id) or {}
         payload: Dict[str, Any] = {
@@ -240,6 +244,8 @@ def process_one(
         extra_fields={
             "broker_order_id": response.get("broker_order_id"),
             "executed_qty": response.get("executed_qty"),
+            "price": response.get("price"),
+            "limit_price": response.get("limit_price"),
             "binance_transact_time": response.get("binance_transact_time"),
             "binance_cumulative_quote_qty": response.get("binance_cumulative_quote_qty"),
         },

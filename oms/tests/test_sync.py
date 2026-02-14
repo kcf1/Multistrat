@@ -98,6 +98,29 @@ class TestSyncOneOrder:
         assert params.get("status") == "filled"
         assert params.get("symbol") == "BTCUSDT"
 
+    def test_sync_one_order_includes_price_and_limit_price(self, redis_client, store):
+        """Sync row includes price (executed) and limit_price (order limit) per 12.1.12."""
+        store.stage_order(
+            "ord-prices",
+            {
+                "broker": "binance",
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "quantity": 0.01,
+                "order_type": "LIMIT",
+                "limit_price": 50000.0,
+                "book": "test",
+            },
+        )
+        store.update_fill_status("ord-prices", "filled", executed_qty=0.01, price=50100.0)
+        connect, calls = _mock_pg_connect()
+        result = sync_one_order(redis_client, store, connect, "ord-prices", ttl_after_sync_seconds=None)
+        assert result is True
+        assert len(calls) == 1
+        _, params = calls[0]
+        assert params.get("limit_price") == 50000.0
+        assert params.get("price") == 50100.0
+
     def test_sync_one_order_idempotent(self, redis_client, store):
         store.stage_order("ord-idem", {"broker": "binance", "symbol": "BTCUSDT", "side": "BUY", "quantity": 0.001})
         store.update_fill_status("ord-idem", "rejected")

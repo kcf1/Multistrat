@@ -73,7 +73,8 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
 | `side` | TEXT | risk_approved / broker | BUY/SELL |
 | `order_type` | TEXT | risk_approved / broker | MARKET, LIMIT, … |
 | `quantity` | NUMERIC | risk_approved / broker | |
-| `price` | NUMERIC NULL | risk_approved / broker | |
+| **`price`** | NUMERIC NULL | broker / fills | **Executed (average fill) price**; from broker order response `avgPrice` or fill events. |
+| **`limit_price`** | NUMERIC NULL | risk_approved / broker | **Order limit price** (for LIMIT orders); sent in place_order request; from risk_approved or broker response. |
 | `time_in_force` | TEXT NULL | broker | GTC, IOC, FOK (generic) |
 | `status` | TEXT | broker | Normalized or broker-specific status |
 | `executed_qty` | NUMERIC NULL | broker | Filled quantity (generic) |
@@ -89,11 +90,12 @@ Indexes: `account_id`, `symbol`, `(account_id, book)`, `created_at`, `broker_ord
 
 ### 3.2 Order schemas: Binance response → internal mapping
 
-Binance **place_order** returns (relevant): `orderId`, `symbol`, `status`, `clientOrderId`, `side`, `type`, `origQty`, `price`, `executedQty`, `timeInForce`, `transactTime`.  
+Binance **place_order** returns (relevant): `orderId`, `symbol`, `status`, `clientOrderId`, `side`, `type`, `origQty`, `price`, `executedQty`, `timeInForce`, `transactTime`, and optionally `avgPrice`, `cumulativeQuoteQty`.  
 Binance **query_order** adds: `cumulativeQuoteQty`, `origQty`, etc.  
 Binance **cancel_order** returns same shape as query.
 
-- **Generic columns** (used for any broker): `internal_id`, `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, `price`, `time_in_force`, `status`, `executed_qty`.
+- **Generic columns** (used for any broker): `internal_id`, `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, **`price`** (executed / average fill), **`limit_price`** (order limit price), `time_in_force`, `status`, `executed_qty`.
+- **Price semantics:** In **stored orders** and **broker order response**: `price` = executed (average fill) price; `limit_price` = order limit price. In **risk_approved** input, the optional field is the limit price (stored as `limit_price`). In **oms_fills** events, `price` remains the fill (executed) price per event.
 - **Binance-specific columns** (prefix `binance_`): `binance_cumulative_quote_qty` ← Binance `cumulativeQuoteQty`; `binance_transact_time` ← Binance `transactTime`. Other brokers get their own prefix (e.g. `bybit_*`).
 - Internal `internal_id` = our UUID; we send it as `newClientOrderId` → Binance returns it as `clientOrderId`.
 - Internal `broker_order_id` = Binance `orderId`.
@@ -104,6 +106,34 @@ Binance **cancel_order** returns same shape as query.
 - Create revision: `alembic revision -m "add_booking_tables"` (or split: `add_accounts_orders`, `add_fills_positions_balances`).
 - Implement `upgrade()` and `downgrade()` in the new file under `alembic/versions/`.
 - Run `alembic upgrade head` after deploying the revision.
+
+### 3.4 Price vs limit_price — detailed implementation plan
+
+**Goal:** In stored orders and broker order response, **`price`** = executed (average fill) price; **`limit_price`** = order limit price. `oms_fills` already uses `price` as fill price; no change there.
+
+| Layer | Current behaviour | Change |
+|-------|-------------------|--------|
+| **risk_approved (input)** | Optional `price` = limit for LIMIT orders | Document as limit price; in code store in order as **`limit_price`**. |
+| **Consumer parse** | Sets `order["price"]` from stream | Set **`order["limit_price"]`** from stream; do not set `order["price"]` from input (filled from broker/fills). |
+| **Redis order hash** | `price` only | Add **`limit_price`**; **`price`** = executed (from broker response or fill updates). |
+| **Binance adapter unified response** | `price` = Binance `price` (limit) | **`limit_price`** = Binance `price`; **`price`** = Binance `avgPrice` or derived from `cumulativeQuoteQty`/`executedQty` when filled. |
+| **place_order request** | `order.get("price")` for REST param | Use **`order.get("limit_price") or order.get("price")`** for limit sent to broker. |
+| **Fills listener / oms_fills** | `price` = fill price | No change (already executed price). |
+| **Postgres `orders`** | `price` column | Keep **`price`** = executed; add column **`limit_price`** (NUMERIC NULL). |
+| **Sync _order_to_row** | Maps `price` only | Map **`price`** and **`limit_price`**; INSERT/UPDATE both columns. |
+
+**File-level changes:**
+
+1. **`oms/schemas.py`** — In comments: risk_approved `price` = limit price; stored order and oms_fills: `price` = executed, `limit_price` = limit.
+2. **`oms/consumer.py`** — In `parse_risk_approved_message`: set **`order["limit_price"]`** from `fields.get("price")` when present; do not set `order["price"]` from stream.
+3. **`oms/storage/redis_order_store.py`** — In `stage_order`: add **`limit_price`** from `order_data`; keep **`price`** from `order_data` only if present (e.g. from broker response). In `update_status` / `extra_fields`: accept **`limit_price`** and **`price`**. In **_unflatten_order**: treat **`limit_price`** as numeric.
+4. **`oms/brokers/binance/adapter.py`** — In **binance_order_response_to_unified**: map Binance **`price`** → **`limit_price`**; map Binance **`avgPrice`** → **`price`** (executed); if `avgPrice` missing and `cumulativeQuoteQty`/`executedQty` present with executedQty > 0, set **`price`** = cumulativeQuoteQty / executedQty. In **place_order**: send limit as **`order.get("limit_price") or order.get("price")`**.
+5. **`oms/redis_flow.py`** — After place_order, pass **`price`** and **`limit_price`** from unified response into store `extra_fields`. Fill callback: when updating from fill event, pass event **`price`** (executed) into store update as **`price`**.
+6. **`oms/sync.py`** — In **_order_to_row**: **`row["limit_price"] = order.get("limit_price")`**; **`row["price"] = order.get("price")`**. In sync SQL: add **limit_price** column to INSERT/ON CONFLICT.
+7. **Alembic** — New revision: add **`limit_price`** (NUMERIC NULL) to **orders** table.
+8. **Tests** — **test_consumer.py**: assert parsed order has **limit_price** (not `price` from stream). **test_redis_order_store.py**: stage with **limit_price**; update with **price** and **limit_price**. **test_adapter.py**: mock response with **price** (limit) and **avgPrice** (executed); assert unified **limit_price** and **price**. **test_sync.py**: _order_to_row and sync with **price** and **limit_price**. Integration/testnet tests: use **limit_price** for limit orders where applicable.
+
+**Task:** Implement as 12.1.12 (or follow-on) after 12.1.11b; unit tests per component, then integration check.
 
 ---
 
@@ -126,14 +156,15 @@ Binance **cancel_order** returns same shape as query.
 - `broker` (e.g. `binance`) — OMS uses this to select the broker adapter.  
 - `account_id` (optional; default account if single)  
 - `symbol`, `side` (BUY/SELL), `quantity`, `order_type` (MARKET, LIMIT, etc.)  
-- `price` (optional; for LIMIT), `time_in_force` (optional; GTC, IOC, FOK)  
+- `price` (optional; **limit price** for LIMIT orders — stored as `limit_price` in order; executed price comes from broker/fills).  
+- `time_in_force` (optional; GTC, IOC, FOK)  
 - **`book`** (optional) — Strategy / book identifier (e.g. `ma_cross`, `manual`) for attribution.  
 - **`comment`** (optional) — Freetext comment; stored with order in Redis and Postgres.  
 - `strategy_id` (optional), `created_at` (ISO)
 
 **oms_fills (fill or reject)** — defined in OMS (12.1.5), consumed by Booking (12.2.5)  
 - `event_type`: `fill` | `reject`  
-- `order_id` (internal), `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`  
+- `order_id` (internal), `broker_order_id`, `symbol`, `side`, `quantity`, **`price`** (executed/fill price for this event), `fee`, `fee_asset`  
 - `executed_at` (ISO), `fill_id` (broker), optional `reject_reason` for rejections  
 - **`book`** (optional) — Pass-through from order for attribution.  
 - **`comment`** (optional) — Pass-through from order for audit.  
@@ -162,7 +193,7 @@ The OMS is **broker-agnostic**. It routes orders to the appropriate broker adapt
 
 ### 5.2 Redis staging schema (OMS, broker-agnostic)
 
-- **orders:{order_id}** — Hash: `internal_id`, `broker`, `account_id`, `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, `price`, `time_in_force`, `status` (pending, sent, **partially_filled**, filled, rejected, cancelled), **`book`**, **`comment`**, `created_at`, `updated_at`, optional **`executed_qty`** (cumulative), **`binance_cumulative_quote_qty`**, **`binance_transact_time`**, `payload` (JSON). Broker-agnostic fields plus `binance_*` when broker is Binance; other brokers use their own prefix in payload or separate keys.
+- **orders:{order_id}** — Hash: `internal_id`, `broker`, `account_id`, `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, **`price`** (executed / average fill), **`limit_price`** (order limit for LIMIT orders), `time_in_force`, `status` (pending, sent, **partially_filled**, filled, rejected, cancelled), **`book`**, **`comment`**, `created_at`, `updated_at`, optional **`executed_qty`** (cumulative), **`binance_cumulative_quote_qty`**, **`binance_transact_time`**, `payload` (JSON). Broker-agnostic fields plus `binance_*` when broker is Binance; other brokers use their own prefix in payload or separate keys.
 - **orders:by_status:{status}** — Set of order_id; e.g. `orders:by_status:pending`, `orders:by_status:partially_filled`, `orders:by_status:filled`.
 - **orders:by_book:{book}** — Set of order_id; list orders by strategy/book.
 - **orders:by_broker_order_id:{broker_order_id}** — String value = order_id; O(1) lookup when fill event only has broker order id.
@@ -324,6 +355,7 @@ BINANCE_API_SECRET=
 - [x] **12.1.10** **OMS → Postgres order sync**: Sync on trigger (terminal status from fill callback or process_one reject) and/or every 60s via `sync_terminal_orders`. UPSERT by `internal_id`; after sync, set TTL on Redis key so it expires. **Implementation:** `oms/sync.py` (`sync_one_order`, `sync_terminal_orders`, `get_terminal_order_ids`); Alembic revision `orders` table; `make_fill_callback(..., on_terminal_sync)` and `process_one(..., on_terminal_sync)` for trigger; caller runs `sync_terminal_orders` every 60s for periodic. **Unit test:** `oms/tests/test_sync.py` (UPSERT, idempotent, TTL after sync).
 - [ ] **12.1.11a** **Fill listener started by OMS:** Bootstrap code starts fill listener for each registered adapter (e.g. one callback from `make_fill_callback(redis, store)` per adapter). **Integration test:** OMS bootstrap starts listener; inject order; assert fill path (mock or testnet).
 - [ ] **12.1.11b** **OMS main loop and Binance registration:** Runnable entrypoint (e.g. `oms/main.py`) that loads REDIS_URL, creates store and registry, registers Binance adapter, starts fill listener(s), then loop: `process_one(redis, store, registry, block_ms=5000)` until shutdown. In the loop (or on a timer), call `trim_oms_streams(redis)` periodically to cap stream length (12.1.9b). Add `BINANCE_*` to `.env.example` (already present); document in README. **Integration test:** run main with fakeredis + mock adapter; inject one message to `risk_approved`; assert order in store and/or oms_fills. **E2E:** run OMS with real Redis + testnet; inject script; assert fill on `oms_fills`.
+- [x] **12.1.12** **Price vs limit_price (order and broker response):** In stored orders and broker order response, **`price`** = executed (average fill) price; **`limit_price`** = order limit price. See §3.4 for full plan. **Changes:** consumer parse risk_approved → `limit_price`; Redis order store + Binance adapter (unified: `limit_price` from Binance `price`, `price` from `avgPrice` or derived); place_order request uses `limit_price` or `price`; sync + Postgres add `limit_price` column; fill callback/store update `price` from fill event. **Unit tests:** consumer, store, adapter, sync; **integration:** limit order has `limit_price` and after fill `price` populated.
 
 ### 12.2 Booking (build backwards: Postgres writes → Redis cache → consumer → integration)
 

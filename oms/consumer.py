@@ -68,14 +68,15 @@ def parse_risk_approved_message(fields: Dict[str, str]) -> Dict[str, Any]:
     if order_id:
         order["order_id"] = order_id
 
+    # Limit price from risk_approved (for LIMIT orders); executed price comes from broker/fills
     price_str = fields.get("price")
     if price_str is not None and str(price_str).strip():
         try:
-            order["price"] = float(price_str)
+            order["limit_price"] = float(price_str)
         except (TypeError, ValueError):
-            order["price"] = None
+            order["limit_price"] = None
     else:
-        order["price"] = None
+        order["limit_price"] = None
 
     tif = (fields.get("time_in_force") or "").strip()
     if tif:

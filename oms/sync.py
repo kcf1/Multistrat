@@ -31,6 +31,7 @@ def _order_to_row(order: Dict[str, Any], order_id: str) -> Dict[str, Any]:
         "order_type": (order.get("order_type") or "")[:32],
         "quantity": order.get("quantity"),
         "price": order.get("price"),
+        "limit_price": order.get("limit_price"),
         "time_in_force": (order.get("time_in_force") or "")[:16] or None,
         "status": (order.get("status") or "pending")[:64],
         "executed_qty": order.get("executed_qty"),
@@ -79,11 +80,11 @@ def sync_one_order(
             """
             INSERT INTO orders (
                 internal_id, broker, account_id, broker_order_id, symbol, side, order_type,
-                quantity, price, time_in_force, status, executed_qty, book, comment,
+                quantity, price, limit_price, time_in_force, status, executed_qty, book, comment,
                 created_at, updated_at, binance_cumulative_quote_qty, binance_transact_time, payload
             ) VALUES (
                 %(internal_id)s, %(broker)s, %(account_id)s, %(broker_order_id)s, %(symbol)s,
-                %(side)s, %(order_type)s, %(quantity)s, %(price)s, %(time_in_force)s, %(status)s,
+                %(side)s, %(order_type)s, %(quantity)s, %(price)s, %(limit_price)s, %(time_in_force)s, %(status)s,
                 %(executed_qty)s, %(book)s, %(comment)s, %(created_at)s, %(updated_at)s,
                 %(binance_cumulative_quote_qty)s, %(binance_transact_time)s, %(payload)s
             )
@@ -96,6 +97,7 @@ def sync_one_order(
                 order_type = EXCLUDED.order_type,
                 quantity = EXCLUDED.quantity,
                 price = EXCLUDED.price,
+                limit_price = EXCLUDED.limit_price,
                 time_in_force = EXCLUDED.time_in_force,
                 status = EXCLUDED.status,
                 executed_qty = EXCLUDED.executed_qty,

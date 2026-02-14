@@ -16,7 +16,7 @@ RISK_APPROVED_FIELDS = (
     "side",          # BUY | SELL
     "quantity",
     "order_type",    # MARKET, LIMIT, etc.
-    "price",         # optional; for LIMIT
+    "price",         # optional; limit price for LIMIT orders (stored as limit_price; executed price from broker/fills)
     "time_in_force", # optional; GTC, IOC, FOK
     "book",          # optional — strategy/book identifier
     "comment",       # optional — freetext
@@ -43,7 +43,7 @@ OMS_FILLS_FIELDS = (
     "symbol",
     "side",
     "quantity",
-    "price",
+    "price",         # executed/fill price for this event
     "fee",
     "fee_asset",
     "executed_at",     # ISO

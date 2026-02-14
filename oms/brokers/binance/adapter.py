@@ -20,12 +20,13 @@ def binance_order_response_to_unified(resp: Dict[str, Any]) -> Dict[str, Any]:
     Convert Binance place_order / query_order response to unified order response.
 
     Binance returns: orderId, symbol, status, clientOrderId, side, type,
-    origQty, price, executedQty, timeInForce, transactTime, cumulativeQuoteQty (optional).
+    origQty, price (order limit), executedQty, timeInForce, transactTime,
+    cumulativeQuoteQty (optional), avgPrice (optional, executed avg price).
 
     Returns:
         Unified dict: broker_order_id, status, symbol, side, order_type,
-        quantity, price, executed_qty, client_order_id, and optional
-        binance_transact_time, binance_cumulative_quote_qty.
+        quantity, price (executed/avg), limit_price (order limit), executed_qty,
+        client_order_id, and optional binance_transact_time, binance_cumulative_quote_qty.
     """
     def _float(s: Any) -> float:
         if s is None:
@@ -35,6 +36,26 @@ def binance_order_response_to_unified(resp: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             return 0.0
 
+    # limit_price = order's limit price (Binance "price"); price = executed avg (avgPrice or derived)
+    limit_price = _float(resp.get("price"))
+    executed_qty = _float(resp.get("executedQty"))
+    cum_quote = resp.get("cumulativeQuoteQty")
+    if cum_quote is not None:
+        try:
+            cum_quote_f = float(cum_quote)
+        except (TypeError, ValueError):
+            cum_quote_f = 0.0
+    else:
+        cum_quote_f = 0.0
+    avg_price = resp.get("avgPrice")
+    if avg_price is not None:
+        try:
+            price = float(avg_price)
+        except (TypeError, ValueError):
+            price = (cum_quote_f / executed_qty) if executed_qty else 0.0
+    else:
+        price = (cum_quote_f / executed_qty) if executed_qty else 0.0
+
     out: Dict[str, Any] = {
         "broker_order_id": str(resp.get("orderId", "")),
         "status": resp.get("status", ""),
@@ -42,8 +63,9 @@ def binance_order_response_to_unified(resp: Dict[str, Any]) -> Dict[str, Any]:
         "side": resp.get("side", ""),
         "order_type": resp.get("type", ""),
         "quantity": _float(resp.get("origQty")),
-        "price": _float(resp.get("price")),
-        "executed_qty": _float(resp.get("executedQty")),
+        "price": price,
+        "limit_price": limit_price,
+        "executed_qty": executed_qty,
         "client_order_id": resp.get("clientOrderId") or "",
     }
     if "transactTime" in resp and resp["transactTime"] is not None:
@@ -98,7 +120,7 @@ class BinanceBrokerAdapter:
         side = order.get("side", "")
         order_type = order.get("order_type", "MARKET")
         quantity = order.get("quantity", 0)
-        price = order.get("price")
+        price = order.get("limit_price") or order.get("price")  # limit price for REST param
         time_in_force = order.get("time_in_force")
 
         if not symbol or not side or quantity <= 0:
