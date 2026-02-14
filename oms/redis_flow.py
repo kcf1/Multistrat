@@ -1,43 +1,18 @@
 """
-Minimal OMS flow: read one risk_approved message, stage, place via adapter, publish fills to oms_fills.
+OMS flow: consumer → order store → adapter registry → place_order → fill callback → producer.
 
-Used by Redis-through-testnet integration test and future OMS main loop.
+Used by Redis-through-testnet integration test and OMS main loop (task 12.1.9).
 """
 
 import uuid
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from redis import Redis
 
-from oms.schemas import OMS_FILLS_STREAM, RISK_APPROVED_STREAM
+from oms.consumer import read_one_risk_approved
+from oms.producer import produce_oms_fill
+from oms.registry import AdapterRegistry
 from oms.storage.redis_order_store import RedisOrderStore
-from oms.streams import add_message, read_messages
-
-
-def _order_from_stream_fields(fields: Dict[str, str]) -> Dict[str, Any]:
-    """Build risk_approved-style order dict from stream entry (all strings)."""
-    order: Dict[str, Any] = {
-        "broker": fields.get("broker", ""),
-        "account_id": fields.get("account_id", ""),
-        "symbol": fields.get("symbol", ""),
-        "side": fields.get("side", ""),
-        "quantity": float(fields["quantity"]) if fields.get("quantity") else 0,
-        "order_type": fields.get("order_type", "MARKET"),
-        "book": fields.get("book", ""),
-        "comment": fields.get("comment", ""),
-    }
-    if fields.get("price"):
-        try:
-            order["price"] = float(fields["price"])
-        except (TypeError, ValueError):
-            order["price"] = None
-    else:
-        order["price"] = None
-    if fields.get("time_in_force"):
-        order["time_in_force"] = fields["time_in_force"]
-    if fields.get("order_id"):
-        order["order_id"] = fields["order_id"]
-    return order
 
 
 def make_fill_callback(
@@ -47,7 +22,7 @@ def make_fill_callback(
     """
     Return a callback suitable for adapter.start_fill_listener(callback).
 
-    On each fill/reject: updates order store and XADDs to oms_fills (with book/comment from order).
+    On each fill/reject: updates order store and produces to oms_fills (12.1.8).
     """
 
     def on_fill_or_reject(event: Dict[str, Any]) -> None:
@@ -63,9 +38,6 @@ def make_fill_callback(
         store.update_fill_status(order_id, status, executed_qty=executed_qty)
 
         order = store.get_order(order_id) or {}
-        book = order.get("book", "")
-        comment = order.get("comment", "")
-
         payload: Dict[str, Any] = {
             "event_type": event.get("event_type", "fill"),
             "order_id": order_id,
@@ -79,87 +51,76 @@ def make_fill_callback(
             "executed_at": event.get("executed_at", ""),
             "fill_id": event.get("fill_id", ""),
             "reject_reason": event.get("reject_reason", ""),
-            "book": book,
-            "comment": comment,
+            "book": order.get("book", ""),
+            "comment": order.get("comment", ""),
         }
-        add_message(redis, OMS_FILLS_STREAM, payload)
+        produce_oms_fill(redis, payload)
 
     return on_fill_or_reject
 
 
-def process_one_risk_approved(
+def _reject_event(order_id: str, order: Dict[str, Any], broker_order_id: str = "", reject_reason: str = "") -> Dict[str, Any]:
+    return {
+        "event_type": "reject",
+        "order_id": order_id,
+        "broker_order_id": broker_order_id,
+        "symbol": order.get("symbol", ""),
+        "side": order.get("side", ""),
+        "quantity": order.get("quantity"),
+        "price": order.get("price"),
+        "fee": "",
+        "fee_asset": "",
+        "executed_at": "",
+        "fill_id": "",
+        "reject_reason": reject_reason,
+        "book": order.get("book", ""),
+        "comment": order.get("comment", ""),
+    }
+
+
+def process_one(
     redis: Redis,
     store: RedisOrderStore,
-    get_adapter: Callable[[str], Any],
+    registry: AdapterRegistry,
+    start_id: str = "0",
+    block_ms: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Read one message from risk_approved, stage order, place via adapter, update store.
+    One iteration of OMS loop (12.1.9): consumer → store → registry → place_order → producer.
 
-    Does not start the fill listener; caller must run the listener and use make_fill_callback
-    so fills are written to oms_fills.
+    Reads one risk_approved message (12.1.6), stages in store, routes by registry (12.1.7),
+    places order, updates store; on reject produces to oms_fills (12.1.8).
+    Does not start the fill listener; caller must run the listener with make_fill_callback.
 
     Returns:
-        Dict with "order_id", "broker_order_id", "rejected", "reject_reason" if rejected;
-        or None if no message was available.
+        Dict with order_id, broker_order_id, rejected, reject_reason; or None if no message.
     """
-    messages = read_messages(redis, RISK_APPROVED_STREAM, start_id="0", count=1)
-    if not messages:
+    out = read_one_risk_approved(redis, start_id=start_id, block_ms=block_ms)
+    if not out:
         return None
-
-    _entry_id, fields = messages[0]
-    order = _order_from_stream_fields(fields)
+    _entry_id, order = out
     order_id = order.get("order_id") or str(uuid.uuid4())
     order["order_id"] = order_id
 
     store.stage_order(order_id, order)
     broker = order.get("broker", "") or "binance"
-    adapter = get_adapter(broker)
+    adapter = registry.get(broker)
     if not adapter:
         store.update_fill_status(order_id, "rejected")
-        add_message(
-            redis,
-            OMS_FILLS_STREAM,
-            {
-                "event_type": "reject",
-                "order_id": order_id,
-                "broker_order_id": "",
-                "symbol": order.get("symbol", ""),
-                "side": order.get("side", ""),
-                "quantity": order.get("quantity"),
-                "price": order.get("price"),
-                "fee": "",
-                "fee_asset": "",
-                "executed_at": "",
-                "fill_id": "",
-                "reject_reason": "No adapter for broker",
-                "book": order.get("book", ""),
-                "comment": order.get("comment", ""),
-            },
-        )
+        produce_oms_fill(redis, _reject_event(order_id, order, reject_reason="No adapter for broker"))
         return {"order_id": order_id, "rejected": True, "reject_reason": "No adapter for broker"}
 
     response = adapter.place_order(order)
     if response.get("rejected"):
         store.update_fill_status(order_id, "rejected")
-        add_message(
+        produce_oms_fill(
             redis,
-            OMS_FILLS_STREAM,
-            {
-                "event_type": "reject",
-                "order_id": order_id,
-                "broker_order_id": response.get("broker_order_id", ""),
-                "symbol": order.get("symbol", ""),
-                "side": order.get("side", ""),
-                "quantity": order.get("quantity"),
-                "price": order.get("price"),
-                "fee": "",
-                "fee_asset": "",
-                "executed_at": "",
-                "fill_id": "",
-                "reject_reason": response.get("reject_reason", "rejected"),
-                "book": order.get("book", ""),
-                "comment": order.get("comment", ""),
-            },
+            _reject_event(
+                order_id,
+                order,
+                broker_order_id=str(response.get("broker_order_id", "")),
+                reject_reason=response.get("reject_reason", "rejected"),
+            ),
         )
         return {
             "order_id": order_id,
@@ -183,3 +144,28 @@ def process_one_risk_approved(
         "broker_order_id": response.get("broker_order_id"),
         "rejected": False,
     }
+
+
+def process_one_risk_approved(
+    redis: Redis,
+    store: RedisOrderStore,
+    get_adapter: Union[Callable[[str], Any], AdapterRegistry],
+    start_id: str = "0",
+    block_ms: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Read one risk_approved, stage, place via adapter, update store.
+
+    get_adapter: either a callable (broker_name -> adapter) or an AdapterRegistry.
+    Does not start the fill listener; use make_fill_callback for that.
+    """
+    if isinstance(get_adapter, AdapterRegistry):
+        return process_one(redis, store, get_adapter, start_id=start_id, block_ms=block_ms)
+    # Legacy: wrap callable as a one-off registry
+    class _Registry(AdapterRegistry):
+        def __init__(self, fn: Callable[[str], Any]) -> None:
+            super().__init__()
+            self._fn = fn
+        def get(self, broker_name: str) -> Optional[Any]:
+            return self._fn(broker_name)
+    return process_one(redis, store, _Registry(get_adapter), start_id=start_id, block_ms=block_ms)
