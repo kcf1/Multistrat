@@ -5,7 +5,7 @@ Registry maps broker_name -> adapter; route by broker.
 Interface is BrokerAdapter in brokers/base.py.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from oms.brokers.base import BrokerAdapter
 
@@ -27,6 +27,10 @@ class AdapterRegistry:
         if not broker_name:
             return None
         return self._adapters.get(broker_name.strip().lower())
+
+    def broker_names(self) -> List[str]:
+        """Return list of registered broker names (for bootstrap, e.g. start fill listeners)."""
+        return list(self._adapters.keys())
 
     def __contains__(self, broker_name: str) -> bool:
         return self.get(broker_name) is not None

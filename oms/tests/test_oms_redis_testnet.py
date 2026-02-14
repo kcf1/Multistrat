@@ -492,3 +492,117 @@ class TestOmsRedisTestnet:
         assert row[3] == "BUY"
         assert row[4] == "full_pipeline"
         assert "postgres sync" in (row[5] or "")
+
+    @skip_unless_testnet
+    @skip_unless_redis
+    @skip_unless_database
+    @pytest.mark.skipif(not _redis_available(), reason="Redis not reachable at REDIS_URL")
+    @pytest.mark.skipif(not _pg_available(), reason="Postgres not reachable at DATABASE_URL")
+    def test_full_pipeline_with_main_loop(self, redis_client, store, adapter):
+        """Full pipeline via main loop: start_fill_listeners + run_oms_loop; inject order; assert Redis and DB."""
+        from oms.main import (
+            start_fill_listeners,
+            stop_fill_listeners,
+            run_oms_loop,
+        )
+        from oms.redis_flow import TERMINAL_STATUSES
+        from oms.schemas import OMS_FILLS_STREAM, RISK_APPROVED_STREAM
+        from oms.streams import add_message, read_latest
+        from oms.sync import sync_one_order, sync_terminal_orders
+
+        from oms.registry import AdapterRegistry
+
+        redis_client.delete(RISK_APPROVED_STREAM)
+        redis_client.delete(OMS_FILLS_STREAM)
+
+        registry = AdapterRegistry()
+        registry.register("binance", adapter)
+
+        def on_terminal_sync(oid: str) -> None:
+            sync_one_order(redis_client, store, DATABASE_URL, oid, ttl_after_sync_seconds=60)
+
+        start_fill_listeners(redis_client, store, registry, on_terminal_sync=on_terminal_sync)
+
+        for _ in range(125):
+            time.sleep(0.2)
+            if adapter._listener and getattr(adapter._listener, "stream_connected", False):
+                break
+        if not adapter._listener or not getattr(adapter._listener, "stream_connected", False):
+            stop_fill_listeners(registry)
+            pytest.skip("Fill listener WebSocket did not connect within 25s")
+
+        order_id = f"mainloop-{int(time.time() * 1000)}"
+        risk_order = {
+            "order_id": order_id,
+            "broker": "binance",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "quantity": 0.0001,
+            "order_type": "MARKET",
+            "book": "main_loop_pipeline",
+            "comment": "test with main loop",
+        }
+        add_message(redis_client, RISK_APPROVED_STREAM, risk_order)
+
+        try:
+            processed = run_oms_loop(
+                redis_client,
+                store,
+                registry,
+                block_ms=500,
+                trim_every_n=100,
+                stop_after_n=1,
+                on_terminal_sync=on_terminal_sync,
+            )
+            assert processed == 1
+
+            entries = []
+            for _ in range(150):
+                time.sleep(0.1)
+                entries = read_latest(redis_client, OMS_FILLS_STREAM, count=10)
+                if entries:
+                    break
+        finally:
+            stop_fill_listeners(registry)
+
+        assert entries, "No message on oms_fills (timeout)"
+        _eid, fields = entries[-1]
+        assert fields.get("order_id") == order_id
+        assert fields.get("symbol") == "BTCUSDT"
+        assert fields.get("book") == "main_loop_pipeline"
+
+        # Fill callback may still be updating store; poll for terminal status
+        order = None
+        for _ in range(50):
+            order = store.get_order(order_id)
+            if order and order.get("status") in TERMINAL_STATUSES:
+                break
+            time.sleep(0.2)
+        assert order is not None, f"Order {order_id} not in store"
+        assert order["status"] in TERMINAL_STATUSES, (
+            f"Order not terminal after 10s: status={order.get('status')}"
+        )
+        assert order["symbol"] == "BTCUSDT"
+
+        sync_terminal_orders(redis_client, store, DATABASE_URL, ttl_after_sync_seconds=None)
+
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT internal_id, status, symbol, side, book, comment FROM orders WHERE internal_id = %s",
+                (order_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        assert len(rows) == 1, f"Expected one order row in Postgres for {order_id}, got {len(rows)}"
+        row = rows[0]
+        assert row[0] == order_id
+        assert row[1] in TERMINAL_STATUSES
+        assert row[2] == "BTCUSDT"
+        assert row[3] == "BUY"
+        assert row[4] == "main_loop_pipeline"
+        assert "main loop" in (row[5] or "")

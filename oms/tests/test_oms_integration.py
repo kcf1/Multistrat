@@ -497,3 +497,83 @@ def test_oms_integration_fill_callback_accumulates_when_no_cumulative(redis_clie
     order2 = store.get_order(order_id)
     assert order2["status"] == "filled"
     assert order2.get("executed_qty") == 0.7
+
+
+def test_oms_bootstrap_starts_fill_listeners(redis_client, store):
+    """12.1.11a: Bootstrap start_fill_listeners starts listener for each registered adapter."""
+    from oms.main import start_fill_listeners
+    from oms.registry import AdapterRegistry
+
+    started = []
+
+    class MockAdapterWithListener:
+        def place_order(self, order):
+            return {"broker_order_id": "m", "status": "NEW"}
+
+        def start_fill_listener(self, callback):
+            started.append(("listener", callback))
+
+        def stop_fill_listener(self):
+            pass
+
+        def cancel_order(self, broker_order_id, symbol):
+            return {"rejected": False}
+
+    registry = AdapterRegistry()
+    registry.register("binance", MockAdapterWithListener())
+    start_fill_listeners(redis_client, store, registry)
+    assert len(started) == 1
+    assert started[0][0] == "listener"
+    assert callable(started[0][1])
+
+
+def test_oms_main_loop_integration(redis_client, store):
+    """12.1.11b: run_oms_loop with fakeredis + mock adapter; inject one message; assert order in store and oms_fills."""
+    from oms.consumer import ensure_risk_approved_consumer_group
+    from oms.main import run_oms_loop
+    from oms.registry import AdapterRegistry
+
+    order_id = "main-loop-order-1"
+    registry = AdapterRegistry()
+    registry.register("binance", _mock_adapter({
+        "rejected": True,
+        "reject_reason": "mock reject for 12.1.11b",
+    }))
+    ensure_risk_approved_consumer_group(redis_client, "oms", "0")
+    add_message(redis_client, RISK_APPROVED_STREAM, {
+        "order_id": order_id,
+        "broker": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": "0.001",
+        "order_type": "MARKET",
+        "book": "main_loop_test",
+        "comment": "12.1.11b",
+    })
+
+    processed = run_oms_loop(
+        redis_client,
+        store,
+        registry,
+        block_ms=100,
+        trim_every_n=100,
+        stop_after_n=1,
+        consumer_group="oms",
+        consumer_name="oms-1",
+    )
+    assert processed == 1
+
+    order = store.get_order(order_id)
+    assert order is not None
+    assert order["status"] == "rejected"
+    assert order["symbol"] == "BTCUSDT"
+    assert order.get("book") == "main_loop_test"
+
+    entries = read_latest(redis_client, OMS_FILLS_STREAM, count=5)
+    assert len(entries) >= 1
+    _eid, fields = entries[0]
+    assert fields.get("order_id") == order_id
+    assert fields.get("event_type") == "reject"
+    assert "mock reject" in (fields.get("reject_reason") or "")
+    assert fields.get("symbol") == "BTCUSDT"
+    assert fields.get("book") == "main_loop_test"

@@ -142,10 +142,21 @@ See **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** for detailed 
    - **pgAdmin:** http://localhost:5050 — log in with `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` from `.env`; add server host `postgres`, port `5432`, user/password/db from `.env`.
    - **RedisInsight:** http://localhost:5540 — add Redis host `redis`, port `6379`.
 
+### Running the OMS (Phase 2)
+
+The OMS entrypoint consumes `risk_approved`, places orders via the registered broker adapter(s), and publishes fills to `oms_fills`. To run it:
+
+1. **Environment:** Copy `.env.example` to `.env`. Set:
+   - **REDIS_URL** — Redis connection (e.g. `redis://localhost:6379`)
+   - **DATABASE_URL** — optional; if set, terminal orders are synced to Postgres and Redis keys get a TTL after sync
+   - **BINANCE_API_KEY**, **BINANCE_API_SECRET** — required for Binance; **BINANCE_BASE_URL** (e.g. `https://testnet.binance.vision` for testnet)
+2. **Run:** `python -m oms.main`  
+   The process starts fill listeners for each registered adapter, then runs the main loop (`process_one` / `process_one_cancel`, periodic stream trim). Stop with Ctrl+C or SIGTERM.
+
 ### Configuration (later phases)
 
 - Configure market data sources in `config/market_data.yml`
-- Set broker API credentials in environment variables
+- Set broker API credentials in environment variables (see `.env.example` for `BINANCE_*`)
 - Adjust risk parameters in `config/risk.yml`
 
 ## Development

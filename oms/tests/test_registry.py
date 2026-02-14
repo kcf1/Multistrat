@@ -64,3 +64,13 @@ def test_register_overwrites():
     registry.register("binance", a1)
     registry.register("binance", a2)
     assert registry.get("binance") is a2
+
+
+def test_broker_names():
+    """broker_names() returns list of registered broker names (12.1.11a bootstrap)."""
+    registry = AdapterRegistry()
+    assert registry.broker_names() == []
+    registry.register("binance", _make_mock_adapter("binance"))
+    assert registry.broker_names() == ["binance"]
+    registry.register("bybit", _make_mock_adapter("bybit"))
+    assert set(registry.broker_names()) == {"binance", "bybit"}
