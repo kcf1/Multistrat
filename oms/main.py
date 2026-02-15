@@ -23,8 +23,10 @@ from oms.registry import AdapterRegistry
 from oms.storage.redis_order_store import RedisOrderStore
 from oms.sync import sync_one_order
 
-DEFAULT_BLOCK_MS = 5000
-DEFAULT_TRIM_EVERY_N = 12  # trim streams every N loop iterations (~60s if block_ms=5000)
+# Use non-blocking Redis reads + sleep to avoid Docker blocking-socket issues with XREADGROUP BLOCK
+DEFAULT_BLOCK_MS = 0  # non-blocking; we sleep in loop when idle
+DEFAULT_POLL_SLEEP_SECONDS = 0.5  # sleep when no message (polling instead of blocking)
+DEFAULT_TRIM_EVERY_N = 20  # trim streams every N loop iterations
 CONSUMER_GROUP = "oms"
 CONSUMER_NAME = "oms-1"
 
@@ -129,7 +131,8 @@ def run_oms_loop(
     store: RedisOrderStore,
     registry: AdapterRegistry,
     *,
-    block_ms: int = DEFAULT_BLOCK_MS,
+    block_ms: Optional[int] = None,
+    poll_sleep_seconds: float = DEFAULT_POLL_SLEEP_SECONDS,
     trim_every_n: int = DEFAULT_TRIM_EVERY_N,
     stop_after_n: Optional[int] = None,
     run_until: Optional[Callable[[], bool]] = None,
@@ -145,6 +148,8 @@ def run_oms_loop(
 
     Returns number of messages processed (risk_approved + cancel_requested).
     """
+    if block_ms is None:
+        block_ms = DEFAULT_BLOCK_MS
     ensure_risk_approved_consumer_group(redis, consumer_group)
     ensure_cancel_requested_consumer_group(redis, consumer_group)
 
@@ -156,40 +161,63 @@ def run_oms_loop(
         if run_until is not None and run_until():
             break
 
-        result = process_one(
-            redis,
-            store,
-            registry,
-            block_ms=block_ms,
-            consumer_group=consumer_group,
-            consumer_name=consumer_name,
-            on_terminal_sync=on_terminal_sync,
-        )
-        if result is not None:
-            processed += 1
-            if stop_after_n is not None and processed >= stop_after_n:
-                break
-
-        cancel_result = process_one_cancel(
-            redis,
-            store,
-            registry,
-            block_ms=0,
-            consumer_group=consumer_group,
-            consumer_name=consumer_name,
-        )
-        if cancel_result is not None:
-            processed += 1
-            if stop_after_n is not None and processed >= stop_after_n:
-                break
-
         iteration += 1
-        if trim_every_n and iteration % trim_every_n == 0:
-            removed = trim_oms_streams(redis)
-            logger.debug("trim_oms_streams removed {} entries", removed)
+        logger.debug("OMS loop iteration {}", iteration)
 
+        result = None
+        cancel_result = None
+        try:
+            logger.debug("OMS loop iter {}: process_one start", iteration)
+            result = process_one(
+                redis,
+                store,
+                registry,
+                block_ms=block_ms,
+                consumer_group=consumer_group,
+                consumer_name=consumer_name,
+                on_terminal_sync=on_terminal_sync,
+            )
+            logger.debug("OMS loop iter {}: process_one done result={}", iteration, result is not None)
+            if result is not None:
+                processed += 1
+                if stop_after_n is not None and processed >= stop_after_n:
+                    break
+
+            logger.debug("OMS loop iter {}: process_one_cancel start", iteration)
+            cancel_result = process_one_cancel(
+                redis,
+                store,
+                registry,
+                block_ms=0,
+                consumer_group=consumer_group,
+                consumer_name=consumer_name,
+            )
+            logger.debug("OMS loop iter {}: process_one_cancel done result={}", iteration, cancel_result is not None)
+            if cancel_result is not None:
+                processed += 1
+                if stop_after_n is not None and processed >= stop_after_n:
+                    break
+        except Exception as e:
+            logger.exception("OMS loop iteration error (continuing): {}", e)
+
+        # When non-blocking: sleep so we don't busy-loop; heartbeat when idle
+        if result is None and cancel_result is None:
+            logger.debug("OMS loop iter {}: idle, sleep {}s", iteration, poll_sleep_seconds)
+            if iteration % 20 == 1 and iteration > 1:
+                logger.debug("OMS loop: waiting for messages (iteration {})", iteration)
+            time.sleep(poll_sleep_seconds)
+        if trim_every_n and iteration % trim_every_n == 0:
+            logger.debug("OMS loop iter {}: trim start", iteration)
+            try:
+                removed = trim_oms_streams(redis)
+                logger.debug("OMS loop iter {}: trim done removed={}", iteration, removed)
+            except Exception as e:
+                logger.warning("trim_oms_streams failed: {}", e)
+        logger.debug("OMS loop iter {}: run_until check", iteration)
         if run_until is not None and run_until():
+            logger.debug("OMS loop iter {}: shutdown requested, exiting", iteration)
             break
+        logger.debug("OMS loop iter {}: next iteration", iteration)
 
     return processed
 

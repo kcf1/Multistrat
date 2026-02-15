@@ -11,7 +11,9 @@ Flow: XADD risk_approved -> OMS process_one (stage, place_order, update_status) 
 """
 
 import os
+import random
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -206,14 +208,15 @@ class TestOmsRedisTestnet:
             )
             ticker.raise_for_status()
             last_price = float(ticker.json()["price"])
-            price = round(last_price * 0.95, 2)
+            # Vary price so each run is unique (avoids Binance duplicate-order dedup)
+            price = round(last_price * (0.95 - random.uniform(0, 0.001)), 2)
         except Exception as e:
             pytest.skip(f"Could not get ticker for limit price: {e}")
 
         redis_client.delete(RISK_APPROVED_STREAM)
         redis_client.delete(CANCEL_REQUESTED_STREAM)
 
-        order_id = f"redis-cancel-{int(time.time() * 1000)}"
+        order_id = f"redis-cancel-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
         risk_order = {
             "order_id": order_id,
             "broker": "binance",

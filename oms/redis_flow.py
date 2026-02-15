@@ -43,6 +43,11 @@ def make_fill_callback(
         broker_order_id = str(event.get("broker_order_id", ""))
         if not order_id and broker_order_id:
             order_id = store.find_order_by_broker_order_id(broker_order_id) or ""
+        # Binance may return its own clientOrderId in "c"; if not in our store, resolve by broker_order_id
+        if order_id and not store.get_order(order_id) and broker_order_id:
+            resolved = store.find_order_by_broker_order_id(broker_order_id)
+            if resolved:
+                order_id = resolved
         if not order_id:
             logger.warning(
                 "Fill callback: no order_id (broker_order_id={}), skipping",

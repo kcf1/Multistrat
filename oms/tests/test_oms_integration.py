@@ -268,6 +268,44 @@ def test_oms_integration_partial_then_full_fill_status_and_cumulative(redis_clie
     assert order2.get("executed_qty") == 1.0
 
 
+def test_oms_integration_fill_callback_resolves_by_broker_order_id_when_event_order_id_unknown(redis_client, store):
+    """Fill callback: when event order_id (Binance clientOrderId) not in store, resolve via broker_order_id."""
+    from oms.redis_flow import make_fill_callback
+    from oms.schemas import OMS_FILLS_STREAM
+    from oms.streams import read_latest
+
+    internal_order_id = "script-123-abc"
+    broker_order_id = "2428981"
+    store.stage_order(internal_order_id, {
+        "broker": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 0.0001,
+        "order_type": "LIMIT",
+        "book": "full_pipeline",
+    })
+    store.update_status(internal_order_id, "sent", "pending", extra_fields={"broker_order_id": broker_order_id})
+
+    fill_cb = make_fill_callback(redis_client, store)
+    # Binance returns its own clientOrderId in event; we resolve to our internal order via broker_order_id
+    fill_cb({
+        "event_type": "cancelled",
+        "order_id": "8AG7vrb7GVMum8UDWOLYDB",  # Binance clientOrderId, not in our store
+        "broker_order_id": broker_order_id,
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": 0.0001,
+        "price": 66148.07,
+        "reject_reason": "USER_CANCEL",
+    })
+
+    # Must update our order, not create sparse orders:8AG7vrb7GVMum8UDWOLYDB
+    order = store.get_order(internal_order_id)
+    assert order is not None
+    assert order["status"] == "cancelled"
+    assert store.get_order("8AG7vrb7GVMum8UDWOLYDB") is None
+
+
 def test_oms_integration_fill_callback_cancelled_expired_updates_store(redis_client, store):
     """Fill callback: event_type cancelled/expired updates store and publishes to oms_fills (12.1.9c)."""
     from oms.redis_flow import make_fill_callback

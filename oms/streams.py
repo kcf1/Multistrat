@@ -44,7 +44,8 @@ def read_messages(
     kwargs: Dict[str, Any] = {"streams": {stream: start_id}}
     if count is not None:
         kwargs["count"] = count
-    if block_ms is not None:
+    # BLOCK 0 in Redis means block indefinitely; omit block for non-blocking read
+    if block_ms is not None and block_ms > 0:
         kwargs["block"] = block_ms
 
     reply = redis.xread(**kwargs)
@@ -80,7 +81,8 @@ def read_messages_group(
     kwargs: Dict[str, Any] = {}
     if count is not None:
         kwargs["count"] = count
-    if block_ms is not None:
+    # BLOCK 0 in Redis means block indefinitely; omit block for non-blocking read
+    if block_ms is not None and block_ms > 0:
         kwargs["block"] = block_ms
     reply = redis.xreadgroup(group, consumer, {stream: id}, **kwargs)
     if not reply:
