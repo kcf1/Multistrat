@@ -136,7 +136,7 @@ See **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** for detailed 
    (Use a virtualenv if you prefer: `python -m venv .venv`, then activate and run the same commands.)
 
 5. **Verify**
-   - **Compose:** `docker compose ps` — all services should be up (and healthy where applicable).
+   - **Compose:** `docker compose ps` — all services should be up (and healthy where applicable). Phase 2 adds the **oms** service; start it with `docker compose up -d oms` if not already running.
    - **Postgres:** `docker compose exec postgres psql -U multistrat -d multistrat -c "SELECT 1"`
    - **Redis:** `docker compose exec redis redis-cli ping` (should return `PONG`)
    - **pgAdmin:** http://localhost:5050 — log in with `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` from `.env`; add server host `postgres`, port `5432`, user/password/db from `.env`.
@@ -144,14 +144,24 @@ See **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** for detailed 
 
 ### Running the OMS (Phase 2)
 
-The OMS entrypoint consumes `risk_approved`, places orders via the registered broker adapter(s), and publishes fills to `oms_fills`. To run it:
+The OMS consumes `risk_approved`, places orders via the registered broker adapter(s), and publishes fills to `oms_fills`. It can run as a **Docker service** (recommended for E2E) or locally.
 
 1. **Environment:** Copy `.env.example` to `.env`. Set:
-   - **REDIS_URL** — Redis connection (e.g. `redis://localhost:6379`)
+   - **REDIS_URL** — Redis connection (e.g. `redis://localhost:6379` on host; OMS container uses `redis://redis:6379` via compose)
    - **DATABASE_URL** — optional; if set, terminal orders are synced to Postgres and Redis keys get a TTL after sync
    - **BINANCE_API_KEY**, **BINANCE_API_SECRET** — required for Binance; **BINANCE_BASE_URL** (e.g. `https://testnet.binance.vision` for testnet)
-2. **Run:** `python -m oms.main`  
-   The process starts fill listeners for each registered adapter, then runs the main loop (`process_one` / `process_one_cancel`, periodic stream trim). Stop with Ctrl+C or SIGTERM.
+2. **Run as Docker service (recommended for pipeline test):**
+   ```bash
+   docker compose up -d oms
+   ```
+   The `oms` service is also started with `docker compose up -d`. It runs the main loop and fill listeners inside the container.
+3. **Full pipeline test (against the OMS service):** With OMS running in Docker (and Postgres/Redis up), from repo root:
+   ```bash
+   python scripts/full_pipeline_test.py
+   ```
+   The script injects one order into `risk_approved`, waits for the OMS to process it (polls up to 60s), then checks downstreams: `oms_fills`, Redis order store, and Postgres `orders`. Requires **REDIS_URL** (and optionally **DATABASE_URL** for the Postgres check) on the host; no Binance keys needed in the script (the container has them).
+4. **Run locally (development):** `python -m oms.main`  
+   Starts fill listeners and the main loop (`process_one` / `process_one_cancel`, periodic stream trim). Stop with Ctrl+C or SIGTERM.
 
 ### Configuration (later phases)
 

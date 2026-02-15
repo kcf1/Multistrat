@@ -8,6 +8,7 @@ Main loop: process_one (risk_approved), process_one_cancel, trim_oms_streams per
 import os
 import signal
 import sys
+import time
 from typing import Callable, Optional
 
 from redis import Redis
@@ -92,6 +93,35 @@ def stop_fill_listeners(registry: AdapterRegistry) -> None:
         adapter = registry.get(broker_name)
         if adapter and hasattr(adapter, "stop_fill_listener") and callable(getattr(adapter, "stop_fill_listener")):
             adapter.stop_fill_listener()
+
+
+def wait_for_fill_listeners_connected(
+    registry: AdapterRegistry,
+    timeout_seconds: int = 30,
+    poll_interval_seconds: float = 0.2,
+) -> bool:
+    """
+    Wait until every adapter with a fill listener reports stream_connected.
+    Avoids processing orders before the user data stream subscription is active.
+    Returns True if all connected within timeout, False otherwise.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        all_connected = True
+        for broker_name in registry.broker_names():
+            adapter = registry.get(broker_name)
+            if not adapter or not hasattr(adapter, "_listener") or adapter._listener is None:
+                continue
+            listener = adapter._listener
+            if hasattr(listener, "stream_connected") and not listener.stream_connected:
+                all_connected = False
+                break
+        if all_connected:
+            logger.info("All fill listeners connected")
+            return True
+        time.sleep(poll_interval_seconds)
+    logger.warning("Fill listeners did not connect within {}s; proceeding anyway", timeout_seconds)
+    return False
 
 
 def run_oms_loop(
@@ -192,6 +222,7 @@ def main() -> int:
 
     start_fill_listeners(redis, store, registry, on_terminal_sync=on_terminal_sync)
     logger.info("Fill listeners started for brokers={}", registry.broker_names())
+    wait_for_fill_listeners_connected(registry)
 
     shutdown = [False]
 

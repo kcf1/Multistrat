@@ -12,6 +12,10 @@ Generic order router that consumes from `risk_approved` stream and dispatches to
     - `adapter.py` - BinanceBrokerAdapter: place_order, start_fill_listener, stop_fill_listener
     - `tests/` - Unit tests (mocked) and testnet integration tests
 
+## Running as a service
+
+The OMS runs as a Docker service (see repo root **README.md**). Start it with `docker compose up -d oms`. To test the full pipeline against the running service: from repo root run `python scripts/full_pipeline_test.py` (injects one order to `risk_approved`, polls until the OMS processes it, then checks `oms_fills`, Redis store, and Postgres).
+
 ## Development
 
 ### Setup

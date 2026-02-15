@@ -11,7 +11,6 @@ events aligned with oms_fills schema.
 """
 
 import json
-import logging
 import os
 import threading
 import time
@@ -21,9 +20,9 @@ from typing import Any, Callable, Dict, Optional, Union
 
 import websocket
 
-from .api_client import BinanceAPIClient, BinanceAPIError
+from oms.log import logger
 
-logger = logging.getLogger(__name__)
+from .api_client import BinanceAPIClient, BinanceAPIError
 
 # Classic stream: listenKey in URL path
 STREAM_URL_TESTNET = "wss://stream.testnet.binance.vision/ws"
@@ -277,7 +276,7 @@ class BinanceFillsListener:
 
         self._listen_key = self._client.start_user_data_stream()
         ws_url = f"{self._stream_base_url.rstrip('/')}/{self._listen_key}"
-        logger.info("Binance user data stream started, connecting to %s", ws_url[:60] + "...")
+        logger.info("Binance user data stream started, connecting to {}", ws_url[:60] + "...")
 
         def keepalive_loop() -> None:
             while not self._stop.wait(timeout=self._KEEPALIVE_INTERVAL_SEC):
@@ -288,7 +287,7 @@ class BinanceFillsListener:
                     self._client.keepalive_user_data_stream(key)
                     logger.debug("User data stream keepalive sent")
                 except BinanceAPIError as e:
-                    logger.warning("User data stream keepalive failed: %s", e)
+                    logger.warning("User data stream keepalive failed: {}", e)
 
         self._stop.clear()
         self._keepalive_thread = threading.Thread(target=keepalive_loop, daemon=True)
@@ -301,9 +300,9 @@ class BinanceFillsListener:
                 if unified:
                     cb(unified)
             except json.JSONDecodeError as e:
-                logger.warning("Invalid JSON from stream: %s", e)
+                logger.warning("Invalid JSON from stream: {}", e)
             except Exception as e:
-                logger.exception("Error processing stream message: %s", e)
+                logger.exception("Error processing stream message: {}", e)
 
         def on_open(_ws: Any) -> None:
             self._ws_connected = True
@@ -312,15 +311,15 @@ class BinanceFillsListener:
                 try:
                     self._on_stream_connected()
                 except Exception as e:
-                    logger.exception("on_stream_connected callback error: %s", e)
+                    logger.exception("on_stream_connected callback error: {}", e)
 
         def on_error(_ws: Any, err: Optional[Exception]) -> None:
             if err:
-                logger.error("Binance stream error: %s", err)
+                logger.error("Binance stream error: {}", err)
 
         def on_close(_ws: Any, close_status: Optional[int], close_msg: Optional[str]) -> None:
             self._ws_connected = False
-            logger.info("Binance stream closed: %s %s", close_status, close_msg)
+            logger.info("Binance stream closed: {} {}", close_status, close_msg)
 
         self._ws = websocket.WebSocketApp(
             ws_url,
@@ -338,6 +337,7 @@ class BinanceFillsListener:
         cb = callback or self._on_fill_or_reject
         if not cb:
             raise ValueError("No callback provided (constructor or start_background())")
+        logger.info("Binance fill listener (listenKey): starting background thread")
         self._thread = threading.Thread(target=self.start, args=(cb,), daemon=True)
         self._thread.start()
 
@@ -354,7 +354,7 @@ class BinanceFillsListener:
             try:
                 self._client.close_user_data_stream(self._listen_key)
             except BinanceAPIError as e:
-                logger.warning("Error closing user data stream: %s", e)
+                logger.warning("Error closing user data stream: {}", e)
             self._listen_key = None
         self._keepalive_thread = None
 
@@ -396,16 +396,17 @@ class BinanceFillsListenerWsApi:
             raise ValueError("No callback provided (constructor or start())")
 
         self._stop.clear()
+        logger.info("Binance fill listener (WS API): thread started, syncing time...")
         # Pre-sync in this thread so on_open has a valid offset even if GET fails from WS thread
         self._client._ensure_time_sync()
         ws_url = self._ws_api_url
-        logger.info("Binance WS API user data stream, connecting to %s", ws_url[:50] + "...")
+        logger.info("Binance WS API user data stream, connecting to {}", ws_url[:50] + "...")
 
         def on_message(_ws: Any, raw: str) -> None:
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError as e:
-                logger.warning("Invalid JSON from WS API: %s", e)
+                logger.warning("Invalid JSON from WS API: {}", e)
                 return
             # Method response: {"id": "...", "status": 200, "result": {"subscriptionId": 0}}
             if "result" in payload:
@@ -413,16 +414,16 @@ class BinanceFillsListenerWsApi:
                 if "subscriptionId" in res:
                     self._subscription_id = res["subscriptionId"]
                     self._ws_connected = True
-                    logger.info("User data stream subscribed (subscriptionId=%s)", self._subscription_id)
+                    logger.info("User data stream subscribed (subscriptionId={})", self._subscription_id)
                     if self._on_stream_connected:
                         try:
                             self._on_stream_connected()
                         except Exception as e:
-                            logger.exception("on_stream_connected callback error: %s", e)
+                            logger.exception("on_stream_connected callback error: {}", e)
                 return
             if "error" in payload:
                 err = payload.get("error", {})
-                logger.error("WS API error: %s (code %s)", err.get("msg"), err.get("code"))
+                logger.error("WS API error: {} (code {})", err.get("msg"), err.get("code"))
                 return
             # Event: {"subscriptionId": 0, "event": {"e": "executionReport", ...}}
             unified = parse_execution_report(payload)
@@ -449,16 +450,16 @@ class BinanceFillsListenerWsApi:
             try:
                 _ws.send(json.dumps(req))
             except Exception as e:
-                logger.exception("Failed to send userDataStream.subscribe.signature: %s", e)
+                logger.exception("Failed to send userDataStream.subscribe.signature: {}", e)
 
         def on_error(_ws: Any, err: Optional[Exception]) -> None:
             if err:
-                logger.error("Binance WS API stream error: %s", err)
+                logger.error("Binance WS API stream error: {}", err)
 
         def on_close(_ws: Any, close_status: Optional[int], close_msg: Optional[str]) -> None:
             self._ws_connected = False
             self._subscription_id = None
-            logger.info("Binance WS API stream closed: %s %s", close_status, close_msg)
+            logger.info("Binance WS API stream closed: {} {}", close_status, close_msg)
 
         self._ws = websocket.WebSocketApp(
             ws_url,
@@ -473,6 +474,7 @@ class BinanceFillsListenerWsApi:
         cb = callback or self._on_fill_or_reject
         if not cb:
             raise ValueError("No callback provided (constructor or start_background())")
+        logger.info("Binance fill listener (WS API): starting background thread")
         self._thread = threading.Thread(target=self.start, args=(cb,), daemon=True)
         self._thread.start()
 

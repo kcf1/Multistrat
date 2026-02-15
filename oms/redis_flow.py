@@ -270,19 +270,20 @@ def process_one(
         "process_one: order placed order_id={} broker_order_id={} symbol={} status={}",
         order_id, response.get("broker_order_id"), order.get("symbol"), response.get("status", ""),
     )
-    store.update_status(
-        order_id,
-        "sent",
-        "pending",
-        extra_fields={
-            "broker_order_id": response.get("broker_order_id"),
-            "executed_qty": response.get("executed_qty"),
-            "price": response.get("price"),
-            "limit_price": response.get("limit_price"),
-            "binance_transact_time": response.get("binance_transact_time"),
-            "binance_cumulative_quote_qty": response.get("binance_cumulative_quote_qty"),
-        },
-    )
+    extra_fields = {
+        "broker_order_id": response.get("broker_order_id"),
+        "executed_qty": response.get("executed_qty"),
+        "price": response.get("price"),
+        "limit_price": response.get("limit_price"),
+        "binance_transact_time": response.get("binance_transact_time"),
+        "binance_cumulative_quote_qty": response.get("binance_cumulative_quote_qty"),
+    }
+    current = store.get_order(order_id)
+    if current and current.get("status") in TERMINAL_STATUSES:
+        # Fill callback already ran (e.g. market order filled immediately); don't overwrite terminal status
+        store.update_status(order_id, current["status"], current["status"], extra_fields=extra_fields)
+    else:
+        store.update_status(order_id, "sent", "pending", extra_fields=extra_fields)
     if consumer_group and consumer_name:
         ack_risk_approved(redis, consumer_group, entry_id)
     return {

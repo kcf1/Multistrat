@@ -8,6 +8,7 @@ Supports consumer group (XREADGROUP + XACK) so each message is consumed once.
 from typing import Any, Dict, Optional, Tuple
 
 from redis import Redis
+from redis.exceptions import ResponseError
 
 from oms.log import logger
 from oms.schemas import CANCEL_REQUESTED_STREAM
@@ -80,18 +81,36 @@ def read_one_cancel_request_cg(
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
     Read at most one cancel_requested message via consumer group (XREADGROUP ">").
-    Ensures group exists first. Returns (entry_id, cancel_request_dict) or None.
+    Ensures group exists first. On NOGROUP (e.g. stream missing at startup), re-ensure and retry once.
+    Returns (entry_id, cancel_request_dict) or None.
     """
-    ensure_cancel_requested_consumer_group(redis, group)
-    raw = read_messages_group(
-        redis,
-        CANCEL_REQUESTED_STREAM,
-        group,
-        consumer,
-        id=">",
-        count=1,
-        block_ms=block_ms,
-    )
+    def _read() -> list:
+        ensure_cancel_requested_consumer_group(redis, group)
+        return read_messages_group(
+            redis,
+            CANCEL_REQUESTED_STREAM,
+            group,
+            consumer,
+            id=">",
+            count=1,
+            block_ms=block_ms,
+        )
+    try:
+        raw = _read()
+    except ResponseError as e:
+        if "NOGROUP" not in str(e):
+            raise
+        logger.warning("cancel_requested NOGROUP, re-ensuring consumer group: {}", e)
+        ensure_cancel_requested_consumer_group(redis, group)
+        raw = read_messages_group(
+            redis,
+            CANCEL_REQUESTED_STREAM,
+            group,
+            consumer,
+            id=">",
+            count=1,
+            block_ms=block_ms,
+        )
     for entry_id, fields in raw:
         try:
             req = parse_cancel_request_message(fields or {})

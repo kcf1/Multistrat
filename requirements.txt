@@ -3,5 +3,8 @@ alembic>=1.13
 psycopg2-binary>=2.9
 python-dotenv>=1.0
 
-# OMS logging
+# OMS (Redis client, HTTP/WS for Binance, logging)
+redis>=5.0
+requests>=2.28
+websocket-client>=1.6.0
 loguru>=0.7.0

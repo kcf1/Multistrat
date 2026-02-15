@@ -58,6 +58,21 @@ services:
       redis:
         condition: service_healthy
 
+  oms:
+    build: .
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://${POSTGRES_USER:-multistrat}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-multistrat}
+    restart: unless-stopped
+    networks:
+      - multistrat
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redisinsight_data:
