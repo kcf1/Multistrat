@@ -70,10 +70,10 @@ class TestSetOrderKeyTtl:
         key = ORDER_KEY_PREFIX + order_id
         redis_client.hset(key, mapping={"status": "filled", "symbol": "BTCUSDT"})
         assert redis_client.ttl(key) == -1
-        ok = set_order_key_ttl(redis_client, order_id, 3600)
+        ok = set_order_key_ttl(redis_client, order_id, 300)
         assert ok is True
-        assert redis_client.ttl(key) == 3600
+        assert redis_client.ttl(key) == 300
 
     def test_set_order_key_ttl_returns_false_when_key_missing(self, redis_client):
-        ok = set_order_key_ttl(redis_client, "nonexistent", 3600)
+        ok = set_order_key_ttl(redis_client, "nonexistent", 300)
         assert ok is False

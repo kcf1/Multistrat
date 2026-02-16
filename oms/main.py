@@ -272,9 +272,9 @@ def main() -> int:
     logger.info("OMS starting brokers={}", registry.broker_names())
 
     database_url = _env("DATABASE_URL")
-    sync_ttl = 3600
+    sync_ttl = 300
     try:
-        sync_ttl = int(os.environ.get("OMS_SYNC_TTL_AFTER_SECONDS", "3600"))
+        sync_ttl = int(os.environ.get("OMS_SYNC_TTL_AFTER_SECONDS", "300"))
     except (TypeError, ValueError):
         pass
 

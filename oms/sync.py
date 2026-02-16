@@ -20,7 +20,7 @@ from oms.redis_flow import TERMINAL_STATUSES
 from oms.storage.redis_order_store import RedisOrderStore
 
 # Defaults (override via env in caller if needed)
-DEFAULT_SYNC_TTL_AFTER_SECONDS = 3600  # 1 hour after sync
+DEFAULT_SYNC_TTL_AFTER_SECONDS = 300  # 5 minutes after sync
 DEFAULT_SYNC_INTERVAL_SECONDS = 60
 
 
