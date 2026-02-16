@@ -173,6 +173,49 @@ def read_one_risk_approved_cg(
     return None
 
 
+def read_many_risk_approved_cg(
+    redis: Redis,
+    group: str,
+    consumer: str,
+    count: int = 10,
+    block_ms: Optional[int] = None,
+    read_id: str = ">",
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Read multiple risk_approved messages via consumer group (XREADGROUP).
+    
+    Args:
+        redis: Redis client.
+        group: Consumer group name.
+        consumer: Consumer name.
+        count: Maximum number of messages to read (default: 10).
+        block_ms: Block up to this many ms waiting for messages.
+        read_id: ">" = new messages only; "0" = pending messages for this consumer.
+    
+    Returns:
+        List of (entry_id, order_dict). Empty list if no messages.
+    """
+    ensure_risk_approved_consumer_group(redis, group)
+    raw = read_messages_group(
+        redis,
+        RISK_APPROVED_STREAM,
+        group,
+        consumer,
+        id=read_id,
+        count=count,
+        block_ms=block_ms,
+    )
+    result: List[Tuple[str, Dict[str, Any]]] = []
+    for entry_id, fields in raw:
+        try:
+            order = parse_risk_approved_message(fields)
+            result.append((entry_id, order))
+        except RiskApprovedParseError as e:
+            logger.warning("risk_approved parse error entry_id={} error={!s}", entry_id, e)
+            continue
+    return result
+
+
 def read_one_risk_approved_pending(
     redis: Redis,
     group: str,

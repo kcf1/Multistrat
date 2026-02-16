@@ -210,13 +210,14 @@ The plans do not yet define automated tests for every deliverable. Below is a su
 | Phase | Suggested tests | Notes |
 |-------|-----------------|--------|
 | **1** | **Smoke / verification:** Compose up succeeds; Postgres accepts connections; Redis `PING`; `alembic upgrade head` idempotent. | Can be a small script or CI step (e.g. `docker-compose up -d && psql $DATABASE_URL -c 'SELECT 1' && redis-cli -u $REDIS_URL ping && alembic current`). |
-| **2** | **Integration:** OMS consumes from `risk_approved`, stages in Redis, syncs to Postgres orders; calls Binance (testnet), publishes to `oms_fills`; Booking consumes `oms_fills`, updates Postgres/Redis. **E2E:** One test order → fill → positions/balances/orders updated. | Mock or testnet only; avoid real money. |
+| **2** | **Unit:** Component tests with mocked dependencies (API client, Redis store, consumer/producer). **Integration:** OMS flow with fakeredis and mock adapters (`test_oms_integration.py`). **E2E (code-level):** Real Redis + Binance testnet (`test_oms_redis_testnet.py`). **E2E (service-level):** Black-box script (`scripts/full_pipeline_test.py`) assumes running services. See [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md#165-test-classification-and-file-mapping) for test classification. | Mock or testnet only; avoid real money. |
 | **3** | **Integration:** Admin publishes command to stream; target service consumes and reacts. **Smoke:** Manual order and cancel from CLI or GUI. | |
 | **4** | **Integration:** Market data service writes candles to Postgres and latest to Redis; query by symbol/interval. **Smoke:** After run, candles exist for configured symbols. | |
 | **5** | **Unit:** Strategy `next_signal()` given mock state; Risk checks (limits, margin). **Integration:** Strategy → Risk → `risk_approved`; full E2E with testnet. | |
 
 - **Where to put tests:** Per-service (e.g. `oms/tests/`, `booking/tests/`) or a top-level `tests/` with subdirs per phase/service. Use one runner (e.g. pytest) and `requirements-dev.txt` if needed.
 - **CI:** Run Phase 1 verification on every PR; add Phase 2+ tests as those services land.
+- **Test documentation:** See [TESTING.md](docs/TESTING.md) for complete test inventory, classification, and execution instructions.
 
 ---
 

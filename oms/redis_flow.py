@@ -5,15 +5,15 @@ Used by Redis-through-testnet integration test and OMS main loop (task 12.1.9).
 """
 
 import uuid
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from redis import Redis
 
 from oms.log import logger
 
-from oms.cancel_consumer import ack_cancel_requested, read_one_cancel_request, read_one_cancel_request_cg
+from oms.cancel_consumer import ack_cancel_requested, read_one_cancel_request, read_one_cancel_request_cg, read_many_cancel_request_cg
 from oms.cleanup import set_order_key_ttl
-from oms.consumer import ack_risk_approved, read_one_risk_approved, read_one_risk_approved_cg, read_one_risk_approved_pending
+from oms.consumer import ack_risk_approved, read_one_risk_approved, read_one_risk_approved_cg, read_one_risk_approved_pending, read_many_risk_approved_cg
 from oms.producer import produce_oms_fill
 from oms.registry import AdapterRegistry
 from oms.schemas import RISK_APPROVED_STREAM
@@ -298,6 +298,150 @@ def process_one(
     }
 
 
+def process_many(
+    redis: Redis,
+    store: RedisOrderStore,
+    registry: AdapterRegistry,
+    count: int = 10,
+    block_ms: Optional[int] = None,
+    consumer_group: Optional[str] = "oms",
+    consumer_name: Optional[str] = "oms-1",
+    on_terminal_sync: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Process multiple risk_approved messages in batch (bulk processing).
+    
+    Reads up to `count` messages, processes each one, and returns results.
+    This improves throughput when multiple orders are queued.
+    
+    Args:
+        redis: Redis client.
+        store: Order store.
+        registry: Adapter registry.
+        count: Maximum number of messages to read and process (default: 10).
+        block_ms: Block up to this many ms waiting for messages.
+        consumer_group: Consumer group name.
+        consumer_name: Consumer name.
+        on_terminal_sync: Optional callback for terminal order sync.
+    
+    Returns:
+        List of result dicts (same format as process_one), one per processed order.
+        Empty list if no messages available.
+    """
+    if not consumer_group or not consumer_name:
+        # Fall back to single processing if no consumer group
+        result = process_one(redis, store, registry, block_ms=block_ms, consumer_group=consumer_group, consumer_name=consumer_name, on_terminal_sync=on_terminal_sync)
+        return [result] if result else []
+    
+    # Read multiple messages
+    messages = read_many_risk_approved_cg(redis, consumer_group, consumer_name, count=count, block_ms=block_ms)
+    if not messages:
+        # Also check pending messages
+        pending = read_many_risk_approved_cg(redis, consumer_group, consumer_name, count=count, block_ms=0, read_id="0")
+        messages = pending
+    
+    if not messages:
+        return []
+    
+    results: List[Dict[str, Any]] = []
+    for entry_id, order in messages:
+        order_id = order.get("order_id") or str(uuid.uuid4())
+        order["order_id"] = order_id
+        logger.info(
+            "process_many: read risk_approved order_id={} broker={} symbol={} side={} quantity={}",
+            order_id, order.get("broker"), order.get("symbol"), order.get("side"), order.get("quantity"),
+        )
+
+        if not store.get_order(order_id):
+            store.stage_order(order_id, order)
+        broker = order.get("broker", "") or "binance"
+        adapter = registry.get(broker)
+        if not adapter:
+            logger.warning("process_many: no adapter for broker={} order_id={}", broker, order_id)
+            store.update_fill_status(order_id, "rejected")
+            produce_oms_fill(redis, _reject_event(order_id, order, reject_reason="No adapter for broker"))
+            ack_risk_approved(redis, consumer_group, entry_id)
+            if on_terminal_sync is not None:
+                on_terminal_sync(order_id)
+            results.append({"order_id": order_id, "rejected": True, "reject_reason": "No adapter for broker"})
+            continue
+
+        try:
+            response = adapter.place_order(order)
+        except Exception as e:
+            retry_key = f"oms:retry:risk_approved:{entry_id}"
+            retry_count = redis.incr(retry_key)
+            delivery_count = get_pending_delivery_count(redis, RISK_APPROVED_STREAM, consumer_group, entry_id)
+            attempts = max(retry_count, delivery_count)
+            logger.warning(
+                "process_many: place_order raised order_id={} attempt={} error={!s}",
+                order_id, attempts, e,
+            )
+            if attempts >= OMS_PLACE_ORDER_MAX_RETRIES:
+                logger.warning(
+                    "process_many: max retries reached order_id={} rejecting and XACK",
+                    order_id,
+                )
+                store.update_fill_status(order_id, "rejected")
+                produce_oms_fill(
+                    redis,
+                    _reject_event(
+                        order_id,
+                        order,
+                        reject_reason=f"place_order failed after {OMS_PLACE_ORDER_MAX_RETRIES} retries: {e!s}",
+                    ),
+                )
+                ack_risk_approved(redis, consumer_group, entry_id)
+                redis.delete(retry_key)
+                if on_terminal_sync is not None:
+                    on_terminal_sync(order_id)
+                results.append({
+                    "order_id": order_id,
+                    "rejected": True,
+                    "reject_reason": f"place_order failed after {OMS_PLACE_ORDER_MAX_RETRIES} retries: {e!s}",
+                })
+            continue
+
+        if response.get("rejected"):
+            store.update_fill_status(order_id, "rejected")
+            produce_oms_fill(redis, _reject_event(order_id, order, response.get("broker_order_id", ""), response.get("reject_reason", "rejected")))
+            ack_risk_approved(redis, consumer_group, entry_id)
+            if on_terminal_sync is not None:
+                on_terminal_sync(order_id)
+            results.append({
+                "order_id": order_id,
+                "rejected": True,
+                "reject_reason": response.get("reject_reason", "rejected"),
+            })
+            continue
+
+        logger.info(
+            "process_many: order placed order_id={} broker_order_id={} symbol={} status={}",
+            order_id, response.get("broker_order_id"), order.get("symbol"), response.get("status", ""),
+        )
+        extra_fields = {
+            "broker_order_id": response.get("broker_order_id"),
+            "executed_qty": response.get("executed_qty"),
+            "price": response.get("price"),
+            "limit_price": response.get("limit_price"),
+            "binance_transact_time": response.get("binance_transact_time"),
+            "binance_cumulative_quote_qty": response.get("binance_cumulative_quote_qty"),
+        }
+        current = store.get_order(order_id)
+        if current and current.get("status") in TERMINAL_STATUSES:
+            store.update_status(order_id, current["status"], current["status"], extra_fields=extra_fields)
+        else:
+            store.update_status(order_id, "sent", "pending", extra_fields=extra_fields)
+        ack_risk_approved(redis, consumer_group, entry_id)
+        results.append({
+            "order_id": order_id,
+            "broker_order_id": response.get("broker_order_id"),
+            "rejected": False,
+        })
+    
+    return results
+
+
 def process_one_risk_approved(
     redis: Redis,
     store: RedisOrderStore,
@@ -436,3 +580,132 @@ def process_one_cancel(
         "cancelled": True,
         "status": response.get("status", "CANCELED"),
     }
+
+
+def process_many_cancel(
+    redis: Redis,
+    store: RedisOrderStore,
+    registry: AdapterRegistry,
+    count: int = 10,
+    block_ms: Optional[int] = None,
+    publish_to_oms_fills: bool = True,
+    consumer_group: Optional[str] = "oms",
+    consumer_name: Optional[str] = "oms-1",
+) -> List[Dict[str, Any]]:
+    """
+    Process multiple cancel_requested messages in batch (bulk processing).
+    
+    Reads up to `count` cancel requests, processes each one, and returns results.
+    This improves throughput when multiple cancel requests are queued.
+    
+    Args:
+        redis: Redis client.
+        store: Order store.
+        registry: Adapter registry.
+        count: Maximum number of messages to read and process (default: 10).
+        block_ms: Block up to this many ms waiting for messages.
+        publish_to_oms_fills: Whether to publish cancelled events to oms_fills stream.
+        consumer_group: Consumer group name.
+        consumer_name: Consumer name.
+    
+    Returns:
+        List of result dicts (same format as process_one_cancel), one per processed cancel.
+        Empty list if no messages available.
+    """
+    if not consumer_group or not consumer_name:
+        # Fall back to single processing if no consumer group
+        result = process_one_cancel(redis, store, registry, block_ms=block_ms, publish_to_oms_fills=publish_to_oms_fills, consumer_group=consumer_group, consumer_name=consumer_name)
+        return [result] if result else []
+    
+    # Read multiple cancel requests
+    messages = read_many_cancel_request_cg(redis, consumer_group, consumer_name, count=count, block_ms=block_ms)
+    
+    if not messages:
+        return []
+    
+    results: List[Dict[str, Any]] = []
+    for entry_id, req in messages:
+        order_id = req.get("order_id")
+        broker_order_id = req.get("broker_order_id") or ""
+        symbol = (req.get("symbol") or "").strip()
+        broker = (req.get("broker") or "binance").strip()
+        logger.info(
+            "process_many_cancel: read cancel_request order_id={} broker_order_id={} symbol={} broker={}",
+            order_id, broker_order_id, symbol, broker,
+        )
+
+        if order_id:
+            order = store.get_order(order_id)
+            if not order:
+                logger.warning("process_many_cancel: order not found order_id={}", order_id)
+                ack_cancel_requested(redis, consumer_group, entry_id)
+                results.append({"order_id": order_id, "cancelled": False, "reject_reason": "Order not found in store"})
+                continue
+            broker_order_id = (order.get("broker_order_id") or "").strip()
+            symbol = (order.get("symbol") or "").strip()
+            if not broker_order_id or not symbol:
+                ack_cancel_requested(redis, consumer_group, entry_id)
+                results.append({"order_id": order_id, "cancelled": False, "reject_reason": "Order has no broker_order_id/symbol"})
+                continue
+        else:
+            if not broker_order_id or not symbol:
+                ack_cancel_requested(redis, consumer_group, entry_id)
+                results.append({"cancelled": False, "reject_reason": "Missing broker_order_id or symbol"})
+                continue
+            order_id = store.find_order_by_broker_order_id(broker_order_id)
+            order = store.get_order(order_id) if order_id else None
+
+        adapter = registry.get(broker)
+        if not adapter:
+            logger.warning("process_many_cancel: no adapter for broker={} order_id={}", broker, order_id)
+            ack_cancel_requested(redis, consumer_group, entry_id)
+            results.append({"order_id": order_id, "cancelled": False, "reject_reason": "No adapter for broker"})
+            continue
+
+        try:
+            response = adapter.cancel_order(broker_order_id=broker_order_id, symbol=symbol)
+        except Exception as e:
+            logger.warning("process_many_cancel: cancel_order raised order_id={} error={!s}", order_id, e)
+            ack_cancel_requested(redis, consumer_group, entry_id)
+            results.append({"order_id": order_id, "cancelled": False, "reject_reason": f"cancel_order failed: {e!s}"})
+            continue
+        
+        if response.get("rejected"):
+            logger.info(
+                "process_many_cancel: broker reject order_id={} broker_order_id={} reason={}",
+                order_id, broker_order_id, response.get("reject_reason", "rejected"),
+            )
+            ack_cancel_requested(redis, consumer_group, entry_id)
+            results.append({"order_id": order_id, "cancelled": False, "reject_reason": response.get("reject_reason", "rejected")})
+            continue
+
+        logger.info(
+            "process_many_cancel: cancelled order_id={} broker_order_id={} symbol={}",
+            order_id, broker_order_id, symbol,
+        )
+        if order_id:
+            store.update_fill_status(order_id, "cancelled")
+            if publish_to_oms_fills:
+                order = order or store.get_order(order_id) or {}
+                produce_oms_fill(redis, {
+                    "event_type": "cancelled",
+                    "order_id": order_id,
+                    "broker_order_id": broker_order_id,
+                    "symbol": order.get("symbol", symbol),
+                    "side": order.get("side", ""),
+                    "quantity": order.get("quantity", ""),
+                    "price": order.get("price", ""),
+                    "fee": "", "fee_asset": "", "executed_at": "", "fill_id": "",
+                    "reject_reason": response.get("reject_reason", "CANCELED"),
+                    "book": order.get("book", ""),
+                    "comment": order.get("comment", ""),
+                })
+        ack_cancel_requested(redis, consumer_group, entry_id)
+        results.append({
+            "order_id": order_id,
+            "broker_order_id": broker_order_id,
+            "cancelled": True,
+            "status": response.get("status", "CANCELED"),
+        })
+    
+    return results

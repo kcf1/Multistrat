@@ -18,15 +18,17 @@ from oms.log import logger
 from oms.cancel_consumer import ensure_cancel_requested_consumer_group
 from oms.cleanup import trim_oms_streams
 from oms.consumer import ensure_risk_approved_consumer_group
-from oms.redis_flow import make_fill_callback, process_one, process_one_cancel
+from oms.redis_flow import make_fill_callback, process_one, process_one_cancel, process_many, process_many_cancel
 from oms.registry import AdapterRegistry
 from oms.storage.redis_order_store import RedisOrderStore
 from oms.sync import sync_one_order
 
-# Use non-blocking Redis reads + sleep to avoid Docker blocking-socket issues with XREADGROUP BLOCK
-DEFAULT_BLOCK_MS = 0  # non-blocking; we sleep in loop when idle
-DEFAULT_POLL_SLEEP_SECONDS = 0.5  # sleep when no message (polling instead of blocking)
-DEFAULT_TRIM_EVERY_N = 20  # trim streams every N loop iterations
+# Use blocking Redis reads for event-driven behavior (wakes immediately on new messages)
+# Block timeout allows periodic checks for cancels and trimming
+DEFAULT_BLOCK_MS = 100  # block up to 100ms waiting for messages (event-driven, faster cancel processing)
+DEFAULT_POLL_SLEEP_SECONDS = 0.0  # not used when blocking; kept for backward compatibility
+DEFAULT_TRIM_EVERY_N = 200  # trim streams every N loop iterations (adjusted for faster wake-ups)
+DEFAULT_BATCH_SIZE = 50  # process up to N orders per batch (bulk processing, higher throughput)
 CONSUMER_GROUP = "oms"
 CONSUMER_NAME = "oms-1"
 
@@ -134,6 +136,7 @@ def run_oms_loop(
     block_ms: Optional[int] = None,
     poll_sleep_seconds: float = DEFAULT_POLL_SLEEP_SECONDS,
     trim_every_n: int = DEFAULT_TRIM_EVERY_N,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     stop_after_n: Optional[int] = None,
     run_until: Optional[Callable[[], bool]] = None,
     consumer_group: str = CONSUMER_GROUP,
@@ -141,10 +144,20 @@ def run_oms_loop(
     on_terminal_sync: Optional[Callable[[str], None]] = None,
 ) -> int:
     """
-    Run OMS main loop (12.1.11b): process_one, process_one_cancel, trim periodically.
+    Run OMS main loop (12.1.11b): process_many (bulk), process_one_cancel, trim periodically.
 
     Ensures consumer groups for risk_approved and cancel_requested, then loops until
     stop_after_n messages processed (if set), run_until() returns True, or interrupted.
+
+    Processes orders in batches (batch_size) for improved throughput when multiple orders
+    are queued. Reads up to batch_size messages per iteration.
+
+    When block_ms > 0: Uses blocking Redis Stream reads (XREADGROUP BLOCK) for event-driven
+    behavior - wakes up immediately when a message arrives. The block timeout allows periodic
+    checks for cancel requests and stream trimming.
+
+    When block_ms = 0: Uses non-blocking reads with polling (poll_sleep_seconds) - less efficient
+    but may be needed if blocking reads cause issues in some environments.
 
     Returns number of messages processed (risk_approved + cancel_requested).
     """
@@ -164,44 +177,49 @@ def run_oms_loop(
         iteration += 1
         logger.debug("OMS loop iteration {}", iteration)
 
-        result = None
-        cancel_result = None
+        results = []
+        cancel_results = []
         try:
-            logger.debug("OMS loop iter {}: process_one start", iteration)
-            result = process_one(
+            logger.debug("OMS loop iter {}: process_many start (batch_size={})", iteration, batch_size)
+            results = process_many(
                 redis,
                 store,
                 registry,
+                count=batch_size,
                 block_ms=block_ms,
                 consumer_group=consumer_group,
                 consumer_name=consumer_name,
                 on_terminal_sync=on_terminal_sync,
             )
-            logger.debug("OMS loop iter {}: process_one done result={}", iteration, result is not None)
-            if result is not None:
-                processed += 1
+            logger.debug("OMS loop iter {}: process_many done count={}", iteration, len(results))
+            if results:
+                processed += len(results)
                 if stop_after_n is not None and processed >= stop_after_n:
                     break
 
-            logger.debug("OMS loop iter {}: process_one_cancel start", iteration)
-            cancel_result = process_one_cancel(
+            logger.debug("OMS loop iter {}: process_many_cancel start (batch_size={})", iteration, batch_size)
+            cancel_results = process_many_cancel(
                 redis,
                 store,
                 registry,
-                block_ms=0,
+                count=batch_size,
+                block_ms=0,  # Non-blocking for cancels (checked after orders)
                 consumer_group=consumer_group,
                 consumer_name=consumer_name,
             )
-            logger.debug("OMS loop iter {}: process_one_cancel done result={}", iteration, cancel_result is not None)
-            if cancel_result is not None:
-                processed += 1
+            logger.debug("OMS loop iter {}: process_many_cancel done count={}", iteration, len(cancel_results))
+            if cancel_results:
+                processed += len(cancel_results)
                 if stop_after_n is not None and processed >= stop_after_n:
                     break
         except Exception as e:
             logger.exception("OMS loop iteration error (continuing): {}", e)
 
-        # When non-blocking: sleep so we don't busy-loop; heartbeat when idle
-        if result is None and cancel_result is None:
+        # With blocking reads: no sleep needed - block_ms handles waiting
+        # If both returned empty, we either timed out (block_ms) or no messages available
+        # The blocking read will wake up immediately when a message arrives (event-driven)
+        if not results and not cancel_results and block_ms == 0:
+            # Only sleep if using non-blocking mode (backward compatibility)
             logger.debug("OMS loop iter {}: idle, sleep {}s", iteration, poll_sleep_seconds)
             if iteration % 20 == 1 and iteration > 1:
                 logger.debug("OMS loop: waiting for messages (iteration {})", iteration)
@@ -260,12 +278,39 @@ def main() -> int:
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
 
+    # Allow override via environment variables
+    block_ms = DEFAULT_BLOCK_MS
+    try:
+        env_block = os.environ.get("OMS_BLOCK_MS")
+        if env_block:
+            block_ms = int(env_block)
+    except (TypeError, ValueError):
+        pass
+    
+    poll_sleep = DEFAULT_POLL_SLEEP_SECONDS
+    try:
+        env_poll = os.environ.get("OMS_POLL_SLEEP_SECONDS")
+        if env_poll:
+            poll_sleep = float(env_poll)
+    except (TypeError, ValueError):
+        pass
+    
+    batch_size = DEFAULT_BATCH_SIZE
+    try:
+        env_batch = os.environ.get("OMS_BATCH_SIZE")
+        if env_batch:
+            batch_size = int(env_batch)
+    except (TypeError, ValueError):
+        pass
+
     try:
         run_oms_loop(
             redis,
             store,
             registry,
-            block_ms=DEFAULT_BLOCK_MS,
+            block_ms=block_ms,
+            poll_sleep_seconds=poll_sleep,
+            batch_size=batch_size,
             trim_every_n=DEFAULT_TRIM_EVERY_N,
             run_until=lambda: shutdown[0],
             on_terminal_sync=on_terminal_sync if database_url else None,

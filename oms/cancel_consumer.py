@@ -5,7 +5,7 @@ Reads cancel requests from cancel_requested stream; parse per schema.
 Supports consumer group (XREADGROUP + XACK) so each message is consumed once.
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from redis import Redis
 from redis.exceptions import ResponseError
@@ -119,6 +119,64 @@ def read_one_cancel_request_cg(
             logger.warning("cancel_requested parse error entry_id={} error={!s}", entry_id, e)
             continue
     return None
+
+
+def read_many_cancel_request_cg(
+    redis: Redis,
+    group: str,
+    consumer: str,
+    count: int = 10,
+    block_ms: Optional[int] = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Read multiple cancel_requested messages via consumer group (XREADGROUP).
+    
+    Args:
+        redis: Redis client.
+        group: Consumer group name.
+        consumer: Consumer name.
+        count: Maximum number of messages to read (default: 10).
+        block_ms: Block up to this many ms waiting for messages.
+    
+    Returns:
+        List of (entry_id, cancel_request_dict). Empty list if no messages.
+    """
+    def _read() -> list:
+        ensure_cancel_requested_consumer_group(redis, group)
+        return read_messages_group(
+            redis,
+            CANCEL_REQUESTED_STREAM,
+            group,
+            consumer,
+            id=">",
+            count=count,
+            block_ms=block_ms,
+        )
+    try:
+        raw = _read()
+    except ResponseError as e:
+        if "NOGROUP" not in str(e):
+            raise
+        logger.warning("cancel_requested NOGROUP, re-ensuring consumer group: {}", e)
+        ensure_cancel_requested_consumer_group(redis, group)
+        raw = read_messages_group(
+            redis,
+            CANCEL_REQUESTED_STREAM,
+            group,
+            consumer,
+            id=">",
+            count=count,
+            block_ms=block_ms,
+        )
+    result: List[Tuple[str, Dict[str, Any]]] = []
+    for entry_id, fields in raw:
+        try:
+            req = parse_cancel_request_message(fields)
+            result.append((entry_id, req))
+        except CancelRequestParseError as e:
+            logger.warning("cancel_requested parse error entry_id={} error={!s}", entry_id, e)
+            continue
+    return result
 
 
 def ack_cancel_requested(redis: Redis, group: str, entry_id: str) -> int:

@@ -11,7 +11,7 @@ from redis import Redis
 
 from oms.schemas import OMS_FILLS_STREAM, RISK_APPROVED_STREAM
 
-DEFAULT_STREAM_MAXLEN = 10000
+DEFAULT_STREAM_MAXLEN = 20000  # Increased for larger batch processing (was 10000)
 ORDER_KEY_PREFIX = "orders:"
 
 

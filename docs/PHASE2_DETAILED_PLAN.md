@@ -357,6 +357,11 @@ BINANCE_API_SECRET=
 - [x] **12.1.11b** **OMS main loop and Binance registration:** Runnable entrypoint (e.g. `oms/main.py`) that loads REDIS_URL, creates store and registry, registers Binance adapter, starts fill listener(s), then loop: `process_one(redis, store, registry, block_ms=5000)` until shutdown. In the loop (or on a timer), call `trim_oms_streams(redis)` periodically to cap stream length (12.1.9b). Add `BINANCE_*` to `.env.example` (already present); document in README. **Integration test:** run main with fakeredis + mock adapter; inject one message to `risk_approved`; assert order in store and/or oms_fills. **E2E:** run OMS with real Redis + testnet; inject script; assert fill on `oms_fills`.
 - [x] **12.1.12** **Price vs limit_price (order and broker response):** In stored orders and broker order response, **`price`** = executed (average fill) price; **`limit_price`** = order limit price. See §3.4 for full plan. **Changes:** consumer parse risk_approved → `limit_price`; Redis order store + Binance adapter (unified: `limit_price` from Binance `price`, `price` from `avgPrice` or derived); place_order request uses `limit_price` or `price`; sync + Postgres add `limit_price` column; fill callback/store update `price` from fill event. **Unit tests:** consumer, store, adapter, sync; **integration:** limit order has `limit_price` and after fill `price` populated.
 - [x] **12.1.13** **OMS logging:** Structured logging (loguru) across OMS: **main** (startup/shutdown, brokers, fill listeners, trim); **redis_flow** (process_one: message read, place/reject, retries; fill callback: event + terminal status; process_one_cancel: read, cancel result); **sync** (sync_one_order, sync_terminal_orders count, failures); **consumer/cancel_consumer** (parse errors); **producer** (DEBUG: produce_oms_fill); **redis_order_store** (DEBUG: stage_order, update_status). INFO for business events, WARNING for recoverable issues, DEBUG for audit. **Implementation:** `oms/log.py` (loguru logger), `loguru` in requirements.
+- [ ] **12.1.14** **Add Pydantic dependency:** Add `pydantic>=2.0.0` to `requirements.txt` (root and/or `oms/requirements.txt`). Pydantic v2 provides runtime validation, type safety, and better error messages for Redis Stream messages and broker WebSocket events. **Implementation:** Update `requirements.txt`; verify Docker build installs Pydantic. **Unit test:** N/A (dependency addition).
+- [ ] **12.1.15** **Create Pydantic models for Redis Streams:** Define Pydantic models for Redis Stream message schemas. **Models:** `RiskApprovedOrder` (for `risk_approved` stream: broker, account_id, symbol, side, quantity, order_type, limit_price, time_in_force, book, comment, etc.); `CancelRequest` (for `cancel_requested` stream: order_id or broker_order_id+symbol, broker); `OmsFillEvent` (for `oms_fills` stream: event_type, order_id, broker_order_id, symbol, side, quantity, price, fee, fee_asset, executed_at, fill_id, reject_reason, book, comment). Use `Field()` for validation (e.g. `quantity > 0`, required fields, optional defaults). **Implementation:** Create `oms/schemas_pydantic.py` (or add to existing `oms/schemas.py`); define BaseModel classes with proper field types and validators. **Unit test:** `oms/tests/test_schemas_pydantic.py` — verify models validate correct data, reject invalid data (missing required fields, invalid types, negative quantities), provide clear error messages.
+- [ ] **12.1.16** **Integrate Pydantic validation into Redis Stream parsers:** Replace manual validation in `parse_risk_approved_message()` and `parse_cancel_request_message()` with Pydantic model validation. Update `produce_oms_fill()` to validate output using `OmsFillEvent` before publishing. **Implementation:** `oms/consumer.py` — use `RiskApprovedOrder(**fields)` in `parse_risk_approved_message()`; catch `ValidationError` and raise `RiskApprovedParseError` with Pydantic error details. `oms/cancel_consumer.py` — use `CancelRequest(**fields)` in `parse_cancel_request_message()`; catch `ValidationError` and raise `CancelRequestParseError`. `oms/producer.py` — validate event dict with `OmsFillEvent(**event)` before `XADD`. **Unit test:** `oms/tests/test_consumer.py` — verify Pydantic validation catches invalid messages (missing broker, invalid quantity, etc.); `oms/tests/test_cancel_consumer.py` — verify Pydantic validation for cancel requests; `oms/tests/test_producer.py` — verify `produce_oms_fill` validates before publishing. **Integration test:** Invalid messages in `risk_approved` or `cancel_requested` are logged and skipped (not processed).
+- [ ] **12.1.17** **Create Pydantic models for broker streams (Binance WebSocket):** Define Pydantic models for Binance WebSocket execution report events. **Models:** `BinanceExecutionReport` (raw Binance event: e, x, X, c, i, s, S, q, p, l, L, z, t, T, n, N, r, etc.); `FillEvent` (unified fill: event_type="fill", order_id, broker_order_id, symbol, side, quantity, price, fee, fee_asset, executed_at, fill_id, order_status, executed_qty_cumulative); `RejectEvent` (unified reject: event_type="reject", order_id, broker_order_id, symbol, side, quantity, price, reject_reason, executed_at); `CancelledEvent` (unified cancelled: event_type="cancelled", order_id, broker_order_id, symbol, side, quantity, price, executed_at, reject_reason); `ExpiredEvent` (unified expired: event_type="expired", order_id, broker_order_id, symbol, side, quantity, price, executed_at, reject_reason). Use `Literal` for event_type values; `Field()` for validation (quantity > 0 for fills, required fields). **Implementation:** Create `oms/brokers/binance/schemas_pydantic.py` (or add to existing fills_listener module); define BaseModel classes. **Unit test:** `oms/brokers/binance/tests/test_schemas_pydantic.py` — verify models validate correct Binance events, reject invalid events (missing required fields, invalid exec_type, negative quantities), handle optional fields (executed_qty_cumulative, fee_asset).
+- [ ] **12.1.18** **Integrate Pydantic validation into broker stream parsers:** Replace manual parsing in `parse_execution_report()` with Pydantic model validation. Update `make_fill_callback()` to validate fill/reject/cancelled/expired events using Pydantic models before processing. **Implementation:** `oms/brokers/binance/fills_listener.py` — use `BinanceExecutionReport(**event)` to validate raw Binance event; catch `ValidationError` and log/skip invalid events. Return `FillEvent`, `RejectEvent`, `CancelledEvent`, or `ExpiredEvent` models (or convert to dict for backward compatibility). `oms/redis_flow.py` — in `make_fill_callback()`, validate event dict with appropriate Pydantic model (`FillEvent`, `RejectEvent`, etc.) before processing; catch `ValidationError` and log error, skip callback. **Unit test:** `oms/brokers/binance/tests/test_fills_listener.py` — verify `parse_execution_report` validates Binance events, rejects invalid events, returns correct unified event models. `oms/tests/test_redis_flow.py` — verify fill callback validates events, skips invalid events with error log. **Integration test:** Invalid Binance WebSocket events are logged and skipped (not processed by OMS).
 
 ### 12.2 Booking (build backwards: Postgres writes → Redis cache → consumer → integration)
 
@@ -486,4 +491,133 @@ multistrat/
 
 - **E2E:** Run the test script to inject one order with `broker: "binance"` → OMS → Binance adapter → Binance testnet → fill → OMS → Booking → Postgres and Redis updated; Position Keeper reflects state. Use testnet only; no real funds.
 
+### 16.5 Test classification and file mapping
+
+Tests are classified into four categories based on scope and dependencies:
+
+#### 16.5.1 Unit tests (isolated components, mocked dependencies)
+
+**Purpose:** Test individual functions/components in isolation with all dependencies mocked.
+
+**Files:**
+- `oms/brokers/binance/tests/test_api_client.py` — Binance API client (mocked HTTP)
+  - `test_place_order_market_success` — MARKET order placement
+  - `test_place_order_limit_success` — LIMIT order placement
+  - Request signing, error handling, query/cancel endpoints
+- `oms/tests/test_consumer.py` — Redis consumer message parsing
+- `oms/tests/test_producer.py` — Redis producer message formatting
+- `oms/tests/test_redis_order_store.py` — Redis order store CRUD operations
+- `oms/tests/test_registry.py` — Broker adapter registry routing
+- `oms/tests/test_sync.py` — Postgres sync operations
+- `oms/tests/test_cleanup.py` — Stream trimming and TTL
+- `oms/tests/test_cancel_consumer.py` — Cancel command parsing
+- `oms/brokers/binance/tests/test_adapter.py` — Binance adapter (mocked client)
+- `oms/brokers/binance/tests/test_fills_listener.py` — Fills listener parsing (mocked websocket)
+
+**Characteristics:**
+- Fast execution (no network I/O)
+- No external dependencies
+- Mock all external services (HTTP, Redis, Postgres)
+
+#### 16.5.2 Integration tests (multiple components, mocked external services)
+
+**Purpose:** Test multiple components wired together, but still using mocked external services.
+
+**Files:**
+- `oms/tests/test_oms_integration.py` — Full OMS flow with fakeredis and mock adapters
+  - `test_oms_integration_consumer_store_registry_producer` — Full flow: consumer → store → adapter → producer
+  - `test_oms_integration_sent_then_fill_callback_produces` — Fill callback updates store and produces to `oms_fills`
+  - `test_oms_integration_partial_then_full_fill_status_and_cumulative` — Partial/full fill handling
+  - `test_oms_integration_process_one_cancel_from_redis` — Cancel flow
+  - `test_oms_integration_consumer_group_no_double_process` — Consumer group deduplication
+  - `test_oms_main_loop_integration` — Main loop with fakeredis
+
+**Characteristics:**
+- Uses fakeredis (in-memory Redis) or mocked Redis client
+- Mock broker adapters
+- Tests component interactions without real services
+- Faster than E2E but validates integration logic
+
+#### 16.5.3 E2E tests — code-level (real services, OMS code runs in-process)
+
+**Purpose:** Test full system flow with real services, but OMS code runs directly in the test process.
+
+**Files:**
+- `oms/tests/test_oms_redis_testnet.py` — Real Redis + Binance testnet, OMS code imported
+  - `test_trigger_testnet_via_redis_listen_oms_fills` — MARKET order through Redis → testnet → `oms_fills`
+  - `test_full_pipeline_place_then_cancel_via_redis` — LIMIT order → place → cancel
+  - `test_full_pipeline_redis_order_testnet_status_sync_to_postgres` — MARKET order with Postgres sync
+  - `test_full_pipeline_with_main_loop` — MARKET order via main loop
+  - `test_place_order_raises_retry_then_reject_consumer_group` — Error handling with real Redis
+  - `test_error_order_rejected_via_redis_testnet` — Rejection flow
+
+**Characteristics:**
+- Real Redis (from `REDIS_URL`)
+- Real Binance testnet (requires `BINANCE_API_KEY`, `BINANCE_API_SECRET`)
+- Real Postgres (optional, requires `DATABASE_URL`)
+- OMS code imported and executed in test process
+- Fill listeners started in test
+- Requires `RUN_BINANCE_TESTNET=1` to execute
+
+**Setup:**
+```bash
+export RUN_BINANCE_TESTNET=1
+export REDIS_URL=redis://localhost:6379
+export DATABASE_URL=postgresql://...  # optional
+export BINANCE_API_KEY=...
+export BINANCE_API_SECRET=...
+pytest oms/tests/test_oms_redis_testnet.py
+```
+
+#### 16.5.4 E2E tests — service-level (black-box, services running separately)
+
+**Purpose:** Test the running system as a black box without importing OMS code.
+
+**Files:**
+- `scripts/full_pipeline_test.py` — Service-level E2E script
+  - Supports `--market` flag for MARKET orders
+  - Default LIMIT order flow (place → cancel)
+  - Checks downstreams: `oms_fills` stream, Redis order store, Postgres `orders` table
+
+**Characteristics:**
+- Assumes OMS service is already running (e.g., `docker compose up -d oms`)
+- Does not import OMS code
+- Interacts with system via Redis/Postgres only
+- Validates deployed/running system
+- Useful for production-like validation
+
+**Usage:**
+```bash
+# Start services first
+docker compose up -d oms booking
+
+# Run script
+python scripts/full_pipeline_test.py --market  # MARKET order
+python scripts/full_pipeline_test.py           # LIMIT order (default)
+```
+
+**What it validates:**
+- Order injection → `risk_approved` stream
+- OMS processes order (running service)
+- Order appears in Redis store
+- Fill/reject appears in `oms_fills` stream
+- Order synced to Postgres `orders` table (if `DATABASE_URL` set)
+
+#### 16.5.5 Test matrix summary
+
+| Test Type | Files | Dependencies | Speed | Use Case |
+|-----------|-------|--------------|-------|----------|
+| **Unit** | `test_api_client.py`, `test_consumer.py`, `test_redis_order_store.py`, etc. | None (mocked) | Fastest | Development, CI |
+| **Integration** | `test_oms_integration.py` | fakeredis, mocks | Fast | Component integration |
+| **E2E (code-level)** | `test_oms_redis_testnet.py` | Real Redis, Binance testnet, Postgres | Slow | Full flow validation |
+| **E2E (service-level)** | `scripts/full_pipeline_test.py` | Running services | Slow | Production-like validation |
+
+**Test execution order (recommended):**
+1. Run unit tests (fast, no setup)
+2. Run integration tests (fakeredis, no external services)
+3. Run E2E code-level tests (requires testnet credentials)
+4. Run E2E service-level script (requires running services)
+
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md#testing-corresponding-to-each-phase) for the overall test matrix.
+
+**Comprehensive test documentation:** See [TESTING.md](TESTING.md) for complete test inventory, classification, and execution instructions.
