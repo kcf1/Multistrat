@@ -7,11 +7,13 @@ Supports consumer group (XREADGROUP + XACK) so each message is consumed once.
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from pydantic import ValidationError
 from redis import Redis
 from redis.exceptions import ResponseError
 
 from oms.log import logger
 from oms.schemas import CANCEL_REQUESTED_STREAM
+from oms.schemas_pydantic import CancelRequest
 from oms.streams import ack_message, ensure_consumer_group, read_messages, read_messages_group
 
 
@@ -24,6 +26,8 @@ def parse_cancel_request_message(fields: Dict[str, str]) -> Dict[str, Any]:
     """
     Parse stream entry fields per cancel_requested schema.
 
+    Uses Pydantic validation for type safety and validation.
+
     Requires: (order_id) OR (broker_order_id AND symbol); broker required.
 
     Returns:
@@ -32,18 +36,37 @@ def parse_cancel_request_message(fields: Dict[str, str]) -> Dict[str, Any]:
     if not isinstance(fields, dict):
         raise CancelRequestParseError("fields must be a dict")
 
-    order_id = (fields.get("order_id") or "").strip()
-    broker_order_id = (fields.get("broker_order_id") or "").strip()
-    symbol = (fields.get("symbol") or "").strip()
-    broker = (fields.get("broker") or "").strip()
-
-    if not broker:
-        raise CancelRequestParseError("missing broker")
-    if order_id:
-        return {"order_id": order_id, "broker_order_id": broker_order_id or None, "symbol": symbol or None, "broker": broker}
-    if broker_order_id and symbol:
-        return {"order_id": None, "broker_order_id": broker_order_id, "symbol": symbol, "broker": broker}
-    raise CancelRequestParseError("need order_id or (broker_order_id and symbol)")
+    try:
+        # Validate with Pydantic model
+        cancel_model = CancelRequest(**fields)
+        # Convert to dict compatible with existing code
+        return cancel_model.model_dump_dict()
+    except CancelRequestParseError:
+        # Re-raise CancelRequestParseError from model validator (if it bubbles up)
+        raise
+    except ValidationError as e:
+        # Convert Pydantic ValidationError to CancelRequestParseError with user-friendly messages
+        error_messages = []
+        for error in e.errors():
+            field = error["loc"][0] if error["loc"] else "unknown"
+            msg = error["msg"]
+            
+            # Check if this is the custom validation error from model_validator
+            if "need order_id or (broker_order_id and symbol)" in msg:
+                error_messages.append("need order_id or (broker_order_id and symbol)")
+                continue
+            
+            # Map common Pydantic errors to existing error format
+            if "Field required" in msg or "none is not an allowed value" in msg.lower():
+                if field == "broker":
+                    error_messages.append("missing broker")
+                else:
+                    error_messages.append(f"missing {field}")
+            else:
+                error_messages.append(f"{field}: {msg}")
+        
+        error_msg = "; ".join(error_messages) if error_messages else str(e)
+        raise CancelRequestParseError(error_msg) from e
 
 
 def read_one_cancel_request(

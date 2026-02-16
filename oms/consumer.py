@@ -7,10 +7,12 @@ Supports blocking read and consumer group (XREADGROUP + XACK) for no double-proc
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from pydantic import ValidationError
 from redis import Redis
 
 from oms.log import logger
 from oms.schemas import RISK_APPROVED_STREAM
+from oms.schemas_pydantic import RiskApprovedOrder
 from oms.streams import ack_message, ensure_consumer_group, read_messages, read_messages_group
 
 
@@ -23,11 +25,13 @@ def parse_risk_approved_message(fields: Dict[str, str]) -> Dict[str, Any]:
     """
     Parse stream entry fields per risk_approved schema into an order dict.
 
+    Uses Pydantic validation for type safety and validation.
+
     Args:
         fields: Raw stream entry (string keys and values).
 
     Returns:
-        Order dict with broker, symbol, side, quantity, order_type, optional price,
+        Order dict with broker, symbol, side, quantity, order_type, optional limit_price,
         time_in_force, book, comment, order_id, account_id. quantity as float.
 
     Raises:
@@ -36,54 +40,51 @@ def parse_risk_approved_message(fields: Dict[str, str]) -> Dict[str, Any]:
     if not isinstance(fields, dict):
         raise RiskApprovedParseError("fields must be a dict")
 
-    broker = (fields.get("broker") or "").strip()
-    symbol = (fields.get("symbol") or "").strip()
-    side = (fields.get("side") or "").strip()
-    qty_str = fields.get("quantity")
-    if not broker:
-        raise RiskApprovedParseError("missing broker")
-    if not symbol:
-        raise RiskApprovedParseError("missing symbol")
-    if not side:
-        raise RiskApprovedParseError("missing side")
-    if qty_str is None or (isinstance(qty_str, str) and not qty_str.strip()):
-        raise RiskApprovedParseError("missing quantity")
     try:
-        quantity = float(qty_str)
-    except (TypeError, ValueError) as e:
-        raise RiskApprovedParseError(f"invalid quantity: {qty_str}") from e
-    if quantity <= 0:
-        raise RiskApprovedParseError("quantity must be positive")
+        # Map 'price' field to 'limit_price' for Pydantic model
+        model_fields = fields.copy()
+        if "price" in model_fields and "limit_price" not in model_fields:
+            model_fields["limit_price"] = model_fields.pop("price")
 
-    order: Dict[str, Any] = {
-        "broker": broker,
-        "account_id": (fields.get("account_id") or "").strip(),
-        "symbol": symbol,
-        "side": side,
-        "quantity": quantity,
-        "order_type": (fields.get("order_type") or "MARKET").strip(),
-        "book": (fields.get("book") or "").strip(),
-        "comment": (fields.get("comment") or "").strip(),
-    }
-    order_id = (fields.get("order_id") or "").strip()
-    if order_id:
-        order["order_id"] = order_id
-
-    # Limit price from risk_approved (for LIMIT orders); executed price comes from broker/fills
-    price_str = fields.get("price")
-    if price_str is not None and str(price_str).strip():
-        try:
-            order["limit_price"] = float(price_str)
-        except (TypeError, ValueError):
-            order["limit_price"] = None
-    else:
-        order["limit_price"] = None
-
-    tif = (fields.get("time_in_force") or "").strip()
-    if tif:
-        order["time_in_force"] = tif
-
-    return order
+        # Validate with Pydantic model
+        order_model = RiskApprovedOrder(**model_fields)
+        # Convert to dict compatible with existing code
+        order = order_model.model_dump_dict()
+        return order
+    except ValidationError as e:
+        # Convert Pydantic ValidationError to RiskApprovedParseError with user-friendly messages
+        error_messages = []
+        for error in e.errors():
+            field = error["loc"][0] if error["loc"] else "unknown"
+            msg = error["msg"]
+            
+            # Map common Pydantic errors to existing error format
+            if "Field required" in msg or "none is not an allowed value" in msg.lower():
+                if field == "broker":
+                    error_messages.append("missing broker")
+                elif field == "symbol":
+                    error_messages.append("missing symbol")
+                elif field == "side":
+                    error_messages.append("missing side")
+                elif field == "quantity":
+                    error_messages.append("missing quantity")
+                else:
+                    error_messages.append(f"missing {field}")
+            elif "Input should be a valid number" in msg or "invalid" in msg.lower():
+                if field == "quantity":
+                    error_messages.append(f"invalid quantity: {fields.get('quantity', '')}")
+                else:
+                    error_messages.append(f"invalid {field}: {msg}")
+            elif "greater than 0" in msg.lower() or "positive" in msg.lower():
+                if field == "quantity":
+                    error_messages.append("quantity must be positive")
+                else:
+                    error_messages.append(f"{field} must be positive")
+            else:
+                error_messages.append(f"{field}: {msg}")
+        
+        error_msg = "; ".join(error_messages) if error_messages else str(e)
+        raise RiskApprovedParseError(error_msg) from e
 
 
 def read_risk_approved(
