@@ -5,7 +5,7 @@ Adapters implement place_order and start_fill_listener so the OMS can route
 orders and receive unified fill/reject events regardless of broker.
 """
 
-from typing import Any, Callable, Dict, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -33,13 +33,19 @@ class BrokerAdapter(Protocol):
         """
         ...
 
-    def start_fill_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+    def start_fill_listener(
+        self,
+        callback: Callable[[Dict[str, Any]], None],
+        *,
+        store: Optional[Any] = None,
+    ) -> None:
         """
         Start listening for fill and reject events; invoke callback for each.
 
         Callback receives unified event dict (event_type: 'fill' | 'reject', order_id,
         broker_order_id, symbol, side, quantity, price, fee, executed_at, fill_id, etc.).
-        Typically runs in a background thread.
+        Typically runs in a background thread. Optional store allows broker-specific
+        enrichment (e.g. fill price from order payload when event price is 0).
         """
         ...
 

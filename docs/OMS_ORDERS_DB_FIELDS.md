@@ -12,7 +12,7 @@ Single reference for Postgres `orders` columns and where each value is set (Redi
 | **side** | risk_approved | `stage_order` from stream message. |
 | **order_type** | risk_approved | `stage_order` from stream message. |
 | **quantity** | risk_approved | `stage_order` from stream message. |
-| **price** | Broker / fills | Place_order unified response, then fill callback (executed/avg price). |
+| **price** | Broker / fills | Place_order unified response, then fill callback (executed/avg price from event). Binance adapter enriches fill events with payload price when event price is 0/null before invoking the OMS callback. |
 | **limit_price** | risk_approved + broker | `stage_order` (from stream `price`), then place_order unified response. |
 | **time_in_force** | risk_approved / broker | `stage_order`; can be updated from broker response. |
 | **status** | OMS / broker / fills | pending → sent (place_order) → partially_filled/filled/rejected/cancelled/expired (fills). |

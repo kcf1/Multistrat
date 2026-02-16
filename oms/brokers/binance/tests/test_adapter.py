@@ -14,6 +14,7 @@ import pytest
 
 from oms.brokers.binance.adapter import (
     BinanceBrokerAdapter,
+    _fill_price_from_binance_payload,
     binance_order_response_to_unified,
 )
 from oms.brokers.binance.api_client import BinanceAPIError
@@ -387,3 +388,58 @@ class TestBinanceBrokerAdapterStartFillListener:
             adapter.stop_fill_listener()  # second call is no-op
             mock_listener.stop.assert_called_once()
             assert adapter._listener is None
+
+    def test_start_fill_listener_with_store_enriches_fill_price_when_zero(self, mock_client, mock_listener):
+        """When store is provided and fill event has price 0, callback receives event with price from order payload."""
+        mock_store = MagicMock()
+        order_id = "ord-1"
+        broker_order_id = "bin-123"
+        mock_store.get_order.return_value = {
+            "order_id": order_id,
+            "broker_order_id": broker_order_id,
+            "payload": {"binance": {"avgPrice": "97250.50", "executedQty": "0.001"}},
+        }
+        mock_store.find_order_by_broker_order_id.return_value = order_id
+
+        with patch("oms.brokers.binance.adapter.create_fills_listener", return_value=mock_listener):
+            adapter = BinanceBrokerAdapter(client=mock_client)
+            received = []
+
+            def callback(event):
+                received.append(event)
+
+            adapter.start_fill_listener(callback, store=mock_store)
+            call_callback = mock_listener.start_background.call_args[0][0]
+            call_callback({
+                "event_type": "fill",
+                "order_id": order_id,
+                "broker_order_id": broker_order_id,
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "quantity": 0.001,
+                "price": 0.0,
+                "order_status": "FILLED",
+                "executed_qty_cumulative": 0.001,
+            })
+            assert len(received) == 1
+            assert float(received[0]["price"]) == 97250.50
+
+
+class TestFillPriceFromBinancePayload:
+    """Unit tests for _fill_price_from_binance_payload (Binance payload shape)."""
+
+    def test_empty_or_no_payload_returns_none(self):
+        assert _fill_price_from_binance_payload({}) is None
+        assert _fill_price_from_binance_payload({"payload": None}) is None
+        assert _fill_price_from_binance_payload({"payload": {"binance": {}}}) is None
+
+    def test_avg_price_extracted(self):
+        assert _fill_price_from_binance_payload({"payload": {"binance": {"avgPrice": "50100.5"}}}) == 50100.5
+
+    def test_fills_first_price_extracted(self):
+        assert _fill_price_from_binance_payload({
+            "payload": {"binance": {"fills": [{"price": "50200.25", "qty": "0.001"}]}},
+        }) == 50200.25
+
+    def test_fill_price_extracted(self):
+        assert _fill_price_from_binance_payload({"payload": {"fill": {"price": "50300.0"}}}) == 50300.0

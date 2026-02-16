@@ -103,15 +103,17 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     # Support wrapped payload: { "event": { ... } } or raw { "e": "executionReport", ... }
     event = payload.get("event") if "event" in payload else payload
-    
+
+    # Binance user data stream sends other event types (e.g. outboundAccountPosition).
+    # Only process executionReport; skip others without logging.
+    if (event or {}).get("e") != "executionReport":
+        return None
+
     # Validate raw Binance event with Pydantic
     try:
         binance_event = BinanceExecutionReport(**event)
     except ValidationError as e:
         logger.warning("Invalid Binance executionReport event: {}", e)
-        return None
-    
-    if binance_event.e != "executionReport":
         return None
 
     exec_type = binance_event.x  # NEW, CANCELED, TRADE, REJECTED, EXPIRED, etc.

@@ -88,7 +88,7 @@ def start_fill_listeners(
     for broker_name in registry.broker_names():
         adapter = registry.get(broker_name)
         if adapter and hasattr(adapter, "start_fill_listener"):
-            adapter.start_fill_listener(fill_cb)
+            adapter.start_fill_listener(fill_cb, store=store)
 
 
 def stop_fill_listeners(registry: AdapterRegistry) -> None:

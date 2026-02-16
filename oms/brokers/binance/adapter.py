@@ -3,6 +3,7 @@ Binance broker adapter.
 
 Implements the OMS broker adapter interface using Binance API client and
 fills listener. Converts Binance responses to unified fill/reject format.
+When WebSocket fill event has price 0/null, enriches event from order payload (Binance-specific).
 """
 
 from typing import Any, Callable, Dict, Optional, Union
@@ -13,6 +14,40 @@ from .fills_listener import (
     BinanceFillsListenerWsApi,
     create_fills_listener,
 )
+
+
+def _fill_price_from_binance_payload(order: Dict[str, Any]) -> Optional[float]:
+    """
+    Extract executed/fill price from Binance order payload (REST response shape).
+
+    When WebSocket executionReport has price 0/missing, use this from order payload.
+    Tries: payload.binance.avgPrice, payload.binance.fills[0].price, payload.fill.price.
+    Returns None if no valid price found.
+    """
+    payload = order.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        binance = payload.get("binance")
+        if isinstance(binance, dict):
+            avg = binance.get("avgPrice")
+            if avg is not None and str(avg).strip():
+                return float(avg)
+            fills = binance.get("fills")
+            if isinstance(fills, list) and fills:
+                first = fills[0]
+                if isinstance(first, dict):
+                    p = first.get("price")
+                    if p is not None and str(p).strip():
+                        return float(p)
+        fill = payload.get("fill")
+        if isinstance(fill, dict):
+            p = fill.get("price")
+            if p is not None and str(p).strip():
+                return float(p)
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
 def binance_order_response_to_unified(resp: Dict[str, Any]) -> Dict[str, Any]:
@@ -155,16 +190,44 @@ class BinanceBrokerAdapter:
                 rejected["payload"] = {"binance": e.error_data}
             return rejected
 
-    def start_fill_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+    def start_fill_listener(
+        self,
+        callback: Callable[[Dict[str, Any]], None],
+        *,
+        store: Optional[Any] = None,
+    ) -> None:
         """
         Start the Binance user data stream and invoke callback for each fill/reject.
 
         Callback receives unified event dict (event_type, order_id, broker_order_id,
         symbol, side, quantity, price, fee, executed_at, fill_id, reject_reason, etc.).
+        When store is provided, fill events with price 0/null are enriched with price
+        from the order payload (Binance REST response: avgPrice / fills / fill.price).
         """
+        if store is not None:
+
+            def enriched_cb(event: Dict[str, Any]) -> None:
+                event_price = event.get("price")
+                if (
+                    (event.get("event_type") or "").strip().lower() == "fill"
+                    and (event_price is None or (event_price is not None and float(event_price) == 0))
+                ):
+                    order_id = event.get("order_id") or ""
+                    broker_order_id = str(event.get("broker_order_id", ""))
+                    if not order_id and broker_order_id:
+                        order_id = store.find_order_by_broker_order_id(broker_order_id) or ""
+                    order = store.get_order(order_id) or {} if order_id else {}
+                    payload_price = _fill_price_from_binance_payload(order)
+                    if payload_price is not None and payload_price > 0:
+                        event = {**event, "price": payload_price}
+                callback(event)
+
+            cb = enriched_cb
+        else:
+            cb = callback
         listener = create_fills_listener(self._client, use_ws_api=self._use_ws_api)
         self._listener = listener
-        listener.start_background(callback)
+        listener.start_background(cb)
 
     def stop_fill_listener(self) -> None:
         """Stop the fill listener if running."""

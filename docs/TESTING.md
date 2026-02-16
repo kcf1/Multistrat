@@ -243,6 +243,10 @@ Binance broker adapter (mocked client).
   - `test_start_fill_listener_starts_listener`
   - `test_start_fill_listener_stops_previous`
   - `test_stop_fill_listener_stops_listener`
+  - `test_start_fill_listener_with_store_enriches_fill_price_when_zero` — when store is provided, fill events with price 0 are enriched from order payload before callback
+- `TestFillPriceFromBinancePayload` - Binance payload price extraction
+  - `test_empty_or_no_payload_returns_none`
+  - `test_avg_price_extracted`, `test_fills_first_price_extracted`, `test_fill_price_extracted`
 
 #### `oms/brokers/binance/tests/test_fills_listener.py`
 Fills listener parsing (mocked websocket).
@@ -256,6 +260,7 @@ Fills listener parsing (mocked websocket).
   - `test_parses_rejected_event`
   - `test_parses_with_cumulative_qty`
   - `test_parses_invalid_json`
+  - `test_non_execution_report_returns_none` — non-`executionReport` stream events (e.g. `outboundAccountPosition`, `balanceUpdate`) are ignored and return None without logging
 
 - `TestStreamUrlFromBaseUrl` - URL construction
   - `test_constructs_stream_url_from_testnet`

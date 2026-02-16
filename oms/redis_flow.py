@@ -154,7 +154,7 @@ def make_fill_callback(
             "symbol": event.get("symbol", ""),
             "side": event.get("side", ""),
             "quantity": event.get("quantity"),
-            "price": event.get("price"),
+            "price": fill_price if fill_price is not None else event.get("price"),
             "fee": event.get("fee"),
             "fee_asset": event.get("fee_asset"),
             "executed_at": event.get("executed_at", ""),

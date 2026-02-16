@@ -120,9 +120,9 @@ Defined in `oms/storage/redis_order_store.py`:
 
 ## 7. Fill Callback Flow (Broker → OMS)
 
-1. **Adapter** (e.g. Binance) receives execution report (NEW, TRADE, REJECTED, CANCELED, EXPIRED).
-2. **fills_listener** parses to unified event (`FillEvent`, `RejectEvent`, `CancelledEvent`, `ExpiredEvent` in `brokers/binance/schemas_pydantic.py`).
-3. **make_fill_callback** (in `redis_flow.py`): validates event, resolves `order_id` (from event or store by broker_order_id), updates store (`update_fill_status`), produces to `oms_fills`, on terminal status calls `on_terminal_sync(order_id)` or sets TTL.
+1. **Adapter** (e.g. Binance) receives events on the user data stream. The stream sends multiple event types (e.g. `executionReport`, `outboundAccountPosition`). The **fills_listener** only processes `executionReport` (NEW, TRADE, REJECTED, CANCELED, EXPIRED); other types are ignored without logging.
+2. **fills_listener** parses execution reports to unified event (`FillEvent`, `RejectEvent`, `CancelledEvent`, `ExpiredEvent` in `brokers/binance/schemas_pydantic.py`).
+3. **make_fill_callback** (in `redis_flow.py`): validates event, resolves `order_id` (from event or store by broker_order_id), updates store (`update_fill_status`), produces to `oms_fills`, on terminal status calls `on_terminal_sync(order_id)` or sets TTL. Uses only the event’s `price` (no broker-specific fallback in core). **Binance:** When `start_fill_listener(callback, store=store)` is used, the adapter wraps the callback and enriches fill events with price from the order payload (avgPrice / fills / fill.price) when event price is 0/null, so the OMS callback receives the correct price.
 
 Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATUSES` in redis_flow).
 

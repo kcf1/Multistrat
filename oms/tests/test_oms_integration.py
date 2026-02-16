@@ -23,7 +23,7 @@ def _mock_adapter(place_result: Dict[str, Any], cancel_result: Optional[Dict[str
                 raise place_raises
             return place_result
 
-        def start_fill_listener(self, callback) -> None:
+        def start_fill_listener(self, callback, *, store=None) -> None:
             pass
 
         def cancel_order(self, broker_order_id: str, symbol: str) -> Dict[str, Any]:
@@ -548,7 +548,7 @@ def test_oms_bootstrap_starts_fill_listeners(redis_client, store):
         def place_order(self, order):
             return {"broker_order_id": "m", "status": "NEW"}
 
-        def start_fill_listener(self, callback):
+        def start_fill_listener(self, callback, *, store=None):
             started.append(("listener", callback))
 
         def stop_fill_listener(self):
