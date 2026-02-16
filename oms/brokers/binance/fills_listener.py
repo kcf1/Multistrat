@@ -19,10 +19,18 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Union
 
 import websocket
+from pydantic import ValidationError
 
 from oms.log import logger
 
 from .api_client import BinanceAPIClient, BinanceAPIError
+from .schemas_pydantic import (
+    BinanceExecutionReport,
+    CancelledEvent,
+    ExpiredEvent,
+    FillEvent,
+    RejectEvent,
+)
 
 # Classic stream: listenKey in URL path
 STREAM_URL_TESTNET = "wss://stream.testnet.binance.vision/ws"
@@ -79,45 +87,62 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Parse a Binance executionReport event into a unified fill or reject event.
 
+    Uses Pydantic validation for type safety and validation.
+
     Unified format (aligned with oms_fills):
-    - event_type: 'fill' | 'reject'
+    - event_type: 'fill' | 'reject' | 'cancelled' | 'expired'
     - order_id: internal (clientOrderId)
     - broker_order_id: Binance orderId
     - symbol, side, quantity, price, fee, fee_asset
     - executed_at: ISO8601
     - fill_id: broker trade id (for fills)
-    - reject_reason: for rejections
+    - reject_reason: for rejections/cancellations/expirations
 
     Returns:
-        Unified event dict, or None if the event is not a fill or reject.
+        Unified event dict, or None if the event is not a fill, reject, cancelled, or expired.
     """
     # Support wrapped payload: { "event": { ... } } or raw { "e": "executionReport", ... }
     event = payload.get("event") if "event" in payload else payload
-    if event.get("e") != "executionReport":
+    
+    # Validate raw Binance event with Pydantic
+    try:
+        binance_event = BinanceExecutionReport(**event)
+    except ValidationError as e:
+        logger.warning("Invalid Binance executionReport event: {}", e)
+        return None
+    
+    if binance_event.e != "executionReport":
         return None
 
-    exec_type = event.get("x")  # NEW, CANCELED, TRADE, REJECTED, EXPIRED, etc.
-    order_status = event.get("X")  # NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED
+    exec_type = binance_event.x  # NEW, CANCELED, TRADE, REJECTED, EXPIRED, etc.
+    order_status = binance_event.X  # NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED
 
     # Fill: execution type TRADE (each fill is one TRADE event)
     if exec_type == "TRADE":
-        try:
-            qty = float(event.get("l", 0) or 0)
-        except (TypeError, ValueError):
-            qty = 0.0
-        if qty <= 0:
+        # Validate quantity > 0 for fills
+        qty_str = binance_event.l
+        if not qty_str:
             return None
         try:
-            price = float(event.get("L", 0) or 0)
+            qty = float(qty_str)
+        except (TypeError, ValueError):
+            return None
+        if qty <= 0:
+            return None
+
+        # Parse other fields
+        try:
+            price = float(binance_event.L) if binance_event.L else 0.0
         except (TypeError, ValueError):
             price = 0.0
         try:
-            fee = float(event.get("n", 0) or 0)
+            fee = float(binance_event.n) if binance_event.n else 0.0
         except (TypeError, ValueError):
             fee = 0.0
-        fee_asset = event.get("N")
+        fee_asset = binance_event.N
+        
         # Transaction time T in ms
-        t_ms = event.get("T")
+        t_ms = binance_event.T
         if t_ms is not None:
             try:
                 executed_at = datetime.fromtimestamp(int(t_ms) / 1000.0, tz=timezone.utc).isoformat().replace("+00:00", "Z")
@@ -129,92 +154,115 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # Binance order status X: NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED
         # z: cumulative executed quantity (for partial/full fill handling in OMS)
         try:
-            executed_qty_cumulative = float(event.get("z", 0) or 0)
+            executed_qty_cumulative = float(binance_event.z) if binance_event.z else None
         except (TypeError, ValueError):
             executed_qty_cumulative = None
 
-        return {
-            "event_type": "fill",
-            "order_id": event.get("c") or "",  # clientOrderId
-            "broker_order_id": str(event.get("i", "")),  # orderId
-            "symbol": event.get("s", ""),
-            "side": event.get("S", ""),
-            "quantity": qty,
-            "price": price,
-            "fee": fee,
-            "fee_asset": fee_asset,
-            "executed_at": executed_at,
-            "fill_id": str(event.get("t", "")),  # trade id
-            "order_status": order_status or "",  # X: PARTIALLY_FILLED, FILLED
-            "executed_qty_cumulative": executed_qty_cumulative,  # z: cumulative filled qty
-        }
+        # Validate with Pydantic FillEvent model
+        try:
+            fill_event = FillEvent(
+                event_type="fill",
+                order_id=binance_event.c or "",
+                broker_order_id=str(binance_event.i) if binance_event.i else "",
+                symbol=binance_event.s or "",
+                side=binance_event.S or "",
+                quantity=qty,
+                price=price,
+                fee=fee,
+                fee_asset=fee_asset,
+                executed_at=executed_at,
+                fill_id=str(binance_event.t) if binance_event.t else "",
+                order_status=order_status,
+                executed_qty_cumulative=executed_qty_cumulative,
+            )
+            return fill_event.model_dump_dict()
+        except ValidationError as e:
+            logger.warning("Invalid fill event after parsing: {}", e)
+            return None
 
     # Reject: execution type REJECTED or order status REJECTED
     if exec_type == "REJECTED" or order_status == "REJECTED":
-        return {
-            "event_type": "reject",
-            "order_id": event.get("c") or "",
-            "broker_order_id": str(event.get("i", "")),
-            "symbol": event.get("s", ""),
-            "side": event.get("S", ""),
-            "quantity": float(event.get("q", 0) or 0),
-            "price": float(event.get("p", 0) or 0),
-            "fee": 0.0,
-            "fee_asset": None,
-            "executed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "fill_id": "",
-            "reject_reason": event.get("r") or "REJECTED",
-        }
+        try:
+            qty = float(binance_event.q) if binance_event.q else 0.0
+        except (TypeError, ValueError):
+            qty = 0.0
+        try:
+            price = float(binance_event.p) if binance_event.p else 0.0
+        except (TypeError, ValueError):
+            price = 0.0
+        
+        try:
+            reject_event = RejectEvent(
+                event_type="reject",
+                order_id=binance_event.c or "",
+                broker_order_id=str(binance_event.i) if binance_event.i else "",
+                symbol=binance_event.s or "",
+                side=binance_event.S or "",
+                quantity=qty,
+                price=price,
+                executed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                reject_reason=binance_event.r or "REJECTED",
+            )
+            return reject_event.model_dump_dict()
+        except ValidationError as e:
+            logger.warning("Invalid reject event after parsing: {}", e)
+            return None
 
     # Cancelled: exec_type CANCELED or order status CANCELED
     if exec_type == "CANCELED" or order_status == "CANCELED":
         try:
-            qty = float(event.get("q", 0) or 0)
+            qty = float(binance_event.q) if binance_event.q else 0.0
         except (TypeError, ValueError):
             qty = 0.0
         try:
-            price = float(event.get("p", 0) or 0)
+            price = float(binance_event.p) if binance_event.p else 0.0
         except (TypeError, ValueError):
             price = 0.0
-        return {
-            "event_type": "cancelled",
-            "order_id": event.get("c") or "",
-            "broker_order_id": str(event.get("i", "")),
-            "symbol": event.get("s", ""),
-            "side": event.get("S", ""),
-            "quantity": qty,
-            "price": price,
-            "fee": 0.0,
-            "fee_asset": None,
-            "executed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "fill_id": "",
-            "reject_reason": event.get("r") or "CANCELED",
-        }
+        
+        try:
+            cancelled_event = CancelledEvent(
+                event_type="cancelled",
+                order_id=binance_event.c or "",
+                broker_order_id=str(binance_event.i) if binance_event.i else "",
+                symbol=binance_event.s or "",
+                side=binance_event.S or "",
+                quantity=qty,
+                price=price,
+                executed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                reject_reason=binance_event.r or "CANCELED",
+            )
+            return cancelled_event.model_dump_dict()
+        except ValidationError as e:
+            logger.warning("Invalid cancelled event after parsing: {}", e)
+            return None
 
     # Expired: exec_type EXPIRED or order status EXPIRED
     if exec_type == "EXPIRED" or order_status == "EXPIRED":
         try:
-            qty = float(event.get("q", 0) or 0)
+            qty = float(binance_event.q) if binance_event.q else 0.0
         except (TypeError, ValueError):
             qty = 0.0
         try:
-            price = float(event.get("p", 0) or 0)
+            price = float(binance_event.p) if binance_event.p else 0.0
         except (TypeError, ValueError):
             price = 0.0
-        return {
-            "event_type": "expired",
-            "order_id": event.get("c") or "",
-            "broker_order_id": str(event.get("i", "")),
-            "symbol": event.get("s", ""),
-            "side": event.get("S", ""),
-            "quantity": qty,
-            "price": price,
-            "fee": 0.0,
-            "fee_asset": None,
-            "executed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "fill_id": "",
-            "reject_reason": event.get("r") or "EXPIRED",
-        }
+        
+        try:
+            expired_event = ExpiredEvent(
+                event_type="expired",
+                order_id=binance_event.c or "",
+                broker_order_id=str(binance_event.i) if binance_event.i else "",
+                symbol=binance_event.s or "",
+                side=binance_event.S or "",
+                quantity=qty,
+                price=price,
+                executed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                reject_reason=binance_event.r or "EXPIRED",
+            )
+            return expired_event.model_dump_dict()
+        except ValidationError as e:
+            logger.warning("Invalid expired event after parsing: {}", e)
+            return None
 
     return None
 

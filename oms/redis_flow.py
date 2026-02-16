@@ -7,10 +7,12 @@ Used by Redis-through-testnet integration test and OMS main loop (task 12.1.9).
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from pydantic import ValidationError
 from redis import Redis
 
 from oms.log import logger
 
+from oms.brokers.binance.schemas_pydantic import CancelledEvent, ExpiredEvent, FillEvent, RejectEvent
 from oms.cancel_consumer import ack_cancel_requested, read_one_cancel_request, read_one_cancel_request_cg, read_many_cancel_request_cg
 from oms.cleanup import set_order_key_ttl
 from oms.consumer import ack_risk_approved, read_one_risk_approved, read_one_risk_approved_cg, read_one_risk_approved_pending, read_many_risk_approved_cg
@@ -39,6 +41,43 @@ def make_fill_callback(
     """
 
     def on_fill_or_reject(event: Dict[str, Any]) -> None:
+        # Validate event with Pydantic models before processing
+        # Validate event with Pydantic models before processing
+        event_type = (event.get("event_type") or "fill").strip().lower()
+        
+        try:
+            if event_type == "fill":
+                validated_event = FillEvent(**event)
+            elif event_type == "reject":
+                validated_event = RejectEvent(**event)
+            elif event_type == "cancelled":
+                validated_event = CancelledEvent(**event)
+            elif event_type == "expired":
+                validated_event = ExpiredEvent(**event)
+            else:
+                logger.warning(
+                    "Fill callback: unknown event_type={}, skipping",
+                    event_type,
+                )
+                return
+            
+            # Use validated event dict
+            event = validated_event.model_dump_dict()
+        except ValidationError as e:
+            # Log validation error and skip processing
+            errors = []
+            for error in e.errors():
+                field = ".".join(str(loc) for loc in error["loc"])
+                msg = error["msg"]
+                errors.append(f"{field}: {msg}")
+            error_msg = "; ".join(errors) if errors else str(e)
+            logger.error(
+                "Fill callback: invalid event structure (event_type={}): {}, skipping",
+                event_type,
+                error_msg,
+            )
+            return
+
         order_id = event.get("order_id") or ""
         broker_order_id = str(event.get("broker_order_id", ""))
         if not order_id and broker_order_id:
@@ -251,7 +290,11 @@ def process_one(
             "process_one: broker rejected order_id={} broker_order_id={} reason={}",
             order_id, response.get("broker_order_id"), response.get("reject_reason", "rejected"),
         )
-        store.update_fill_status(order_id, "rejected")
+        # Store payload if present in rejected response (broker error details)
+        extra_fields = {}
+        if response.get("payload") is not None:
+            extra_fields["payload"] = response["payload"]
+        store.update_fill_status(order_id, "rejected", **extra_fields)
         produce_oms_fill(
             redis,
             _reject_event(
@@ -283,10 +326,15 @@ def process_one(
         "binance_transact_time": response.get("binance_transact_time"),
         "binance_cumulative_quote_qty": response.get("binance_cumulative_quote_qty"),
     }
+    if response.get("payload") is not None:
+        extra_fields["payload"] = response["payload"]
     current = store.get_order(order_id)
     if current and current.get("status") in TERMINAL_STATUSES:
         # Fill callback already ran (e.g. market order filled immediately); don't overwrite terminal status
         store.update_status(order_id, current["status"], current["status"], extra_fields=extra_fields)
+        # Sync again so Postgres gets payload (fill callback may have synced before we wrote payload)
+        if response.get("payload") is not None and on_terminal_sync is not None:
+            on_terminal_sync(order_id)
     else:
         store.update_status(order_id, "sent", "pending", extra_fields=extra_fields)
     if consumer_group and consumer_name:
@@ -403,7 +451,11 @@ def process_many(
             continue
 
         if response.get("rejected"):
-            store.update_fill_status(order_id, "rejected")
+            # Store payload if present in rejected response (broker error details)
+            extra_fields = {}
+            if response.get("payload") is not None:
+                extra_fields["payload"] = response["payload"]
+            store.update_fill_status(order_id, "rejected", **extra_fields)
             produce_oms_fill(redis, _reject_event(order_id, order, response.get("broker_order_id", ""), response.get("reject_reason", "rejected")))
             ack_risk_approved(redis, consumer_group, entry_id)
             if on_terminal_sync is not None:
@@ -427,9 +479,14 @@ def process_many(
             "binance_transact_time": response.get("binance_transact_time"),
             "binance_cumulative_quote_qty": response.get("binance_cumulative_quote_qty"),
         }
+        if response.get("payload") is not None:
+            extra_fields["payload"] = response["payload"]
         current = store.get_order(order_id)
         if current and current.get("status") in TERMINAL_STATUSES:
             store.update_status(order_id, current["status"], current["status"], extra_fields=extra_fields)
+            # Sync again so Postgres gets payload (fill callback may have synced before we wrote payload)
+            if response.get("payload") is not None and on_terminal_sync is not None:
+                on_terminal_sync(order_id)
         else:
             store.update_status(order_id, "sent", "pending", extra_fields=extra_fields)
         ack_risk_approved(redis, consumer_group, entry_id)

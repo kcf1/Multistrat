@@ -3,6 +3,9 @@ OMS → Postgres order sync (task 12.1.10).
 
 Sync orders from Redis to Postgres `orders` table (UPSERT by internal_id).
 On trigger (terminal status) or every 60s; expire Redis key after sync.
+
+DB columns and injection: see docs/OMS_ORDERS_DB_FIELDS.md for which fields
+are set from risk_approved, place_order response (including payload), and fills.
 """
 
 import json
@@ -67,7 +70,7 @@ def sync_one_order(
         return False
 
     row = _order_to_row(order, order_id)
-    logger.info(
+    logger.debug(
         "sync_one_order: order_id={} status={} symbol={}",
         order_id, order.get("status"), order.get("symbol"),
     )

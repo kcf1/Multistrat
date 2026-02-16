@@ -21,7 +21,18 @@ TIME_OFFSET_REFRESH_INTERVAL = 300
 
 class BinanceAPIError(Exception):
     """Binance API error."""
-    pass
+    
+    def __init__(self, message: str, error_data: Optional[Dict] = None):
+        """
+        Initialize Binance API error.
+        
+        Args:
+            message: Error message string.
+            error_data: Optional error response JSON from Binance (for payload storage).
+        """
+        super().__init__(message)
+        self.message = message
+        self.error_data = error_data
 
 
 class BinanceAPIClient:
@@ -195,11 +206,17 @@ class BinanceAPIClient:
                     error_data = e.response.json()
                     raise BinanceAPIError(
                         f"Binance API error: {error_data.get('msg', 'Unknown error')} "
-                        f"(code: {error_data.get('code', 'N/A')})"
+                        f"(code: {error_data.get('code', 'N/A')})",
+                        error_data=error_data,
                     ) from e
                 except ValueError:
-                    raise BinanceAPIError(f"Binance API error: {e.response.text}") from e
-            raise BinanceAPIError(f"Request failed: {str(e)}") from e
+                    # Non-JSON error response; store text as error_data
+                    error_data = {"text": e.response.text}
+                    raise BinanceAPIError(
+                        f"Binance API error: {e.response.text}",
+                        error_data=error_data,
+                    ) from e
+            raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
 
     def query_order(
         self,
@@ -246,11 +263,17 @@ class BinanceAPIClient:
                     error_data = e.response.json()
                     raise BinanceAPIError(
                         f"Binance API error: {error_data.get('msg', 'Unknown error')} "
-                        f"(code: {error_data.get('code', 'N/A')})"
+                        f"(code: {error_data.get('code', 'N/A')})",
+                        error_data=error_data,
                     ) from e
                 except ValueError:
-                    raise BinanceAPIError(f"Binance API error: {e.response.text}") from e
-            raise BinanceAPIError(f"Request failed: {str(e)}") from e
+                    # Non-JSON error response; store text as error_data
+                    error_data = {"text": e.response.text}
+                    raise BinanceAPIError(
+                        f"Binance API error: {e.response.text}",
+                        error_data=error_data,
+                    ) from e
+            raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
 
     def cancel_order(
         self,
@@ -297,11 +320,17 @@ class BinanceAPIClient:
                     error_data = e.response.json()
                     raise BinanceAPIError(
                         f"Binance API error: {error_data.get('msg', 'Unknown error')} "
-                        f"(code: {error_data.get('code', 'N/A')})"
+                        f"(code: {error_data.get('code', 'N/A')})",
+                        error_data=error_data,
                     ) from e
                 except ValueError:
-                    raise BinanceAPIError(f"Binance API error: {e.response.text}") from e
-            raise BinanceAPIError(f"Request failed: {str(e)}") from e
+                    # Non-JSON error response; store text as error_data
+                    error_data = {"text": e.response.text}
+                    raise BinanceAPIError(
+                        f"Binance API error: {e.response.text}",
+                        error_data=error_data,
+                    ) from e
+            raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
 
     def get_account(self) -> Dict:
         """
@@ -327,11 +356,17 @@ class BinanceAPIClient:
                     error_data = e.response.json()
                     raise BinanceAPIError(
                         f"Binance API error: {error_data.get('msg', 'Unknown error')} "
-                        f"(code: {error_data.get('code', 'N/A')})"
+                        f"(code: {error_data.get('code', 'N/A')})",
+                        error_data=error_data,
                     ) from e
                 except ValueError:
-                    raise BinanceAPIError(f"Binance API error: {e.response.text}") from e
-            raise BinanceAPIError(f"Request failed: {str(e)}") from e
+                    # Non-JSON error response; store text as error_data
+                    error_data = {"text": e.response.text}
+                    raise BinanceAPIError(
+                        f"Binance API error: {e.response.text}",
+                        error_data=error_data,
+                    ) from e
+            raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
 
     def start_user_data_stream(self) -> str:
         """
@@ -357,11 +392,17 @@ class BinanceAPIClient:
                     error_data = e.response.json()
                     raise BinanceAPIError(
                         f"Binance API error: {error_data.get('msg', 'Unknown error')} "
-                        f"(code: {error_data.get('code', 'N/A')})"
+                        f"(code: {error_data.get('code', 'N/A')})",
+                        error_data=error_data,
                     ) from e
                 except ValueError:
-                    raise BinanceAPIError(f"Binance API error: {e.response.text}") from e
-            raise BinanceAPIError(f"Request failed: {str(e)}") from e
+                    # Non-JSON error response; store text as error_data
+                    error_data = {"text": e.response.text}
+                    raise BinanceAPIError(
+                        f"Binance API error: {e.response.text}",
+                        error_data=error_data,
+                    ) from e
+            raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
 
     def keepalive_user_data_stream(self, listen_key: str) -> None:
         """
@@ -382,11 +423,17 @@ class BinanceAPIClient:
                     error_data = e.response.json()
                     raise BinanceAPIError(
                         f"Binance API error: {error_data.get('msg', 'Unknown error')} "
-                        f"(code: {error_data.get('code', 'N/A')})"
+                        f"(code: {error_data.get('code', 'N/A')})",
+                        error_data=error_data,
                     ) from e
                 except ValueError:
-                    raise BinanceAPIError(f"Binance API error: {e.response.text}") from e
-            raise BinanceAPIError(f"Request failed: {str(e)}") from e
+                    # Non-JSON error response; store text as error_data
+                    error_data = {"text": e.response.text}
+                    raise BinanceAPIError(
+                        f"Binance API error: {e.response.text}",
+                        error_data=error_data,
+                    ) from e
+            raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
 
     def close_user_data_stream(self, listen_key: str) -> None:
         """
@@ -406,8 +453,14 @@ class BinanceAPIClient:
                     error_data = e.response.json()
                     raise BinanceAPIError(
                         f"Binance API error: {error_data.get('msg', 'Unknown error')} "
-                        f"(code: {error_data.get('code', 'N/A')})"
+                        f"(code: {error_data.get('code', 'N/A')})",
+                        error_data=error_data,
                     ) from e
                 except ValueError:
-                    raise BinanceAPIError(f"Binance API error: {e.response.text}") from e
-            raise BinanceAPIError(f"Request failed: {str(e)}") from e
+                    # Non-JSON error response; store text as error_data
+                    error_data = {"text": e.response.text}
+                    raise BinanceAPIError(
+                        f"Binance API error: {e.response.text}",
+                        error_data=error_data,
+                    ) from e
+            raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e

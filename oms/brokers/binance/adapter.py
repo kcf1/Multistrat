@@ -140,13 +140,20 @@ class BinanceBrokerAdapter:
                 time_in_force=time_in_force,
                 client_order_id=order_id or None,
             )
-            return binance_order_response_to_unified(resp)
+            out = binance_order_response_to_unified(resp)
+            # Store raw broker response for audit/debug (Redis + Postgres payload)
+            out["payload"] = {"binance": resp}
+            return out
         except BinanceAPIError as e:
-            return {
+            rejected = {
                 "rejected": True,
                 "order_id": order_id,
                 "reject_reason": str(e),
             }
+            # Store raw broker error response for audit/debug (Redis + Postgres payload)
+            if e.error_data is not None:
+                rejected["payload"] = {"binance": e.error_data}
+            return rejected
 
     def start_fill_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         """
@@ -190,15 +197,21 @@ class BinanceBrokerAdapter:
                 resp = self._client.cancel_order(symbol=symbol, client_order_id=broker_order_id)
                 return binance_order_response_to_unified(resp)
             except BinanceAPIError as e:
-                return {
+                rejected = {
                     "rejected": True,
                     "reject_reason": str(e),
                 }
+                if e.error_data is not None:
+                    rejected["payload"] = {"binance": e.error_data}
+                return rejected
         try:
             resp = self._client.cancel_order(symbol=symbol, order_id=order_id_int)
             return binance_order_response_to_unified(resp)
         except BinanceAPIError as e:
-            return {
+            rejected = {
                 "rejected": True,
                 "reject_reason": str(e),
             }
+            if e.error_data is not None:
+                rejected["payload"] = {"binance": e.error_data}
+            return rejected

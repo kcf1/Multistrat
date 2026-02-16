@@ -9,7 +9,7 @@ import os
 import signal
 import sys
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 from redis import Redis
 
@@ -21,7 +21,7 @@ from oms.consumer import ensure_risk_approved_consumer_group
 from oms.redis_flow import make_fill_callback, process_one, process_one_cancel, process_many, process_many_cancel
 from oms.registry import AdapterRegistry
 from oms.storage.redis_order_store import RedisOrderStore
-from oms.sync import sync_one_order
+from oms.sync import sync_one_order, sync_terminal_orders, DEFAULT_SYNC_INTERVAL_SECONDS
 
 # Use blocking Redis reads for event-driven behavior (wakes immediately on new messages)
 # Block timeout allows periodic checks for cancels and trimming
@@ -142,6 +142,9 @@ def run_oms_loop(
     consumer_group: str = CONSUMER_GROUP,
     consumer_name: str = CONSUMER_NAME,
     on_terminal_sync: Optional[Callable[[str], None]] = None,
+    pg_connect: Optional[Union[str, Callable[[], Any]]] = None,
+    sync_interval_seconds: int = 0,
+    sync_ttl_after_seconds: Optional[int] = None,
 ) -> int:
     """
     Run OMS main loop (12.1.11b): process_many (bulk), process_one_cancel, trim periodically.
@@ -168,6 +171,7 @@ def run_oms_loop(
 
     processed = 0
     iteration = 0
+    last_sync_time = 0.0
     while True:
         if stop_after_n is not None and processed >= stop_after_n:
             break
@@ -231,6 +235,18 @@ def run_oms_loop(
                 logger.debug("OMS loop iter {}: trim done removed={}", iteration, removed)
             except Exception as e:
                 logger.warning("trim_oms_streams failed: {}", e)
+        if pg_connect and sync_interval_seconds > 0 and (time.time() - last_sync_time) >= sync_interval_seconds:
+            try:
+                count = sync_terminal_orders(
+                    redis,
+                    store,
+                    pg_connect,
+                    ttl_after_sync_seconds=sync_ttl_after_seconds,
+                )
+                logger.debug("OMS periodic sync: synced {} terminal order(s) to Postgres", count)
+            except Exception as e:
+                logger.warning("sync_terminal_orders failed: {}", e)
+            last_sync_time = time.time()
         logger.debug("OMS loop iter {}: run_until check", iteration)
         if run_until is not None and run_until():
             logger.debug("OMS loop iter {}: shutdown requested, exiting", iteration)
@@ -303,6 +319,14 @@ def main() -> int:
     except (TypeError, ValueError):
         pass
 
+    sync_interval_seconds = DEFAULT_SYNC_INTERVAL_SECONDS
+    try:
+        env_sync = os.environ.get("OMS_SYNC_INTERVAL_SECONDS")
+        if env_sync is not None:
+            sync_interval_seconds = int(env_sync)
+    except (TypeError, ValueError):
+        pass
+
     try:
         run_oms_loop(
             redis,
@@ -314,6 +338,9 @@ def main() -> int:
             trim_every_n=DEFAULT_TRIM_EVERY_N,
             run_until=lambda: shutdown[0],
             on_terminal_sync=on_terminal_sync if database_url else None,
+            pg_connect=database_url if database_url else None,
+            sync_interval_seconds=sync_interval_seconds if database_url else 0,
+            sync_ttl_after_seconds=sync_ttl,
         )
     except KeyboardInterrupt:
         pass
