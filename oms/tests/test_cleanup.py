@@ -77,3 +77,15 @@ class TestSetOrderKeyTtl:
     def test_set_order_key_ttl_returns_false_when_key_missing(self, redis_client):
         ok = set_order_key_ttl(redis_client, "nonexistent", 300)
         assert ok is False
+
+    def test_set_order_key_ttl_skips_when_key_already_has_ttl(self, redis_client):
+        """TTL is set only when key has none; periodic sync does not refresh it."""
+        order_id = "ord-ttl-2"
+        key = ORDER_KEY_PREFIX + order_id
+        redis_client.hset(key, mapping={"status": "filled"})
+        set_order_key_ttl(redis_client, order_id, 300)
+        assert redis_client.ttl(key) == 300
+        # Second call with different TTL should not change expiry (returns False, TTL unchanged)
+        ok = set_order_key_ttl(redis_client, order_id, 600)
+        assert ok is False
+        assert redis_client.ttl(key) == 300

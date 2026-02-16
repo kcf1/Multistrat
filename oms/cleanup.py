@@ -46,13 +46,18 @@ def trim_oms_streams(
 
 def set_order_key_ttl(redis: Redis, order_id: str, ttl_seconds: int) -> bool:
     """
-    Set TTL on the order hash key orders:{order_id}.
+    Set TTL on the order hash key orders:{order_id} only when the key has no TTL.
     Use when order reaches a terminal status (filled, rejected, cancelled, expired)
     so Redis can expire the key after sync or retention period.
-    Returns True if the key existed and TTL was set, False if key does not exist.
+    Periodic sync will not refresh TTL; only the first sync (or fill callback) sets it.
+    Returns True if the key existed and TTL was set, False if key does not exist or already had a TTL.
     """
     key = ORDER_KEY_PREFIX + order_id
     if not redis.exists(key):
+        return False
+    existing_ttl = redis.ttl(key)
+    # -1 means key exists but has no expire; only set TTL in that case
+    if existing_ttl != -1:
         return False
     redis.expire(key, ttl_seconds)
     return True

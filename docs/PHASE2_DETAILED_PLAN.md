@@ -11,9 +11,9 @@
 | **OMS** | Generic order router: consumes `risk_approved`, stages orders in **Redis** (hashes + indexes), dispatches to a **broker adapter** by `broker`/account; receives fills from adapter and publishes `oms_fills`. Periodically syncs orders to Postgres for audit. Extensible to more brokers later. |
 | **Broker adapters** | Pluggable implementations (e.g. Binance first; others later). Each adapter: place order, subscribe to fills/rejects, report back to OMS in a unified format. |
 | **First broker** | Binance (testnet first; spot or futures — decide one for Phase 2). |
-| **Order path** | Redis `risk_approved` → OMS (router) → broker adapter (Binance) → broker API → fills back to OMS → Redis `oms_fills` → Booking → Postgres + Redis cache |
-| **OMS persistence** | **Redis** (staging: order hashes, status indexes, broker_order_id lookup); **periodic sync to Postgres** `orders` table for audit and recovery. |
-| **Booking persistence** | Postgres (orders, positions, balances, margin, fills); Redis cache for Risk/Position Keeper |
+| **Order path** | Redis `risk_approved` → OMS (router) → broker adapter (Binance) → broker API → fills back to OMS → Redis `oms_fills` → Booking → Postgres (fills, positions, balances) + Redis cache |
+| **OMS persistence** | **Redis** (staging: order hashes, status indexes, broker_order_id lookup); **sync to Postgres** `orders` table (trigger on terminal status + periodic) via `oms/sync.py`; optional repairs via `oms/repair.py`. |
+| **Booking persistence** | Postgres (fills, positions, balances, margin; **orders** table is written by OMS only); Redis cache for Risk/Position Keeper |
 | **Position Keeper** | Reads Postgres/Redis; aggregates PnL and margin |
 | **Risk (Phase 2)** | Minimal: consume `strategy_orders`, pass through to `risk_approved` (or use test inject for E2E) |
 
@@ -40,9 +40,9 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
   - `id` (PK), `name`, `broker` (e.g. `binance`), `env` (e.g. `testnet`/`mainnet`), `created_at`, optional `config` (JSONB).  
   - One row per broker account if you support multiple; else a single default account.
 
-- **orders** (audit / recovery; populated by OMS from Redis or on status updates)  
+- **orders** (audit / recovery; **populated by OMS only**, not by Booking)  
   - See table in §3.1 above: includes `book` (strategy/book id), `comment` (freetext), generic broker fields (`executed_qty`, `time_in_force`, etc.), and Binance-specific columns with `binance_` prefix (`binance_cumulative_quote_qty`, `binance_transact_time`).  
-  - OMS syncs orders to this table for audit, reconciliation, and recovery.
+  - OMS syncs orders to this table via `sync_one_order` / `sync_terminal_orders` (`oms/sync.py`) on terminal status (from fill callback or reject path) and periodically. Column sources: **docs/oms/OMS_ORDERS_DB_FIELDS.md**. Post-sync repairs for Binance: `oms/repair.py` (`run_all_repairs`).
 
 - **fills**  
   - `id` (PK), `order_id` (FK to orders or internal reference), `account_id` (FK), `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `broker_fill_id`, `executed_at`, `created_at`.  
@@ -139,13 +139,16 @@ Binance **cancel_order** returns same shape as query.
 
 ## 4. Redis Streams
 
+**Reference:** Stream names and consumer groups are implemented in OMS as constants in `oms/schemas.py` (`RISK_APPROVED_STREAM`, `CANCEL_REQUESTED_STREAM`, `OMS_FILLS_STREAM`) and used via `oms/streams.py`. See **docs/oms/OMS_ARCHITECTURE.md** §2.
+
 ### 4.1 Stream names
 
 | Stream | Producer | Consumer | Purpose |
 |--------|----------|----------|---------|
 | `strategy_orders` | Strategies (Phase 5) or test inject | Risk | Order intents from strategies |
-| `risk_approved` | Risk | OMS | Orders approved (or pass-through in P2) |
-| `oms_fills` | OMS | Booking | Fill and rejection events |
+| `risk_approved` | Risk | OMS | Orders approved (or pass-through in P2). Consumer group `oms`, XREADGROUP + XACK. Trimmed by OMS. |
+| `cancel_requested` | Risk / Admin | OMS | Cancel by order_id or (broker_order_id + symbol). Consumer group `oms`. Not trimmed. |
+| `oms_fills` | OMS | Booking | Fill, reject, cancelled, and expired events. Trimmed by OMS. |
 
 ### 4.2 Message schemas (JSON)
 
@@ -162,12 +165,14 @@ Binance **cancel_order** returns same shape as query.
 - **`comment`** (optional) — Freetext comment; stored with order in Redis and Postgres.  
 - `strategy_id` (optional), `created_at` (ISO)
 
-**oms_fills (fill or reject)** — defined in OMS (12.1.5), consumed by Booking (12.2.5)  
-- `event_type`: `fill` | `reject`  
+**oms_fills (fill / reject / cancelled / expired)** — defined in OMS (12.1.5), consumed by Booking (12.2.5). Validation: `OmsFillEvent` in `oms/schemas_pydantic.py`.  
+- `event_type`: `fill` | `reject` | `cancelled` | `expired`  
 - `order_id` (internal), `broker_order_id`, `symbol`, `side`, `quantity`, **`price`** (executed/fill price for this event), `fee`, `fee_asset`  
 - `executed_at` (ISO), `fill_id` (broker), optional `reject_reason` for rejections  
 - **`book`** (optional) — Pass-through from order for attribution.  
 - **`comment`** (optional) — Pass-through from order for audit.  
+
+Booking applies position/balance updates only for `event_type: fill`; `reject` / `cancelled` / `expired` are for audit, logging, or idempotency (no position/balance change).
 
 Each service documents its schemas in code or a service README (e.g. `oms/README.md`, `booking/README.md`). Streams are created on first XADD.
 
@@ -242,15 +247,18 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 ## 7. Booking service
 
+**Context:** Booking is the downstream consumer of the OMS. OMS produces to `oms_fills` (stream name `OMS_FILLS_STREAM` = `"oms_fills"` per `oms/schemas.py`). OMS owns syncing the **orders** table to Postgres; Booking owns **fills**, **positions**, and **balances**. See **docs/oms/OMS_ARCHITECTURE.md** for OMS data flow and interfaces.
+
 ### 7.1 Role
 
-- Consume from Redis stream `oms_fills` (XREAD block).
-- For each **fill** event: update **positions** (add or reduce quantity, update avg price), update **balances** (cash/asset), optionally write **margin_snapshots**; insert row into **fills** in Postgres.
+- Consume from Redis stream **oms_fills** (same stream OMS writes to; optionally use consumer group for at-least-once delivery, similar to OMS `risk_approved`).
+- **event_type handling:** For **`fill`** events only: update **positions** (add or reduce quantity, update avg price), update **balances** (cash/asset), optionally write **margin_snapshots**; insert row into **fills** in Postgres. For **`reject`**, **`cancelled`**, **`expired`**: audit/log only; no position or balance update (order did not result in execution).
 - Update **Redis cache**: e.g. `positions:{account_id}`, `balance:{account_id}:{asset}`, `margin:{account_id}` (JSON or hash) so Risk and Position Keeper can read without hitting Postgres every time.
+- **Orders table:** Booking does **not** write to `orders`; that table is populated by OMS sync (`oms/sync.py`). Booking may read `orders` for attribution (e.g. `book`, `comment`) if not present on the fill event; OMS already passes `book` and `comment` on `oms_fills` events.
 
 ### 7.2 Idempotency
 
-- Use `fill_id` (broker) or (order_id + executed_at) as unique key; ignore duplicate fill events.
+- Use `fill_id` (broker) or (order_id + executed_at) as unique key; ignore duplicate fill events. Reject/cancelled/expired events can be logged or stored for audit without affecting positions/balances.
 
 ### 7.3 Deployment
 
@@ -365,13 +373,15 @@ BINANCE_API_SECRET=
 
 ### 12.2 Booking (build backwards: Postgres writes → Redis cache → consumer → integration)
 
-- [ ] **12.2.1** **Booking Postgres schema** (Alembic): create revision(s) for `accounts`, `orders` (with `book`, `comment`, and Binance-mapped columns per §3.1), `fills`, `positions`, `balances`, optional `margin_snapshots`; implement `upgrade()` and `downgrade()`. Run `alembic upgrade head`. **Unit test:** verify schema creation and indexes.
-- [ ] **12.2.2** **Booking Postgres writes**: insert fills, update positions (add/reduce, avg price), update balances. **Unit test:** test Postgres (or test DB); verify SQL, idempotency (duplicate fill_id).
+**Alignment with OMS:** OMS owns `orders` table sync (`oms/sync.py`); Booking consumes `oms_fills` only. Input schema must match OMS output: `event_type` is `fill` | `reject` | `cancelled` | `expired` (see `oms/schemas_pydantic.py` `OmsFillEvent`, **docs/oms/OMS_ARCHITECTURE.md** §4.3). Only `fill` events drive position/balance/fill writes.
+
+- [ ] **12.2.1** **Booking Postgres schema** (Alembic): create revision(s) for `accounts`, `orders` (with `book`, `comment`, and Binance-mapped columns per §3.1; table is written by **OMS sync**, not Booking), `fills`, `positions`, `balances`, optional `margin_snapshots`; implement `upgrade()` and `downgrade()`. Run `alembic upgrade head`. **Unit test:** verify schema creation and indexes.
+- [ ] **12.2.2** **Booking Postgres writes**: insert fills (from `event_type: fill` only), update positions (add/reduce, avg price), update balances. **Unit test:** test Postgres (or test DB); verify SQL, idempotency (duplicate fill_id).
 - [ ] **12.2.3** **Booking Redis cache schema**: define key formats (`positions:{account_id}`, `balance:{account_id}:{asset}`, `margin:{account_id}`) and value formats (JSON or hash). Document in code or `booking/README.md`.
-- [ ] **12.2.4** **Booking Redis cache updates**: write cache keys per schema. **Unit test:** mock Redis client; verify key format and updates.
-- [ ] **12.2.5** **Booking Redis stream schema** (input): define `oms_fills` input schema (must match OMS output schema from 12.1.5). Document in code or `booking/README.md`.
-- [ ] **12.2.6** **Booking Redis consumer** (XREAD from `oms_fills`): parse fill/reject events per `oms_fills` schema. **Unit test:** mock Redis client; verify message parsing.
-- [ ] **12.2.7** **Booking integration** (wire pieces): Redis consumer → Postgres writes → Redis cache updates. **Integration test:** mock Redis stream; verify Postgres and Redis cache updated for one fill.
+- [ ] **12.2.4** **Booking Redis cache updates**: write cache keys per schema (on fill events only). **Unit test:** mock Redis client; verify key format and updates.
+- [ ] **12.2.5** **Booking Redis stream schema** (input): define `oms_fills` input schema to match OMS output (12.1.5): `event_type` (`fill` | `reject` | `cancelled` | `expired`), `order_id`, `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `executed_at`, `fill_id`, `reject_reason`, `book`, `comment`. Reference `oms/schemas.py` and `oms/schemas_pydantic.py`. Document in code or `booking/README.md`.
+- [ ] **12.2.6** **Booking Redis consumer** (XREAD or XREADGROUP from `oms_fills`): parse events per `oms_fills` schema; dispatch by `event_type` — apply position/balance/fill writes only for `fill`; handle `reject`/`cancelled`/`expired` for audit/log. **Unit test:** mock Redis client; verify message parsing and event_type handling.
+- [ ] **12.2.7** **Booking integration** (wire pieces): Redis consumer → Postgres writes (fills, positions, balances) + Redis cache updates for fill events only. **Integration test:** mock Redis stream; verify Postgres and Redis cache updated for one fill event; reject/cancelled/expired do not change positions/balances.
 
 ### 12.3 Position Keeper (build backwards: calculations → reads → writes → loop)
 
@@ -397,11 +407,11 @@ BINANCE_API_SECRET=
 
 - [ ] `docker compose up -d` brings up infra + OMS, Booking, Position Keeper (and optionally Risk).
 - [ ] **Test script** runs successfully: connects to Redis, XADDs one test order to `risk_approved` with `broker: "binance"`.
-- [ ] One test order injected via script flows: OMS routes to Binance adapter → Binance testnet → fill (or reject) → OMS publishes to `oms_fills` → Booking writes to Postgres (fills, positions, balances) and updates Redis cache.
-- [ ] OMS sync job (if enabled) populates Postgres `orders` from Redis; after sync, `orders` table has the test order row.
+- [ ] One test order injected via script flows: OMS routes to Binance adapter → Binance testnet → fill (or reject) → OMS publishes to `oms_fills` (event_type fill/reject/cancelled/expired as applicable) → Booking consumes `oms_fills` and for **fill** events writes to Postgres (fills, positions, balances) and updates Redis cache.
+- [ ] **OMS** sync (trigger on terminal status and/or periodic `sync_terminal_orders`) populates Postgres `orders` from Redis; after sync, `orders` table has the test order row. Booking does not write to `orders`.
 - [ ] Position Keeper reads positions/balances and writes PnL/margin to Postgres or Redis.
-- [ ] In pgAdmin: `orders`, `fills`, `positions`, `balances` (and optional `margin_snapshots`) reflect the test order and fill.
-- [ ] In RedisInsight: OMS order hashes (e.g. `orders:*`); `oms_fills` stream has the fill event; cache keys (e.g. `positions:1`) are present and updated.
+- [ ] In pgAdmin: `orders` (from OMS sync), `fills`, `positions`, `balances` (and optional `margin_snapshots`) reflect the test order and fill.
+- [ ] In RedisInsight: OMS order hashes (e.g. `orders:*`); `oms_fills` stream has the fill (and optionally reject/cancelled/expired) events; Booking cache keys (e.g. `positions:1`) are present and updated on fill.
 
 ---
 
@@ -465,8 +475,9 @@ multistrat/
 - **OMS cancel from Redis:** Parse cancel_requested message; read_one_cancel_request; process_one_cancel → store cancelled, oms_fills (12.1.9f).
 - **OMS → Postgres sync:** Unit test: sync writes correct rows; idempotent (12.1.10).
 - **OMS main loop:** Integration: fakeredis + mock adapter, inject one message, assert process_one and XACK; E2E: real Redis + testnet, inject script, assert oms_fills (12.1.11a/12.1.11b).
-- **Booking Postgres writes:** Test Postgres (or testcontainers/test DB); test SQL, idempotency (duplicate fill_id).
-- **Booking Redis cache:** Mock Redis; test key format, updates.
+- **Booking Postgres writes:** Test Postgres (or testcontainers/test DB); test SQL, idempotency (duplicate fill_id). Only `event_type: fill` triggers position/balance/fill writes.
+- **Booking Redis cache:** Mock Redis; test key format, updates (on fill events only).
+- **Booking consumer:** Parse `oms_fills` with event_type fill | reject | cancelled | expired; verify only fill drives writes.
 - **Position Keeper calculations:** Pure functions; test PnL/margin math given positions/balances/fills.
 - **Position Keeper reads/writes:** Mock Postgres/Redis or use test DB; test queries and writes.
 
@@ -476,7 +487,7 @@ multistrat/
 - **OMS bootstrap and main loop:** Start fill listener(s) and run process_one loop; inject one message; assert processed and (with mock) no double-process (12.1.11a, 12.1.11b).
 - **OMS error path:** Adapter place_order raises → no XACK; optional reject to store/oms_fills (12.1.9d).
 - **OMS cancel from Redis:** XADD cancel_requested → process_one_cancel → store status cancelled, oms_fills event (12.1.9f).
-- **Booking integration:** Mock Redis stream (`oms_fills`); verify: consumer → Postgres writes → Redis cache updates.
+- **Booking integration:** Mock Redis stream (`oms_fills`); verify: consumer → for fill events only → Postgres writes (fills, positions, balances) → Redis cache updates; reject/cancelled/expired do not change positions or balances.
 - **Position Keeper integration:** Mock Postgres/Redis data; verify: read → calculate → write loop.
 
 ### 16.3 Test script (required for E2E)
