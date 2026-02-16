@@ -178,6 +178,24 @@ Postgres sync operations.
   - `test_sync_terminal_orders_handles_errors`
   - `test_sync_terminal_orders_respects_ttl`
 
+#### `oms/tests/test_repair.py`
+Postgres order repairs: Binance payload recovery (price, time_in_force, binance_cumulative_quote_qty).
+
+**Test Classes:**
+- `TestExtractFromBinancePayload` - Payload extraction
+  - `test_extracts_price_from_avg_price`
+  - `test_extracts_price_from_fills_when_avg_missing`
+  - `test_extracts_time_in_force`
+  - `test_extracts_cumulative_quote_qty`
+  - `test_empty_payload_returns_empty`
+
+- `TestRepairFunctions` - Repair logic (mocked DB)
+  - `test_repair_price_updates_when_flawed`
+  - `test_repair_price_skips_when_no_valid_price_in_payload`
+  - `test_repair_time_in_force_updates`
+  - `test_repair_cumulative_quote_qty_updates`
+  - `test_run_all_repairs_calls_each`
+
 #### `oms/tests/test_cleanup.py`
 Stream trimming and TTL management.
 

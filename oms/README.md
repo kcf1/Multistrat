@@ -4,6 +4,7 @@ Generic order router that consumes from `risk_approved` stream and dispatches to
 
 ## Structure
 
+- `repair.py` - Order repairs: fix flawed Postgres order fields (Binance only) from payload; runs periodically with sync
 - `brokers/` - Broker adapter implementations
   - `base.py` - Broker adapter interface (Protocol: `place_order`, `start_fill_listener`)
   - `binance/` - Binance broker adapter (task 12.1.3)
@@ -56,3 +57,4 @@ Fields: `event_type` (fill|reject), `order_id`, `broker_order_id`, `symbol`, `si
 
 - **Redis order store** (`oms/storage/redis_order_store.py`, task 12.1.4): `orders:{order_id}` (hash), `orders:by_status:{status}` (set), `orders:by_book:{book}` (set), `orders:by_broker_order_id:{broker_order_id}` (lookup). Operations: stage_order, update_status, update_fill_status, get_order, find_order_by_broker_order_id. Pipelines for atomic updates.
 - **Postgres:** Periodic sync (e.g. completed orders) to `orders` table for audit and recovery (task 12.1.10).
+- **Order repairs** (`oms/repair.py`): Periodic repair of flawed Postgres order fields (price, time_in_force, binance_cumulative_quote_qty) by recovering from the `payload` JSONB. Runs only for `broker = 'binance'`; scheduled alongside sync in the main loop.

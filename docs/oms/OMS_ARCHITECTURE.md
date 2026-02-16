@@ -112,7 +112,7 @@ Defined in `oms/storage/redis_order_store.py`:
    - **process_many:** Read up to `batch_size` from `risk_approved` (XREADGROUP BLOCK `block_ms`), then pending; for each: stage → place_order via registry → **write payload (and broker_order_id) to store immediately** so fill callback enrichment can see them even if the WebSocket fill arrives first (race); then update status to `sent` (or keep terminal if fill already ran) → produce oms_fill on reject → XACK. On terminal status, optional `on_terminal_sync(order_id)` (sync to Postgres + TTL).
    - **process_many_cancel:** Read up to `batch_size` from `cancel_requested` (non-blocking); resolve order_id (from message or by broker_order_id); adapter.cancel_order; update store to cancelled; optionally produce cancelled to oms_fills; XACK.
    - **Trim:** Every `trim_every_n` iterations, `trim_oms_streams(redis)` (risk_approved + oms_fills, MAXLEN 20000).
-   - **Periodic sync:** If `pg_connect` and `sync_interval_seconds` set, `sync_terminal_orders(redis, store, pg_connect, …)` (sync terminal orders to Postgres, set TTL on Redis keys).
+   - **Periodic sync:** If `pg_connect` and `sync_interval_seconds` set, `sync_terminal_orders(redis, store, pg_connect, …)` (sync terminal orders to Postgres, set TTL on Redis keys); then `run_all_repairs(pg_connect)` (fix flawed order fields from payload for Binance orders).
 
 **Blocking:** When `block_ms > 0`, `process_many` uses XREADGROUP BLOCK for event-driven wake-up; cancel is non-blocking so it’s checked after orders each iteration.
 
@@ -135,6 +135,8 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 - **Trigger:** On terminal status from fill callback (`on_terminal_sync`) or from process_one reject path; plus **periodic** `sync_terminal_orders` every `sync_interval_seconds` (e.g. 60s).
 - **Logic:** For each terminal order: read from Redis store, map to Postgres row (`_order_to_row`), UPSERT by `internal_id`, then set TTL on `orders:{order_id}`.
 - **DB columns / sources:** See `docs/OMS_ORDERS_DB_FIELDS.md` (risk_approved, place_order response, fills → columns).
+
+**Order repairs (post-sync):** `oms/repair.py` — `run_all_repairs(pg_connect)` runs periodically after sync. Fixes flawed Postgres order fields (price, time_in_force, binance_cumulative_quote_qty) by recovering values from the `payload` JSONB when they are NULL/0/empty. Applies only to `broker = 'binance'` orders. See §12 File Map.
 
 ---
 
@@ -187,6 +189,7 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 | Registry & adapter contract | `registry.py`, `brokers/base.py` |
 | Binance | `brokers/binance/adapter.py`, `api_client.py`, `fills_listener.py` |
 | Sync to DB | `sync.py` |
+| Order repairs (Binance payload recovery) | `repair.py` |
 | Cleanup | `cleanup.py` |
 | Logging | `log.py` |
 

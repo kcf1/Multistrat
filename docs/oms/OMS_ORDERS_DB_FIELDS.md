@@ -26,3 +26,5 @@ Single reference for Postgres `orders` columns and where each value is set (Redi
 | **payload** | Broker place_order (raw) | `update_status` after place_order; adapter returns `payload={"binance": raw_resp}`. Written to the store **immediately** after place_order returns (before status is set to `sent`) so fill-callback enrichment can use it even when the WebSocket fill arrives first. |
 
 All columns above are written from Redis to Postgres by `sync_one_order` / `sync_terminal_orders` (`oms/sync.py`). Redis order hash is populated by `stage_order` (risk_approved), then `update_status` (place_order response including payload; payload is written as soon as place_order returns), then `update_fill_status` (fills).
+
+**Post-sync repairs:** `oms/repair.py` — `run_all_repairs` runs periodically (after sync in the OMS loop) and fixes flawed values for `broker = 'binance'` orders by recovering from the `payload` JSONB: `price` (from avgPrice or fills[0].price when NULL/0), `time_in_force` (when NULL/empty), `binance_cumulative_quote_qty` (when NULL).

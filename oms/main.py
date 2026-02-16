@@ -266,7 +266,7 @@ def run_oms_loop(
 def main() -> int:
     """
     Load REDIS_URL, create store and registry, register Binance, start fill listeners,
-    then run process_one / process_one_cancel loop until shutdown.
+    then run process_many / process_many_cancel loop until shutdown.
     """
     redis = get_redis()
     store = get_store(redis)

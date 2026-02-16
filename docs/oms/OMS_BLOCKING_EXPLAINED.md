@@ -16,23 +16,23 @@ When Redis receives a blocking read request:
 
 ```python
 while True:
-    # Step 1: BLOCK waiting for new order (up to 1000ms)
-    result = process_one(redis, store, registry, block_ms=1000)
-    # ↑ This calls XREADGROUP BLOCK 1000
+    # Step 1: BLOCK waiting for new orders (up to 100ms default)
+    result = process_many(redis, store, registry, count=batch_size, block_ms=100)
+    # ↑ This calls XREADGROUP BLOCK
     #   - Thread BLOCKS here waiting for orders
     #   - If message exists: returns immediately
-    #   - If no message: waits up to 1000ms for one to arrive
+    #   - If no message: waits up to block_ms for one to arrive
     #   - When message arrives: Redis wakes up OMS immediately!
     
     # Step 2: Quick NON-BLOCKING check for cancel requests
-    cancel_result = process_one_cancel(redis, store, registry, block_ms=0)
+    cancel_result = process_many_cancel(redis, store, registry, count=batch_size, block_ms=0)
     # ↑ Non-blocking (block_ms=0) because:
     #   - We can't block on both streams simultaneously
     #   - Cancels are checked after every order check/timeout
     #   - This ensures cancels are still processed promptly
     
-    # Step 3: Periodic maintenance (every 20 iterations)
-    if iteration % 20 == 0:
+    # Step 3: Periodic maintenance (every trim_every_n iterations, default 200)
+    if iteration % trim_every_n == 0:
         trim_oms_streams(redis)  # Clean up old stream entries
 ```
 
@@ -70,11 +70,11 @@ T=1.1s  | OMS processes order                 | **Delay: ~1ms (Redis propagation
 
 ## The Redis Command: XREADGROUP BLOCK
 
-When OMS calls `read_one_risk_approved_cg()` with `block_ms=1000`:
+When OMS calls `read_many_risk_approved_cg()` with `block_ms` (default 100):
 
 ```python
 # This translates to Redis command:
-XREADGROUP GROUP oms CONSUMER oms-1 BLOCK 1000 STREAMS risk_approved >
+XREADGROUP GROUP oms CONSUMER oms-1 BLOCK 100 STREAMS risk_approved >
 ```
 
 **What Redis does:**
@@ -96,9 +96,9 @@ With blocking reads:
 - Redis **pushes** the message to OMS as soon as it arrives
 - OMS wakes up **immediately** (within milliseconds)
 
-## The Timeout (1000ms)
+## The Timeout (block_ms)
 
-The `block_ms=1000` timeout serves two purposes:
+The `block_ms` timeout (default 100, configurable via `OMS_BLOCK_MS`) serves two purposes:
 
 1. **Allows periodic tasks**: After timeout, OMS can:
    - Check for cancel requests
@@ -116,14 +116,14 @@ The `block_ms=1000` timeout serves two purposes:
                           │
                           ▼
         ┌─────────────────────────────────┐
-        │  XREADGROUP BLOCK 1000           │
-        │  (Wait for new order)            │
+        │  XREADGROUP BLOCK block_ms       │
+        │  (Wait for new order; default 100)│
         └─────────────────────────────────┘
                   │
         ┌─────────┴─────────┐
         │                   │
     Message              Timeout
-    arrives              (1000ms)
+    arrives              (block_ms)
         │                   │
         ▼                   ▼
 ┌───────────────┐   ┌───────────────┐
@@ -161,10 +161,10 @@ If cancel latency becomes critical, we could:
 
 ## Configuration
 
-You can adjust the blocking timeout via environment variable:
+You can adjust the blocking timeout via environment variable (default 100ms):
 
 ```bash
-OMS_BLOCK_MS=500  # Block for 500ms instead of 1000ms
+OMS_BLOCK_MS=500  # Block for 500ms (fewer wake-ups, slightly higher latency)
 ```
 
 Or disable blocking (use polling) if needed:
