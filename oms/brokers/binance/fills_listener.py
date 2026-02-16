@@ -160,6 +160,12 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         except (TypeError, ValueError):
             executed_qty_cumulative = None
 
+        # time_in_force (f) and cumulative quote qty (Z) from execution report
+        time_in_force = (binance_event.f or "").strip() or None
+        try:
+            cum_quote = float(binance_event.Z) if getattr(binance_event, "Z", None) not in (None, "") else None
+        except (TypeError, ValueError):
+            cum_quote = None
         # Validate with Pydantic FillEvent model
         try:
             fill_event = FillEvent(
@@ -176,6 +182,8 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 fill_id=str(binance_event.t) if binance_event.t else "",
                 order_status=order_status,
                 executed_qty_cumulative=executed_qty_cumulative,
+                time_in_force=time_in_force,
+                binance_cumulative_quote_qty=cum_quote,
             )
             return fill_event.model_dump_dict()
         except ValidationError as e:

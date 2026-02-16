@@ -14,6 +14,7 @@ import pytest
 
 from oms.brokers.binance.adapter import (
     BinanceBrokerAdapter,
+    _enrichments_from_binance_payload,
     _fill_price_from_binance_payload,
     binance_order_response_to_unified,
 )
@@ -424,6 +425,43 @@ class TestBinanceBrokerAdapterStartFillListener:
             assert len(received) == 1
             assert float(received[0]["price"]) == 97250.50
 
+    def test_start_fill_listener_with_store_enriches_time_in_force_and_cumulative_quote(self, mock_client, mock_listener):
+        """When store is provided and fill event has time_in_force empty and cumulative_quote 0, callback receives payload values."""
+        mock_store = MagicMock()
+        order_id = "ord-2"
+        mock_store.get_order.return_value = {
+            "order_id": order_id,
+            "broker_order_id": "bin-456",
+            "payload": {"binance": {"timeInForce": "IOC", "cumulativeQuoteQty": "100.25"}},
+        }
+        mock_store.find_order_by_broker_order_id.return_value = order_id
+
+        with patch("oms.brokers.binance.adapter.create_fills_listener", return_value=mock_listener):
+            adapter = BinanceBrokerAdapter(client=mock_client)
+            received = []
+
+            def callback(event):
+                received.append(event)
+
+            adapter.start_fill_listener(callback, store=mock_store)
+            call_callback = mock_listener.start_background.call_args[0][0]
+            call_callback({
+                "event_type": "fill",
+                "order_id": order_id,
+                "broker_order_id": "bin-456",
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "quantity": 0.002,
+                "price": 50000.0,
+                "time_in_force": "",
+                "binance_cumulative_quote_qty": 0,
+                "order_status": "FILLED",
+                "executed_qty_cumulative": 0.002,
+            })
+            assert len(received) == 1
+            assert received[0]["time_in_force"] == "IOC"
+            assert float(received[0]["binance_cumulative_quote_qty"]) == 100.25
+
 
 class TestFillPriceFromBinancePayload:
     """Unit tests for _fill_price_from_binance_payload (Binance payload shape)."""
@@ -443,3 +481,13 @@ class TestFillPriceFromBinancePayload:
 
     def test_fill_price_extracted(self):
         assert _fill_price_from_binance_payload({"payload": {"fill": {"price": "50300.0"}}}) == 50300.0
+
+    def test_time_in_force_and_cumulative_quote_qty_extracted(self):
+        order = {"payload": {"binance": {"timeInForce": "GTC", "cumulativeQuoteQty": "50100.5"}}}
+        en = _enrichments_from_binance_payload(order)
+        assert en.get("time_in_force") == "GTC"
+        assert en.get("binance_cumulative_quote_qty") == 50100.5
+
+    def test_enrichments_empty_payload(self):
+        assert _enrichments_from_binance_payload({}) == {}
+        assert _enrichments_from_binance_payload({"payload": {"binance": {}}}) == {}

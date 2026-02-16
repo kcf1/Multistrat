@@ -24,30 +24,57 @@ def _fill_price_from_binance_payload(order: Dict[str, Any]) -> Optional[float]:
     Tries: payload.binance.avgPrice, payload.binance.fills[0].price, payload.fill.price.
     Returns None if no valid price found.
     """
+    en = _enrichments_from_binance_payload(order)
+    return en.get("price") if isinstance(en.get("price"), (int, float)) else None
+
+
+def _enrichments_from_binance_payload(order: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract price, time_in_force, binance_cumulative_quote_qty from Binance order payload.
+
+    When WebSocket fill event has these missing/zero/empty, use values from order payload
+    (Binance REST response shape). Returns dict with only keys that have valid values.
+    """
+    out: Dict[str, Any] = {}
     payload = order.get("payload")
     if not isinstance(payload, dict):
-        return None
+        return out
+    binance = payload.get("binance")
     try:
-        binance = payload.get("binance")
         if isinstance(binance, dict):
+            # Price: avgPrice, fills[0].price
             avg = binance.get("avgPrice")
             if avg is not None and str(avg).strip():
-                return float(avg)
-            fills = binance.get("fills")
-            if isinstance(fills, list) and fills:
-                first = fills[0]
-                if isinstance(first, dict):
-                    p = first.get("price")
-                    if p is not None and str(p).strip():
-                        return float(p)
-        fill = payload.get("fill")
-        if isinstance(fill, dict):
-            p = fill.get("price")
-            if p is not None and str(p).strip():
-                return float(p)
+                out["price"] = float(avg)
+            else:
+                fills = binance.get("fills")
+                if isinstance(fills, list) and fills:
+                    first = fills[0]
+                    if isinstance(first, dict):
+                        p = first.get("price")
+                        if p is not None and str(p).strip():
+                            out["price"] = float(p)
+            # Time in force
+            tif = binance.get("timeInForce")
+            if tif is not None and str(tif).strip():
+                out["time_in_force"] = str(tif).strip()
+            # Cumulative quote qty
+            cq = binance.get("cumulativeQuoteQty")
+            if cq is not None and str(cq).strip():
+                try:
+                    out["binance_cumulative_quote_qty"] = float(cq)
+                except (TypeError, ValueError):
+                    pass
+        # Price fallback: payload.fill.price (e.g. when binance key absent)
+        if "price" not in out:
+            fill = payload.get("fill")
+            if isinstance(fill, dict):
+                p = fill.get("price")
+                if p is not None and str(p).strip():
+                    out["price"] = float(p)
     except (TypeError, ValueError):
         pass
-    return None
+    return out
 
 
 def binance_order_response_to_unified(resp: Dict[str, Any]) -> Dict[str, Any]:
@@ -201,25 +228,37 @@ class BinanceBrokerAdapter:
 
         Callback receives unified event dict (event_type, order_id, broker_order_id,
         symbol, side, quantity, price, fee, executed_at, fill_id, reject_reason, etc.).
-        When store is provided, fill events with price 0/null are enriched with price
-        from the order payload (Binance REST response: avgPrice / fills / fill.price).
+        When store is provided, fill events are enriched from the order payload when
+        event has price 0/null, time_in_force empty, or binance_cumulative_quote_qty 0/null
+        (Binance REST response: avgPrice/fills, timeInForce, cumulativeQuoteQty).
         """
         if store is not None:
 
             def enriched_cb(event: Dict[str, Any]) -> None:
+                if (event.get("event_type") or "").strip().lower() != "fill":
+                    callback(event)
+                    return
+                order_id = event.get("order_id") or ""
+                broker_order_id = str(event.get("broker_order_id", ""))
+                if not order_id and broker_order_id:
+                    order_id = store.find_order_by_broker_order_id(broker_order_id) or ""
+                order = store.get_order(order_id) or {} if order_id else {}
+                enrichments = _enrichments_from_binance_payload(order)
+                if not enrichments:
+                    callback(event)
+                    return
+                updates: Dict[str, Any] = {}
                 event_price = event.get("price")
-                if (
-                    (event.get("event_type") or "").strip().lower() == "fill"
-                    and (event_price is None or (event_price is not None and float(event_price) == 0))
-                ):
-                    order_id = event.get("order_id") or ""
-                    broker_order_id = str(event.get("broker_order_id", ""))
-                    if not order_id and broker_order_id:
-                        order_id = store.find_order_by_broker_order_id(broker_order_id) or ""
-                    order = store.get_order(order_id) or {} if order_id else {}
-                    payload_price = _fill_price_from_binance_payload(order)
-                    if payload_price is not None and payload_price > 0:
-                        event = {**event, "price": payload_price}
+                if (event_price is None or (event_price is not None and float(event_price) == 0)) and "price" in enrichments and (enrichments["price"] or 0) > 0:
+                    updates["price"] = enrichments["price"]
+                event_tif = event.get("time_in_force")
+                if (event_tif is None or not str(event_tif or "").strip()) and "time_in_force" in enrichments:
+                    updates["time_in_force"] = enrichments["time_in_force"]
+                event_cq = event.get("binance_cumulative_quote_qty")
+                if (event_cq is None or (event_cq is not None and float(event_cq) == 0)) and "binance_cumulative_quote_qty" in enrichments:
+                    updates["binance_cumulative_quote_qty"] = enrichments["binance_cumulative_quote_qty"]
+                if updates:
+                    event = {**event, **updates}
                 callback(event)
 
             cb = enriched_cb

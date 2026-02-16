@@ -318,6 +318,17 @@ def process_one(
         "process_one: order placed order_id={} broker_order_id={} symbol={} status={}",
         order_id, response.get("broker_order_id"), order.get("symbol"), response.get("status", ""),
     )
+    # Write payload (and broker_order_id) immediately so fill callback enrichment sees them
+    # even if the WebSocket fill arrives before we update status to "sent" (race).
+    current = store.get_order(order_id)
+    if current:
+        early_extra: Dict[str, Any] = {
+            "broker_order_id": response.get("broker_order_id"),
+        }
+        if response.get("payload") is not None:
+            early_extra["payload"] = response["payload"]
+        if early_extra:
+            store.update_status(order_id, current["status"], current["status"], extra_fields=early_extra)
     extra_fields = {
         "broker_order_id": response.get("broker_order_id"),
         "executed_qty": response.get("executed_qty"),
@@ -471,6 +482,16 @@ def process_many(
             "process_many: order placed order_id={} broker_order_id={} symbol={} status={}",
             order_id, response.get("broker_order_id"), order.get("symbol"), response.get("status", ""),
         )
+        # Write payload (and broker_order_id) immediately so fill callback enrichment sees them
+        current = store.get_order(order_id)
+        if current:
+            early_extra = {
+                "broker_order_id": response.get("broker_order_id"),
+            }
+            if response.get("payload") is not None:
+                early_extra["payload"] = response["payload"]
+            if early_extra:
+                store.update_status(order_id, current["status"], current["status"], extra_fields=early_extra)
         extra_fields = {
             "broker_order_id": response.get("broker_order_id"),
             "executed_qty": response.get("executed_qty"),

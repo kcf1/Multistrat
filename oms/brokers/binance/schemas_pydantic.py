@@ -29,6 +29,8 @@ class BinanceExecutionReport(BaseModel):
     l: Optional[str] = Field(None, description="Last executed quantity (for TRADE)")
     L: Optional[str] = Field(None, description="Last executed price (for TRADE)")
     z: Optional[str] = Field(None, description="Cumulative executed quantity")
+    f: Optional[str] = Field(None, description="Time in force (GTC, IOC, FOK)")
+    Z: Optional[str] = Field(None, description="Cumulative quote asset transacted quantity")
     t: Optional[int] = Field(None, description="Trade ID")
     T: Optional[int] = Field(None, description="Transaction time (ms)")
     n: Optional[str] = Field(None, description="Commission amount")
@@ -64,6 +66,8 @@ class FillEvent(BaseModel):
     fill_id: str = Field("", description="Broker trade ID")
     order_status: Optional[str] = Field(None, description="Binance order status (PARTIALLY_FILLED, FILLED)")
     executed_qty_cumulative: Optional[float] = Field(None, ge=0, description="Cumulative executed quantity")
+    time_in_force: Optional[str] = Field(None, description="Time in force from execution report (f)")
+    binance_cumulative_quote_qty: Optional[float] = Field(None, ge=0, description="Cumulative quote qty from execution report (Z)")
 
     @field_validator("order_id", "broker_order_id", "symbol", "side", "executed_at", "fill_id", mode="before")
     @classmethod
@@ -73,20 +77,35 @@ class FillEvent(BaseModel):
             return "" if cls.__name__ != "executed_at" else ""
         return str(v).strip() if isinstance(v, str) else str(v)
 
-    @field_validator("quantity", "price", "fee", "executed_qty_cumulative", mode="before")
+    @field_validator("quantity", "price", "fee", mode="before")
     @classmethod
     def parse_numeric(cls, v):
-        """Parse numeric fields."""
+        """Parse required numeric fields (None/empty -> 0.0)."""
         if v is None:
-            return None if cls.__name__ == "executed_qty_cumulative" else 0.0
+            return 0.0
         if isinstance(v, str):
             v = v.strip()
             if not v:
-                return None if cls.__name__ == "executed_qty_cumulative" else 0.0
+                return 0.0
         try:
             return float(v)
         except (TypeError, ValueError):
-            return None if cls.__name__ == "executed_qty_cumulative" else 0.0
+            return 0.0
+
+    @field_validator("executed_qty_cumulative", "binance_cumulative_quote_qty", mode="before")
+    @classmethod
+    def parse_optional_numeric(cls, v):
+        """Parse optional numeric fields (None/empty -> None)."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
 
     def model_dump_dict(self) -> dict:
         """Convert model to dict compatible with existing code."""

@@ -244,12 +244,14 @@ Binance broker adapter (mocked client).
   - `test_start_fill_listener_stops_previous`
   - `test_stop_fill_listener_stops_listener`
   - `test_start_fill_listener_with_store_enriches_fill_price_when_zero` — when store is provided, fill events with price 0 are enriched from order payload before callback
-- `TestFillPriceFromBinancePayload` - Binance payload price extraction
+  - `test_start_fill_listener_with_store_enriches_time_in_force_and_cumulative_quote` — fill events with empty time_in_force / 0 cumulative_quote are enriched from payload
+- `TestFillPriceFromBinancePayload` - Binance payload extraction (price, time_in_force, cumulative_quote_qty)
   - `test_empty_or_no_payload_returns_none`
   - `test_avg_price_extracted`, `test_fills_first_price_extracted`, `test_fill_price_extracted`
+  - `test_time_in_force_and_cumulative_quote_qty_extracted`, `test_enrichments_empty_payload`
 
 #### `oms/brokers/binance/tests/test_fills_listener.py`
-Fills listener parsing (mocked websocket).
+Fills listener parsing (mocked websocket). Fill events include **time_in_force** and **binance_cumulative_quote_qty** parsed from the execution report (Binance fields `f` and `Z`) when present.
 
 **Test Classes:**
 - `TestParseExecutionReport` - Execution report parsing
