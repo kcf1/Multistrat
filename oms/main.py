@@ -21,6 +21,7 @@ from oms.consumer import ensure_risk_approved_consumer_group
 from oms.redis_flow import make_fill_callback, process_one, process_one_cancel, process_many, process_many_cancel
 from oms.registry import AdapterRegistry
 from oms.storage.redis_order_store import RedisOrderStore
+from oms.repair import run_all_repairs
 from oms.sync import sync_one_order, sync_terminal_orders, DEFAULT_SYNC_INTERVAL_SECONDS
 
 # Use blocking Redis reads for event-driven behavior (wakes immediately on new messages)
@@ -246,6 +247,12 @@ def run_oms_loop(
                 logger.debug("OMS periodic sync: synced {} terminal order(s) to Postgres", count)
             except Exception as e:
                 logger.warning("sync_terminal_orders failed: {}", e)
+            try:
+                repaired = run_all_repairs(pg_connect)
+                if repaired:
+                    logger.debug("OMS periodic repair: updated {} order row(s)", repaired)
+            except Exception as e:
+                logger.warning("run_all_repairs failed: {}", e)
             last_sync_time = time.time()
         logger.debug("OMS loop iter {}: run_until check", iteration)
         if run_until is not None and run_until():
