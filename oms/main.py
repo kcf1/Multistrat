@@ -15,11 +15,16 @@ from redis import Redis
 
 from oms.log import logger
 
+from oms.account_flow import make_account_callback
+from oms.account_repair import run_all_account_repairs
+from oms.account_sync import get_account_pk_by_broker_and_id, sync_accounts_to_postgres, write_balance_change
+from oms.cleanup import set_account_key_ttl
 from oms.cancel_consumer import ensure_cancel_requested_consumer_group
 from oms.cleanup import trim_oms_streams
 from oms.consumer import ensure_risk_approved_consumer_group
-from oms.redis_flow import make_fill_callback, process_one, process_one_cancel, process_many, process_many_cancel
+from oms.redis_flow import make_fill_callback, process_many, process_many_cancel
 from oms.registry import AdapterRegistry
+from oms.storage.redis_account_store import RedisAccountStore
 from oms.storage.redis_order_store import RedisOrderStore
 from oms.repair import run_all_repairs
 from oms.sync import sync_one_order, sync_terminal_orders, DEFAULT_SYNC_INTERVAL_SECONDS
@@ -30,6 +35,8 @@ DEFAULT_BLOCK_MS = 100  # block up to 100ms waiting for messages (event-driven, 
 DEFAULT_POLL_SLEEP_SECONDS = 0.0  # not used when blocking; kept for backward compatibility
 DEFAULT_TRIM_EVERY_N = 200  # trim streams every N loop iterations (adjusted for faster wake-ups)
 DEFAULT_BATCH_SIZE = 50  # process up to N orders per batch (bulk processing, higher throughput)
+DEFAULT_ACCOUNT_REFRESH_INTERVAL_SECONDS = 60  # periodic REST get_account_snapshot
+DEFAULT_ACCOUNT_SYNC_INTERVAL_SECONDS = 60  # periodic sync_accounts_to_postgres (when pg_connect set)
 CONSUMER_GROUP = "oms"
 CONSUMER_NAME = "oms-1"
 
@@ -47,6 +54,11 @@ def get_redis() -> Redis:
 def get_store(redis: Redis) -> RedisOrderStore:
     """Build Redis order store."""
     return RedisOrderStore(redis)
+
+
+def get_account_store(redis: Redis) -> RedisAccountStore:
+    """Build account store (12.2.9)."""
+    return RedisAccountStore(redis)
 
 
 def get_registry() -> AdapterRegistry:
@@ -100,6 +112,72 @@ def stop_fill_listeners(registry: AdapterRegistry) -> None:
             adapter.stop_fill_listener()
 
 
+def start_account_listeners(
+    redis: Redis,
+    account_store: RedisAccountStore,
+    registry: AdapterRegistry,
+    on_account_updated: Optional[Callable[[str, str], None]] = None,
+    on_balance_change: Optional[
+        Callable[[str, str, str, Any, str, Any, Optional[dict]], None]
+    ] = None,
+) -> None:
+    """
+    Start account listener for each registered adapter that supports it (12.2.9).
+    Callback updates Redis account store and optionally triggers sync.
+    on_balance_change(broker, account_id, asset, delta, event_type, event_time, payload) is called
+    for balanceUpdate events so caller can write to balance_changes and set TTL.
+    """
+    account_cb = make_account_callback(
+        redis,
+        account_store,
+        on_account_updated=on_account_updated,
+        on_balance_change=on_balance_change,
+    )
+    for broker_name in registry.broker_names():
+        adapter = registry.get(broker_name)
+        if adapter and hasattr(adapter, "start_account_listener") and callable(getattr(adapter, "start_account_listener")):
+            adapter.start_account_listener(account_cb)
+
+
+def stop_account_listeners(registry: AdapterRegistry) -> None:
+    """Stop account listener on each registered adapter."""
+    for broker_name in registry.broker_names():
+        adapter = registry.get(broker_name)
+        if adapter and hasattr(adapter, "stop_account_listener") and callable(getattr(adapter, "stop_account_listener")):
+            adapter.stop_account_listener()
+
+
+def wait_for_account_listeners_connected(
+    registry: AdapterRegistry,
+    timeout_seconds: int = 30,
+    poll_interval_seconds: float = 0.2,
+) -> bool:
+    """
+    Wait until every adapter with an account listener reports stream_connected.
+    If no adapters have account listeners, returns True immediately.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        all_connected = True
+        any_listener = False
+        for broker_name in registry.broker_names():
+            adapter = registry.get(broker_name)
+            if not adapter or not hasattr(adapter, "_account_listener") or adapter._account_listener is None:
+                continue
+            any_listener = True
+            listener = adapter._account_listener
+            if hasattr(listener, "stream_connected") and not listener.stream_connected:
+                all_connected = False
+                break
+        if not any_listener or all_connected:
+            if any_listener:
+                logger.info("All account listeners connected")
+            return True
+        time.sleep(poll_interval_seconds)
+    logger.warning("Account listeners did not connect within {}s; proceeding anyway", timeout_seconds)
+    return False
+
+
 def wait_for_fill_listeners_connected(
     registry: AdapterRegistry,
     timeout_seconds: int = 30,
@@ -134,6 +212,7 @@ def run_oms_loop(
     store: RedisOrderStore,
     registry: AdapterRegistry,
     *,
+    account_store: Optional[RedisAccountStore] = None,
     block_ms: Optional[int] = None,
     poll_sleep_seconds: float = DEFAULT_POLL_SLEEP_SECONDS,
     trim_every_n: int = DEFAULT_TRIM_EVERY_N,
@@ -146,6 +225,9 @@ def run_oms_loop(
     pg_connect: Optional[Union[str, Callable[[], Any]]] = None,
     sync_interval_seconds: int = 0,
     sync_ttl_after_seconds: Optional[int] = None,
+    account_refresh_interval_seconds: int = 0,
+    account_sync_interval_seconds: int = 0,
+    account_sync_ttl_seconds: Optional[int] = None,
 ) -> int:
     """
     Run OMS main loop (12.1.11b): process_many (bulk), process_one_cancel, trim periodically.
@@ -173,6 +255,8 @@ def run_oms_loop(
     processed = 0
     iteration = 0
     last_sync_time = 0.0
+    last_account_refresh_time = 0.0
+    last_account_sync_time = 0.0
     while True:
         if stop_after_n is not None and processed >= stop_after_n:
             break
@@ -254,6 +338,56 @@ def run_oms_loop(
             except Exception as e:
                 logger.warning("run_all_repairs failed: {}", e)
             last_sync_time = time.time()
+
+        # Periodic account refresh: get_account_snapshot from each adapter and apply to Redis (12.2.9)
+        now = time.time()
+        if account_store and account_refresh_interval_seconds > 0 and (now - last_account_refresh_time) >= account_refresh_interval_seconds:
+            try:
+                for broker_name in registry.broker_names():
+                    adapter = registry.get(broker_name)
+                    if not adapter or not hasattr(adapter, "get_account_snapshot"):
+                        continue
+                    account_id = getattr(adapter, "_account_id", "default")
+                    try:
+                        snapshot = adapter.get_account_snapshot(account_id=account_id)
+                    except Exception as e:
+                        logger.warning("get_account_snapshot failed broker={} account_id={}: {}", broker_name, account_id, e)
+                        continue
+                    if not snapshot:
+                        continue
+                    account_store.apply_account_position(
+                        broker=snapshot.get("broker", broker_name),
+                        account_id=snapshot.get("account_id", account_id),
+                        balances=snapshot.get("balances", []),
+                        positions=snapshot.get("positions", []),
+                        updated_at=snapshot.get("updated_at"),
+                        payload=snapshot.get("payload"),
+                    )
+                logger.debug("OMS periodic account refresh done")
+            except Exception as e:
+                logger.warning("account refresh failed: {}", e)
+            last_account_refresh_time = now
+
+        # Periodic account sync to Postgres and account repairs (12.2.9)
+        if pg_connect and account_store and account_sync_interval_seconds > 0 and (now - last_account_sync_time) >= account_sync_interval_seconds:
+            try:
+                count = sync_accounts_to_postgres(
+                    redis,
+                    account_store,
+                    pg_connect,
+                    ttl_after_sync_seconds=account_sync_ttl_seconds,
+                )
+                logger.debug("OMS periodic account sync: synced {} account(s) to Postgres", count)
+            except Exception as e:
+                logger.warning("sync_accounts_to_postgres failed: {}", e)
+            try:
+                repaired = run_all_account_repairs(pg_connect)
+                if repaired:
+                    logger.debug("OMS periodic account repair: updated {} row(s)", repaired)
+            except Exception as e:
+                logger.warning("run_all_account_repairs failed: {}", e)
+            last_account_sync_time = now
+
         logger.debug("OMS loop iter {}: run_until check", iteration)
         if run_until is not None and run_until():
             logger.debug("OMS loop iter {}: shutdown requested, exiting", iteration)
@@ -270,6 +404,7 @@ def main() -> int:
     """
     redis = get_redis()
     store = get_store(redis)
+    account_store = get_account_store(redis)
     registry = get_registry()
 
     if not registry.broker_names():
@@ -292,6 +427,64 @@ def main() -> int:
     start_fill_listeners(redis, store, registry, on_terminal_sync=on_terminal_sync)
     logger.info("Fill listeners started for brokers={}", registry.broker_names())
     wait_for_fill_listeners_connected(registry)
+
+    # Wire on_balance_change when DATABASE_URL set: write balance_changes row and set TTL on account keys (only for balance change events)
+    account_ttl_after_balance_change = sync_ttl
+    try:
+        env_acc_ttl = os.environ.get("OMS_ACCOUNT_TTL_AFTER_BALANCE_CHANGE_SECONDS")
+        if env_acc_ttl is not None:
+            account_ttl_after_balance_change = int(env_acc_ttl)
+    except (TypeError, ValueError):
+        pass
+
+    def _on_balance_change(
+        broker: str,
+        account_id: str,
+        asset: str,
+        delta: Any,
+        event_type: str,
+        event_time: Any,
+        payload: Optional[dict],
+    ) -> None:
+        if not database_url:
+            return
+        account_pk = get_account_pk_by_broker_and_id(database_url, broker, account_id)
+        if account_pk is None:
+            return
+        try:
+            delta_val = float(delta) if delta is not None else 0.0
+            if delta_val > 0:
+                change_type = "deposit"
+            elif delta_val < 0:
+                change_type = "withdrawal"
+            else:
+                change_type = "adjustment"
+            write_balance_change(
+                database_url,
+                account_pk,
+                asset,
+                change_type,
+                delta or 0,
+                event_type or "balanceUpdate",
+                event_time,
+                payload=payload,
+            )
+        except Exception as e:
+            logger.exception("write_balance_change failed: {}", e)
+            return
+        try:
+            set_account_key_ttl(redis, broker, account_id, account_ttl_after_balance_change)
+        except Exception as e:
+            logger.warning("set_account_key_ttl after balance change failed: {}", e)
+
+    start_account_listeners(
+        redis,
+        account_store,
+        registry,
+        on_balance_change=_on_balance_change if database_url else None,
+    )
+    logger.info("Account listeners started for brokers={}", registry.broker_names())
+    wait_for_account_listeners_connected(registry)
 
     shutdown = [False]
 
@@ -334,11 +527,28 @@ def main() -> int:
     except (TypeError, ValueError):
         pass
 
+    account_refresh_interval = DEFAULT_ACCOUNT_REFRESH_INTERVAL_SECONDS
+    try:
+        env_refresh = os.environ.get("OMS_ACCOUNT_REFRESH_INTERVAL_SECONDS")
+        if env_refresh is not None:
+            account_refresh_interval = int(env_refresh)
+    except (TypeError, ValueError):
+        pass
+
+    account_sync_interval = DEFAULT_ACCOUNT_SYNC_INTERVAL_SECONDS
+    try:
+        env_acc_sync = os.environ.get("OMS_ACCOUNT_SYNC_INTERVAL_SECONDS")
+        if env_acc_sync is not None:
+            account_sync_interval = int(env_acc_sync)
+    except (TypeError, ValueError):
+        pass
+
     try:
         run_oms_loop(
             redis,
             store,
             registry,
+            account_store=account_store,
             block_ms=block_ms,
             poll_sleep_seconds=poll_sleep,
             batch_size=batch_size,
@@ -348,10 +558,14 @@ def main() -> int:
             pg_connect=database_url if database_url else None,
             sync_interval_seconds=sync_interval_seconds if database_url else 0,
             sync_ttl_after_seconds=sync_ttl,
+            account_refresh_interval_seconds=account_refresh_interval,
+            account_sync_interval_seconds=account_sync_interval if database_url else 0,
+            account_sync_ttl_seconds=None,  # No default TTL for account keys; optional env override could be added
         )
     except KeyboardInterrupt:
         pass
     finally:
+        stop_account_listeners(registry)
         stop_fill_listeners(registry)
         logger.info("OMS shutdown complete")
 

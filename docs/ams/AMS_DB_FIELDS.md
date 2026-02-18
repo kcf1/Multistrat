@@ -51,23 +51,9 @@ Redis key: `account:{broker}:{account_id}:positions` (hash: field = symbol or sy
 
 ---
 
-## 4. margin_snapshots (optional)
+## 4. Sync and repair flow
 
-| Column             | Source | Injected when |
-|--------------------|--------|----------------|
-| **id**             | Internal (PK) | Surrogate. |
-| **account_id**     | FK → accounts | From Redis account key. |
-| **total_margin**   | Broker REST   | Futures account total margin. |
-| **available_balance** | Broker REST | Available balance for margin. |
-| **timestamp**      | AMS           | Snapshot time. |
-
-Filled by AMS from periodic REST (e.g. get_futures_account) when broker supports margin; optional for spot-only.
-
----
-
-## 5. Sync and repair flow
-
-- **Sync:** OMS `account_sync.py` reads from Redis account store and writes to Postgres `accounts`, `balances` (and optionally `margin_snapshots`). No `positions` table in OMS (positions in Redis only). Trigger: optional on account update; periodic sync.
+- **Sync:** OMS `account_sync.py` reads from Redis account store and writes to Postgres `accounts`, `balances`. No `positions` or `margin_snapshots` table in OMS (positions in Redis only; `margin_snapshots` was dropped in revision f6a7b8c9d0e1). Trigger: periodic sync. **Balance changes:** Main wires `on_balance_change` when `DATABASE_URL` is set; on each `balanceUpdate` event the callback writes to `balance_changes` and sets TTL on Redis account keys (TTL is not set after periodic sync).
 - **Repairs:** `ams/repair.py` — `run_all_repairs(pg_connect)` runs after sync. Fixes flawed numeric/empty fields for `broker = 'binance'` (or other brokers) by recovering from `payload` / raw broker blob stored in Redis or in an optional payload column on accounts/balances/positions.
 
 All columns above are written from Redis to Postgres by AMS sync. Redis is populated by the account event callback (stream) and by periodic REST refresh.

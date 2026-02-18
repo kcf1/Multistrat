@@ -2,7 +2,7 @@
 Unit tests for account Postgres schema (task 12.2.6).
 
 Verifies schema creation and indexes for accounts, balances,
-balance_changes, margin_snapshots (positions table removed for PMS). Runs Alembic upgrade/downgrade when
+balance_changes (positions and margin_snapshots removed). Runs Alembic upgrade/downgrade when
 DATABASE_URL is set and Postgres is reachable; otherwise skipped.
 """
 
@@ -96,7 +96,6 @@ ACCOUNT_TABLES = (
     "accounts",
     "balances",
     "balance_changes",
-    "margin_snapshots",
 )
 
 ACCOUNT_INDEXES = (
@@ -107,8 +106,6 @@ ACCOUNT_INDEXES = (
     "ix_balance_changes_account_id_asset_event_time",
     "ix_balance_changes_account_id_change_type",
     "ix_balance_changes_event_time",
-    "ix_margin_snapshots_account_id",
-    "ix_margin_snapshots_timestamp",
 )
 
 

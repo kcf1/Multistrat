@@ -8,5 +8,5 @@ $RepoRoot = Split-Path -Parent $ScriptDir
 Set-Location $RepoRoot
 
 docker compose exec redis redis-cli FLUSHALL
-docker compose exec postgres psql -U multistrat -d multistrat -c "TRUNCATE TABLE orders, accounts, balances, balance_changes, margin_snapshots RESTART IDENTITY CASCADE;"
+docker compose exec postgres psql -U multistrat -d multistrat -c "TRUNCATE TABLE orders, accounts, balances, balance_changes RESTART IDENTITY CASCADE;"
 Write-Host "Done."

@@ -1,13 +1,17 @@
 """
-Integration test: trigger Binance testnet through Redis (risk_approved) and assert response from Redis (oms_fills).
+E2E code-level tests: trigger Binance testnet via Redis and assert order/account flows.
 
 Requires:
   RUN_BINANCE_TESTNET=1
   BINANCE_API_KEY, BINANCE_API_SECRET (testnet)
   REDIS_URL (e.g. redis://localhost:6379)
+  DATABASE_URL (optional; required for Postgres sync tests)
 
-Flow: XADD risk_approved -> OMS process_one (stage, place_order, update_status) -> fill listener
-      callback updates store and XADD oms_fills -> test reads oms_fills and asserts.
+Order-flow: XADD risk_approved -> OMS process_one (stage, place_order, update_status) -> fill listener
+           callback updates store and XADD oms_fills -> test reads oms_fills and asserts.
+
+Account-flow: get_account_snapshot (testnet REST) -> apply to Redis account store -> optional
+              sync_accounts_to_postgres -> assert Redis and/or Postgres accounts/balances.
 """
 
 import os
@@ -93,6 +97,11 @@ class TestOmsRedisTestnet:
         return RedisOrderStore(redis_client)
 
     @pytest.fixture
+    def account_store(self, redis_client):
+        from oms.storage.redis_account_store import RedisAccountStore
+        return RedisAccountStore(redis_client)
+
+    @pytest.fixture
     def adapter(self):
         from oms.brokers.binance.api_client import BinanceAPIClient
         from oms.brokers.binance.adapter import BinanceBrokerAdapter
@@ -168,8 +177,21 @@ class TestOmsRedisTestnet:
             raise
 
         assert fills_entries, "No message on oms_fills stream (timeout)"
-        # Last entry is most recent; we may have one fill
-        _eid, fields = fills_entries[-1]
+        # Find our order's fill (stream may contain fills from other tests / account events)
+        our_broker_order_id = result.get("broker_order_id")
+        match = None
+        for _eid, f in fills_entries:
+            if f.get("order_id") == order_id and f.get("broker_order_id") == our_broker_order_id:
+                match = (_eid, f)
+                break
+        if match is None:
+            # Fallback: any fill for our order_id
+            for _eid, f in fills_entries:
+                if f.get("order_id") == order_id:
+                    match = (_eid, f)
+                    break
+        assert match is not None, f"No fill for order_id={order_id} broker_order_id={our_broker_order_id} in {len(fills_entries)} entries"
+        _eid, fields = match
         event_type = fields.get("event_type", "")
         assert event_type in ("fill", "reject"), f"Expected fill or reject, got {event_type}"
         assert fields.get("order_id") == order_id
@@ -469,7 +491,10 @@ class TestOmsRedisTestnet:
             raise
 
         assert entries, "No message on oms_fills (timeout)"
-        _eid, fields = entries[-1]
+        # Find our order's fill (stream may contain fills from other tests)
+        match = next(((eid, f) for eid, f in entries if f.get("order_id") == order_id), None)
+        assert match is not None, f"No fill for order_id={order_id} in {len(entries)} entries"
+        _eid, fields = match
         assert fields.get("order_id") == order_id
 
         # Ensure any terminal order is synced (callback may have run; periodic catch-up)
@@ -609,3 +634,207 @@ class TestOmsRedisTestnet:
         assert row[3] == "BUY"
         assert row[4] == "main_loop_pipeline"
         assert "main loop" in (row[5] or "")
+
+    @skip_unless_testnet
+    @skip_unless_redis
+    @pytest.mark.skipif(not _redis_available(), reason="Redis not reachable at REDIS_URL")
+    def test_account_refresh_e2e(self, redis_client, account_store, adapter):
+        """E2E account-flow: get_account_snapshot (Binance testnet) -> apply to Redis account store; assert store has account and balances."""
+        account_id = getattr(adapter, "_account_id", "default")
+        snapshot = adapter.get_account_snapshot(account_id=account_id)
+        assert snapshot is not None
+        assert "broker" in snapshot
+        assert "account_id" in snapshot
+        assert "balances" in snapshot
+
+        account_store.apply_account_position(
+            broker=snapshot.get("broker", "binance"),
+            account_id=snapshot.get("account_id", account_id),
+            balances=snapshot.get("balances", []),
+            positions=snapshot.get("positions", []),
+            updated_at=snapshot.get("updated_at"),
+            payload=snapshot.get("payload"),
+        )
+
+        account = account_store.get_account(snapshot["broker"], snapshot["account_id"])
+        assert account is not None
+        assert account.get("broker") == snapshot["broker"]
+        assert account.get("account_id") == snapshot["account_id"]
+
+        balances = account_store.get_balances(snapshot["broker"], snapshot["account_id"])
+        assert isinstance(balances, list)
+        # Testnet account should have at least one balance (e.g. USDT or BNB)
+        assert len(balances) >= 1
+        for b in balances:
+            assert "asset" in b
+            assert "available" in b
+
+    @skip_unless_testnet
+    @skip_unless_redis
+    @skip_unless_database
+    @pytest.mark.skipif(not _redis_available(), reason="Redis not reachable at REDIS_URL")
+    @pytest.mark.skipif(not _pg_available(), reason="Postgres not reachable at DATABASE_URL")
+    def test_account_sync_to_postgres_e2e(self, redis_client, account_store, adapter):
+        """E2E account-flow: get_account_snapshot -> apply to Redis -> sync_accounts_to_postgres -> assert Postgres accounts and balances."""
+        from oms.account_sync import sync_accounts_to_postgres
+
+        account_id = getattr(adapter, "_account_id", "default")
+        snapshot = adapter.get_account_snapshot(account_id=account_id)
+        assert snapshot is not None
+
+        account_store.apply_account_position(
+            broker=snapshot.get("broker", "binance"),
+            account_id=snapshot.get("account_id", account_id),
+            balances=snapshot.get("balances", []),
+            positions=snapshot.get("positions", []),
+            updated_at=snapshot.get("updated_at"),
+            payload=snapshot.get("payload"),
+        )
+
+        count = sync_accounts_to_postgres(
+            redis_client,
+            account_store,
+            DATABASE_URL,
+            ttl_after_sync_seconds=None,
+        )
+        assert count >= 1
+
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, broker, account_id FROM accounts WHERE broker = %s AND account_id = %s",
+                (snapshot["broker"], snapshot["account_id"]),
+            )
+            acc_rows = cur.fetchall()
+            assert len(acc_rows) >= 1, "Expected at least one account row in Postgres"
+            account_pk = acc_rows[0][0]
+
+            cur.execute(
+                "SELECT asset, available, locked FROM balances WHERE account_id = %s",
+                (account_pk,),
+            )
+            bal_rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        assert len(bal_rows) >= 1, "Expected at least one balance row in Postgres"
+        assets = [r[0] for r in bal_rows]
+        assert any(a for a in assets), "At least one balance should have an asset"
+
+    @skip_unless_testnet
+    @skip_unless_redis
+    @pytest.mark.skipif(not _redis_available(), reason="Redis not reachable at REDIS_URL")
+    def test_order_fill_matches_balance_change_e2e(self, redis_client, store, account_store, adapter):
+        """E2E: place MARKET BUY -> wait for fill -> get snapshot after -> assert base asset balance increased by executed_qty."""
+        from oms.schemas import OMS_FILLS_STREAM, RISK_APPROVED_STREAM
+        from oms.redis_flow import make_fill_callback, process_one_risk_approved
+        from oms.streams import add_message, read_latest
+
+        def _balance_by_asset(balances, asset):
+            for b in balances:
+                if (b.get("asset") or "").strip() == asset:
+                    return float(b.get("available") or 0) + float(b.get("locked") or 0)
+            return 0.0
+
+        account_id = getattr(adapter, "_account_id", "default")
+        broker = "binance"
+        symbol = "BTCUSDT"
+        base_asset = "BTC"
+        quote_asset = "USDT"
+        quantity = 0.0001
+
+        # 1. Snapshot before
+        snapshot_before = adapter.get_account_snapshot(account_id=account_id)
+        assert snapshot_before is not None
+        account_store.apply_account_position(
+            broker=broker,
+            account_id=account_id,
+            balances=snapshot_before.get("balances", []),
+            positions=snapshot_before.get("positions", []),
+            updated_at=snapshot_before.get("updated_at"),
+            payload=snapshot_before.get("payload"),
+        )
+        balances_before = account_store.get_balances(broker, account_id)
+        btc_before = _balance_by_asset(balances_before, base_asset)
+        usdt_before = _balance_by_asset(balances_before, quote_asset)
+
+        # 2. Place order and wait for fill
+        redis_client.delete(RISK_APPROVED_STREAM)
+        redis_client.delete(OMS_FILLS_STREAM)
+        order_id = f"balance-e2e-{int(time.time() * 1000)}"
+        risk_order = {
+            "order_id": order_id,
+            "broker": broker,
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": quantity,
+            "order_type": "MARKET",
+            "book": "balance_e2e",
+            "comment": "order balance match e2e",
+        }
+        fill_cb = make_fill_callback(redis_client, store)
+        adapter.start_fill_listener(fill_cb)
+        for _ in range(125):
+            time.sleep(0.2)
+            if adapter._listener and getattr(adapter._listener, "stream_connected", False):
+                break
+        if not adapter._listener or not getattr(adapter._listener, "stream_connected", False):
+            adapter.stop_fill_listener()
+            pytest.skip("Fill listener WebSocket did not connect within 25s")
+
+        try:
+            add_message(redis_client, RISK_APPROVED_STREAM, risk_order)
+            result = process_one_risk_approved(redis_client, store, lambda b: adapter if b == broker else None)
+            assert result is not None
+            if result.get("rejected"):
+                adapter.stop_fill_listener()
+                pytest.skip(f"Order rejected: {result.get('reject_reason', '')}")
+
+            for _ in range(150):
+                time.sleep(0.1)
+                order = store.get_order(order_id)
+                if order and order.get("status") == "filled":
+                    break
+                entries = read_latest(redis_client, OMS_FILLS_STREAM, count=5)
+                if any((e[1].get("order_id") == order_id and e[1].get("event_type") == "fill") for e in entries):
+                    break
+        finally:
+            adapter.stop_fill_listener()
+
+        order = store.get_order(order_id)
+        assert order is not None, "Order not in store"
+        if order.get("status") != "filled":
+            pytest.skip(f"Order did not fill (status={order.get('status')})")
+        executed_qty = float(order.get("executed_qty") or 0)
+        assert executed_qty > 0, "Fill should have positive executed_qty"
+
+        # 3. Snapshot after (REST reflects post-fill balances)
+        time.sleep(0.5)
+        snapshot_after = adapter.get_account_snapshot(account_id=account_id)
+        assert snapshot_after is not None
+        account_store.apply_account_position(
+            broker=broker,
+            account_id=account_id,
+            balances=snapshot_after.get("balances", []),
+            positions=snapshot_after.get("positions", []),
+            updated_at=snapshot_after.get("updated_at"),
+            payload=snapshot_after.get("payload"),
+        )
+        balances_after = account_store.get_balances(broker, account_id)
+        btc_after = _balance_by_asset(balances_after, base_asset)
+        usdt_after = _balance_by_asset(balances_after, quote_asset)
+
+        # 4. Assert: base asset increased by at least executed_qty (tolerance for rounding)
+        tolerance = max(1e-8, executed_qty * 0.001)
+        btc_delta = btc_after - btc_before
+        assert btc_delta >= executed_qty - tolerance, (
+            f"BTC balance should increase by ~executed_qty: before={btc_before} after={btc_after} "
+            f"delta={btc_delta} executed_qty={executed_qty}"
+        )
+        # Quote asset (USDT) should decrease after a BUY (we spent USDT). Allow small tolerance for testnet credits.
+        usdt_delta = usdt_after - usdt_before
+        assert usdt_delta <= 0.01, (
+            f"USDT should not increase significantly after BUY (we spent it): before={usdt_before} after={usdt_after} delta={usdt_delta}"
+        )

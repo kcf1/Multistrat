@@ -7,7 +7,7 @@
 | Doc | Description |
 |-----|-------------|
 | [AMS_ARCHITECTURE.md](./AMS_ARCHITECTURE.md) | Data flow, Redis key layout, broker adapter (account interface), main loop, sync, repairs, cleanup, config, file map. |
-| [AMS_DB_FIELDS.md](./AMS_DB_FIELDS.md)   | Postgres column sources for `accounts`, `balances`, `margin_snapshots` (from Redis / broker stream / REST). OMS has no `positions` table (positions in Redis only). |
+| [AMS_DB_FIELDS.md](./AMS_DB_FIELDS.md)   | Postgres column sources for `accounts`, `balances`, `balance_changes` (from Redis / broker stream / REST). OMS has no `positions` or `margin_snapshots` table (positions in Redis only; margin_snapshots dropped). |
 
 ## Integration
 

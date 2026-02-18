@@ -197,7 +197,7 @@ Postgres order repairs: Binance payload recovery (price, time_in_force, binance_
   - `test_run_all_repairs_calls_each`
 
 #### `oms/tests/test_cleanup.py`
-Stream trimming and TTL management.
+Stream trimming and TTL management (order-flow and account-flow).
 
 **Test Classes:**
 - `TestTrimOmsStreams` - Stream trimming
@@ -206,10 +206,41 @@ Stream trimming and TTL management.
   - `test_trims_both_streams`
   - `test_trims_respects_maxlen`
 
-- `TestSetOrderKeyTtl` - TTL management
+- `TestSetOrderKeyTtl` - Order key TTL (order-flow)
   - `test_sets_ttl_on_order_key`
   - `test_sets_ttl_returns_false_when_key_missing`
   - `test_sets_ttl_with_custom_seconds`
+
+- `TestSetAccountKeyTtl` - Account key TTL (account-flow, task 12.2.10)
+  - `test_set_account_key_ttl_sets_expire_on_all_keys`
+  - `test_set_account_key_ttl_skips_missing_keys`
+  - `test_set_account_key_ttl_skips_keys_already_with_ttl`
+
+#### OMS Account-Flow Unit Tests
+
+#### `oms/tests/test_redis_account_store.py`
+Redis account store (task 12.2.4): balances and positions CRUD, broker index.
+
+**Test Classes:** `TestApplyAccountPosition`, `TestApplyBalanceUpdate`, `TestGetAccount`, `TestGetBalances`, `TestGetPositions`, `TestGetAccountIdsByBroker`, and others.
+
+#### `oms/tests/test_account_flow.py`
+Account event callback (task 12.2.5): validation, store updates, idempotency.
+
+**Test Classes:** `TestMakeAccountCallbackValidation`, `TestMakeAccountCallbackStoreUpdates`, `TestMakeAccountCallbackIdempotency`, `TestMakeAccountCallbackBalanceUpdate`, and others.
+
+#### `oms/tests/test_account_sync.py`
+OMS → Postgres account sync (task 12.2.7): mapping, UPSERT accounts/balances, balance cleanup, `write_balance_change`, `get_account_pk_by_broker_and_id`. Uses fakeredis and mock Postgres.
+
+#### `oms/tests/test_account_repair.py`
+Account repairs (task 12.2.8): `run_all_account_repairs` (dummy implementation; payload-based recovery can follow).
+
+#### `oms/tests/test_account_schema.py`
+Account Postgres schema (task 12.2.6): Alembic revisions and table layout (optional DB; some tests skipped without DB).
+
+#### `oms/brokers/binance/tests/test_account_listener.py`
+Binance account listener (task 12.2.2): parse_account_event for `outboundAccountPosition` and `balanceUpdate`, listener lifecycle.
+
+**Test Classes:** `TestParseAccountEvent`, `TestBinanceAccountListener`, etc.
 
 #### `oms/tests/test_cancel_consumer.py`
 Cancel command parsing and consumption.
@@ -307,9 +338,9 @@ Fills listener parsing (mocked websocket). Fill events include **time_in_force**
 ### OMS Integration Tests
 
 #### `oms/tests/test_oms_integration.py`
-Full OMS flow with fakeredis and mock adapters.
+Full OMS flow with fakeredis and mock adapters. Covers **order-flow** (tasks 12.1.x) and **account-flow** (tasks 12.2.9).
 
-**Test Functions:**
+**Order-flow tests:**
 - `test_oms_integration_consumer_store_registry_producer` ⭐
   - Full flow: XADD `risk_approved` → process_one → order in store, reject on `oms_fills`
 
@@ -352,12 +383,15 @@ Full OMS flow with fakeredis and mock adapters.
 - `test_oms_main_loop_integration` ⭐
   - Main loop with fakeredis + mock adapter; inject one message; assert order in store and `oms_fills`
 
-**Order Types Tested:**
-- ⭐ MARKET orders
-- ⭐ LIMIT orders
-- Cancellations
-- Partial fills
-- Error scenarios
+**Account-flow tests (12.2.9):**
+- `test_oms_bootstrap_starts_account_listeners` — start_account_listeners starts listener for adapters that support it
+- `test_oms_bootstrap_skips_adapter_without_account_listener` — adapters without account listener are skipped
+- `test_oms_wait_for_account_listeners_connected_no_listeners` — returns True when no adapter has account listener
+- `test_oms_wait_for_account_listeners_connected_all_connected` — returns True when all listeners report stream_connected
+- `test_oms_account_callback_updates_store` — make_account_callback with account_position event updates account store
+- `test_oms_main_loop_integration_with_account_refresh` — run_oms_loop with account_store runs periodic get_account_snapshot and apply_account_position; snapshot appears in store
+
+**Order types tested:** ⭐ MARKET, ⭐ LIMIT, cancellations, partial fills, error scenarios.
 
 ---
 
@@ -417,12 +451,18 @@ Real Redis + Binance testnet, OMS code imported.
   - Validates: Main loop integration
   - Requires: `DATABASE_URL`
 
-**Order Types Tested:**
-- ⭐ MARKET orders
-- ⭐ LIMIT orders
-- Cancellations
-- Error scenarios
-- Postgres sync
+**Account-flow E2E (code-level):**
+- `test_account_refresh_e2e`
+  - get_account_snapshot (Binance testnet REST) → apply to Redis account store → assert account and balances in Redis
+  - Requires: `RUN_BINANCE_TESTNET=1`, `REDIS_URL`
+- `test_account_sync_to_postgres_e2e`
+  - get_account_snapshot → apply to Redis → sync_accounts_to_postgres → assert Postgres `accounts` and `balances` rows
+  - Requires: `RUN_BINANCE_TESTNET=1`, `REDIS_URL`, `DATABASE_URL`
+- `test_order_fill_matches_balance_change_e2e`
+  - Place MARKET BUY (BTCUSDT) → wait for fill → snapshot before/after → assert base asset (BTC) balance increased by `executed_qty` and quote (USDT) did not increase (order matched to balance change)
+  - Requires: `RUN_BINANCE_TESTNET=1`, `REDIS_URL`
+
+**Order Types Tested:** ⭐ MARKET, ⭐ LIMIT, cancellations, error scenarios, Postgres sync.
 
 ### Binance Testnet Tests
 
@@ -467,9 +507,13 @@ Direct Binance testnet API tests (no OMS integration).
 # Start services first
 docker compose up -d oms booking
 
-# Run script
+# Run single-order pipeline test
 python scripts/full_pipeline_test.py --market  # MARKET order
 python scripts/full_pipeline_test.py           # LIMIT order (default)
+
+# Run bulk order test (10 orders × 3 runs, with account-flow check)
+python scripts/bulk_order_test.py --market --count 10 --runs 3
+python scripts/bulk_order_test.py --count 10 --runs 3
 ```
 
 ### Service-Level E2E Scripts
@@ -480,22 +524,55 @@ Service-level E2E script for black-box testing.
 **Features:**
 - Supports `--market` flag for MARKET orders
 - Default LIMIT order flow (place → cancel)
-- Checks downstreams: `oms_fills` stream, Redis order store, Postgres `orders` table
+- Checks downstreams: `oms_fills` stream, Redis order store
+- **Account-flow:** Polls Redis account store (OMS periodic refresh) and optionally Postgres `accounts`/`balances`; use `--no-account` to skip
 
 **What it validates:**
 1. Order injection → `risk_approved` stream
 2. OMS processes order (running service)
 3. Order appears in Redis store
 4. Fill/reject appears in `oms_fills` stream
-5. Order synced to Postgres `orders` table (if `DATABASE_URL` set)
+5. **Account-flow:** Within 90s, Redis account store has at least one account and balance; if MARKET, BTC in balances. If `DATABASE_URL` set, Postgres has at least one account row and one balance row.
 
-**Order Types:**
-- MARKET orders (`--market` flag)
-- LIMIT orders (default)
+**Order Types:** MARKET (`--market`), LIMIT (default).
+
+**Options:** `--no-account` — skip account-flow verification.
 
 **Output:**
 - Prints status of each validation step
 - Returns exit code 0 on success, 1 on failure
+
+#### `scripts/bulk_order_test.py`
+Service-level E2E script for **bulk** order injection and timing.
+
+**Features:**
+- Injects **multiple orders** per run (`--count N`, default 10)
+- Runs multiple test runs and averages timing (`--runs M`, default 3)
+- Supports `--market` (MARKET orders, fill immediately) or default LIMIT (place only)
+- Checks downstreams: Redis order store, `oms_fills` stream
+- **Account-flow:** After each run, polls Redis account store (and optionally Postgres `accounts`/`balances`); use `--no-account` to skip
+
+**What it validates:**
+1. Inject N orders to `risk_approved` (and for LIMIT, no cancel in bulk script)
+2. OMS processes all orders (running service)
+3. Each order appears in Redis store and has fill (MARKET) or place (LIMIT) outcome on `oms_fills`
+4. **Account-flow:** Within 90s, Redis account store has account and balances; if MARKET, BTC in balances. If `DATABASE_URL` set, Postgres has account and balance rows.
+
+**Order types:** MARKET (`--market`), LIMIT (default).
+
+**Options:** `--count N`, `--runs M`, `--verbose`, `--no-account`.
+
+**Output:**
+- Per-order timing (total, detection, processing) and aggregate stats (avg, min, max, std dev)
+- Throughput (orders/second) when `--runs` > 1
+- Exit code 0 if all orders and all account-flow checks pass, 1 otherwise
+
+**Examples:**
+```bash
+python scripts/bulk_order_test.py --market --count 10 --runs 3
+python scripts/bulk_order_test.py --count 10 --runs 3 --verbose
+python scripts/bulk_order_test.py --no-account --count 5 --runs 1
+```
 
 ---
 
@@ -528,8 +605,11 @@ pytest oms/tests/test_consumer.py -v
 ### Run Integration Tests
 
 ```bash
-# Run integration tests (fakeredis)
+# Run integration tests (fakeredis) — order-flow and account-flow
 pytest oms/tests/test_oms_integration.py -v
+
+# Account-flow integration tests only
+pytest oms/tests/test_oms_integration.py -v -k "account or bootstrap_starts_account or wait_for_account or account_callback or account_refresh"
 ```
 
 ### Run E2E Code-Level Tests
@@ -551,9 +631,12 @@ pytest oms/brokers/binance/tests/test_testnet.py -v
 # Start services first
 docker compose up -d oms booking
 
-# Run script
+# Single-order pipeline test
 python scripts/full_pipeline_test.py --market
 python scripts/full_pipeline_test.py
+# Bulk order test (10 orders × 3 runs, order-flow + account-flow)
+python scripts/bulk_order_test.py --market --count 10 --runs 3
+python scripts/bulk_order_test.py --count 10 --runs 3
 ```
 
 ### Run Tests by Category
@@ -562,7 +645,10 @@ python scripts/full_pipeline_test.py
 # Unit tests only
 pytest oms/tests/test_consumer.py oms/tests/test_producer.py oms/tests/test_registry.py -v
 
-# Integration tests only
+# Account-flow unit tests (store, sync, repair, flow, cleanup TTL)
+pytest oms/tests/test_redis_account_store.py oms/tests/test_account_sync.py oms/tests/test_account_repair.py oms/tests/test_account_flow.py oms/tests/test_cleanup.py -v -k "account or Account"
+
+# Integration tests only (order-flow + account-flow)
 pytest oms/tests/test_oms_integration.py -v
 
 # E2E tests only (requires setup)
@@ -588,8 +674,8 @@ pytest -k "limit or LIMIT" -v
 
 | Order Type | Unit Tests | Integration Tests | E2E Code-Level | E2E Service-Level |
 |------------|------------|------------------|----------------|-------------------|
-| **MARKET** | ✅ `test_api_client.py` | ✅ `test_oms_integration.py` | ✅ `test_oms_redis_testnet.py` | ✅ `full_pipeline_test.py` |
-| **LIMIT** | ✅ `test_api_client.py` | ✅ `test_oms_integration.py` | ✅ `test_oms_redis_testnet.py` | ✅ `full_pipeline_test.py` |
+| **MARKET** | ✅ `test_api_client.py` | ✅ `test_oms_integration.py` | ✅ `test_oms_redis_testnet.py` | ✅ `full_pipeline_test.py`, `bulk_order_test.py` |
+| **LIMIT** | ✅ `test_api_client.py` | ✅ `test_oms_integration.py` | ✅ `test_oms_redis_testnet.py` | ✅ `full_pipeline_test.py`, `bulk_order_test.py` |
 
 ### Component Coverage
 
@@ -600,10 +686,15 @@ pytest -k "limit or LIMIT" -v
 | **Redis Consumer** | ✅ Complete | ✅ Integration | ✅ E2E |
 | **Redis Producer** | ✅ Complete | ✅ Integration | ✅ E2E |
 | **Redis Order Store** | ✅ Complete | ✅ Integration | ✅ E2E |
-| **OMS Integration** | - | ✅ Complete | ✅ E2E |
-| **Postgres Sync** | ✅ Complete | - | ✅ E2E |
+| **OMS Integration (order-flow)** | - | ✅ Complete | ✅ E2E |
+| **OMS Integration (account-flow)** | - | ✅ Complete | ✅ E2E |
+| **Postgres Sync (orders)** | ✅ Complete | - | ✅ E2E |
+| **Postgres Sync (accounts)** | ✅ Complete | - | ✅ E2E |
 | **Cancel Flow** | ✅ Complete | ✅ Integration | ✅ E2E |
 | **Error Handling** | ✅ Complete | ✅ Integration | ✅ E2E |
+| **Redis Account Store** | ✅ Complete | ✅ Integration | - |
+| **Account Listener (Binance)** | ✅ Complete | ✅ Integration | - |
+| **Account Repair** | ✅ (dummy) | - | - |
 
 ### Flow Coverage
 
@@ -616,6 +707,30 @@ pytest -k "limit or LIMIT" -v
 | Error handling | ✅ | ✅ | ✅ | - |
 | Postgres sync | ✅ | - | ✅ | ✅ |
 | Consumer groups | ✅ | ✅ | ✅ | - |
+| Account listeners / callback | ✅ | ✅ | - | - |
+| Account store (Redis) | ✅ | ✅ | ✅ | ✅ |
+| Account refresh (periodic snapshot) | - | ✅ | ✅ | ✅ |
+| Account sync to Postgres | ✅ | - | ✅ | ✅ |
+| Account repair | ✅ (dummy) | - | - | - |
+| Account key TTL | ✅ | - | - | - |
+
+### Order-flow vs account-flow
+
+What is implemented and tested for **orders** vs **accounts**:
+
+| Area | Order-flow | Account-flow |
+|------|------------|--------------|
+| **Redis store** | `RedisOrderStore` — unit, integration, E2E | `RedisAccountStore` — unit, integration, E2E |
+| **Postgres sync** | `sync_one_order`, `sync_terminal_orders` — unit, E2E | `sync_accounts_to_postgres` — unit, E2E |
+| **Repair** | `run_all_repairs` (payload recovery) — unit, E2E | `run_all_account_repairs` (dummy) — unit only |
+| **TTL after sync** | `set_order_key_ttl` — unit (order sync) | `set_account_key_ttl` — unit (only on balance change events, not after periodic sync) |
+| **Listener** | Fill listener — unit (adapter, fills_listener), integration, E2E | Account listener — unit (Binance account_listener), integration |
+| **Main loop** | process_many, process_one_cancel, trim, order sync, repair — integration, E2E | start/wait/stop account listeners, periodic refresh, periodic account sync+repair — integration only |
+| **E2E code-level** | test_oms_redis_testnet (Redis + testnet + optional Postgres) | test_oms_redis_testnet: test_account_refresh_e2e, test_account_sync_to_postgres_e2e |
+| **E2E service-level** | full_pipeline_test.py, bulk_order_test.py (orders, oms_fills) | full_pipeline_test.py, bulk_order_test.py (Redis account store + optional Postgres); use `--no-account` to skip |
+
+**Remaining gaps (account-flow):**
+- **Account repair:** Dummy implementation only; no payload-based recovery tests.
 
 **Consumer Groups Flow Explained:**
 

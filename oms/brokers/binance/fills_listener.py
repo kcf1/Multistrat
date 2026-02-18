@@ -171,7 +171,7 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             fill_event = FillEvent(
                 event_type="fill",
                 order_id=binance_event.c or "",
-                broker_order_id=str(binance_event.i) if binance_event.i else "",
+                broker_order_id=str(binance_event.i) if binance_event.i is not None else "",
                 symbol=binance_event.s or "",
                 side=binance_event.S or "",
                 quantity=qty,
@@ -205,7 +205,7 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             reject_event = RejectEvent(
                 event_type="reject",
                 order_id=binance_event.c or "",
-                broker_order_id=str(binance_event.i) if binance_event.i else "",
+                broker_order_id=str(binance_event.i) if binance_event.i is not None else "",
                 symbol=binance_event.s or "",
                 side=binance_event.S or "",
                 quantity=qty,
@@ -233,7 +233,7 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             cancelled_event = CancelledEvent(
                 event_type="cancelled",
                 order_id=binance_event.c or "",
-                broker_order_id=str(binance_event.i) if binance_event.i else "",
+                broker_order_id=str(binance_event.i) if binance_event.i is not None else "",
                 symbol=binance_event.s or "",
                 side=binance_event.S or "",
                 quantity=qty,
@@ -261,7 +261,7 @@ def parse_execution_report(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             expired_event = ExpiredEvent(
                 event_type="expired",
                 order_id=binance_event.c or "",
-                broker_order_id=str(binance_event.i) if binance_event.i else "",
+                broker_order_id=str(binance_event.i) if binance_event.i is not None else "",
                 symbol=binance_event.s or "",
                 side=binance_event.S or "",
                 quantity=qty,

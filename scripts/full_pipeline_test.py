@@ -2,18 +2,21 @@
 """
 Full pipeline test: inject one order to Redis (risk_approved), then poll until
 the OMS service (e.g. in Docker) processes it and check downstreams (oms_fills
-stream, Redis order store, Postgres orders table).
+stream, Redis order store, Postgres orders table). Also verifies account-flow:
+Redis account store and optional Postgres accounts/balances after OMS periodic
+refresh/sync.
 
 Requires: REDIS_URL. Optional: DATABASE_URL for Postgres check.
 OMS must be running separately (e.g. docker compose up -d oms) with testnet config.
 
 Usage:
-    python scripts/full_pipeline_test.py [--market] [--runs N] [--verbose]
+    python scripts/full_pipeline_test.py [--market] [--runs N] [--verbose] [--no-account]
     
 Options:
     --market: inject MARKET order (fills immediately); default: LIMIT (unfillable) + cancel
     --runs N: run test N times and show average timing (default: 1)
     --verbose: show detailed step-by-step timing for each run
+    --no-account: skip account-flow verification (Redis account store / Postgres accounts)
 
 Examples:
     python scripts/full_pipeline_test.py --market --runs 5
@@ -78,7 +81,15 @@ def _read_latest_fills(redis, stream: str, count: int = 50):
 TERMINAL_STATUSES = {"filled", "canceled", "rejected", "expired"}
 
 
-def run_single_test(market: bool, redis, store, verbose: bool = False) -> tuple[bool, float, dict]:
+def run_single_test(
+    market: bool,
+    redis,
+    store,
+    account_store=None,
+    database_url: str = "",
+    check_account: bool = True,
+    verbose: bool = False,
+) -> tuple[bool, float, dict]:
     """
     Run a single test iteration.
     Returns: (success: bool, total_elapsed_time: float in seconds, step_times: dict)
@@ -267,20 +278,80 @@ def run_single_test(market: bool, redis, store, verbose: bool = False) -> tuple[
     if not order:
         step_times["4_verify_downstreams"] = time.monotonic() - step_start
         return False, time.monotonic() - start_time, step_times
-    
+
     step_times["4_verify_downstreams"] = time.monotonic() - step_start
     if verbose:
         print(f"   Step 4 (Verify downstreams): {step_times['4_verify_downstreams']*1000:.1f}ms")
+
+    # Step 5: Account-flow — poll for Redis account store (OMS periodic refresh), optionally Postgres
+    if check_account and account_store is not None:
+        step_start = time.monotonic()
+        broker, account_id = "binance", "default"
+        account_poll_deadline = time.monotonic() + 90  # OMS refresh interval may be 60s
+        account_ok = False
+        while time.monotonic() < account_poll_deadline:
+            time.sleep(2)
+            acc = account_store.get_account(broker, account_id)
+            balances = account_store.get_balances(broker, account_id) if acc else []
+            if acc and len(balances) >= 1:
+                assets = [b.get("asset") for b in balances if b.get("asset")]
+                if market:
+                    if "BTC" in assets:
+                        account_ok = True
+                        break
+                else:
+                    account_ok = True
+                    break
+        if not account_ok:
+            step_times["5_account_flow"] = time.monotonic() - step_start
+            if verbose:
+                print(f"   Step 5 (Account-flow): FAIL (no account/balances in Redis within 90s)")
+            return False, time.monotonic() - start_time, step_times
+        step_times["5_account_flow"] = time.monotonic() - step_start
+        if verbose:
+            print(f"   Step 5 (Account-flow Redis): {step_times['5_account_flow']*1000:.1f}ms")
+
+        if database_url:
+            step_start_pg = time.monotonic()
+            try:
+                import psycopg2
+                conn = psycopg2.connect(database_url)
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT a.id FROM accounts a WHERE a.broker = %s AND a.account_id = %s",
+                        (broker, account_id),
+                    )
+                    acc_rows = cur.fetchall()
+                    if not acc_rows:
+                        step_times["5_account_flow"] = time.monotonic() - step_start
+                        return False, time.monotonic() - start_time, step_times
+                    account_pk = acc_rows[0][0]
+                    cur.execute("SELECT asset FROM balances WHERE account_id = %s", (account_pk,))
+                    bal_rows = cur.fetchall()
+                finally:
+                    conn.close()
+                if len(bal_rows) < 1:
+                    step_times["5_account_flow"] = time.monotonic() - step_start
+                    return False, time.monotonic() - start_time, step_times
+                if verbose:
+                    print(f"   Step 5 (Account-flow Postgres): {(time.monotonic() - step_start_pg)*1000:.1f}ms")
+            except Exception as e:
+                if verbose:
+                    print(f"   Step 5 (Account-flow Postgres): skip ({e})", file=sys.stderr)
+                # Non-fatal: Redis account check passed
+                pass
 
     elapsed_time = time.monotonic() - start_time
     return True, elapsed_time, step_times
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Full pipeline test: inject order to Redis, check downstreams")
+    parser = argparse.ArgumentParser(description="Full pipeline test: inject order to Redis, check downstreams and account-flow")
     parser.add_argument("--market", action="store_true", help="Inject MARKET order (fills immediately)")
     parser.add_argument("--runs", type=int, default=1, help="Number of test runs (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed timing for each step")
+    parser.add_argument("--no-account", action="store_true", help="Skip account-flow verification (Redis account store / Postgres accounts)")
     args = parser.parse_args()
 
     REDIS_URL = _env("REDIS_URL")
@@ -291,9 +362,11 @@ def main() -> int:
 
     from redis import Redis
     from oms.storage.redis_order_store import RedisOrderStore
+    from oms.storage.redis_account_store import RedisAccountStore
 
     redis = Redis.from_url(REDIS_URL, decode_responses=True)
     store = RedisOrderStore(redis)
+    account_store = RedisAccountStore(redis)
 
     order_type = "MARKET" if args.market else "LIMIT"
     print(f"Running {args.runs} test(s) with {order_type} orders...")
@@ -310,7 +383,15 @@ def main() -> int:
         if args.runs > 1 or args.verbose:
             print(f"--- Run {run_num}/{args.runs} ---")
         
-        success, elapsed, step_times = run_single_test(args.market, redis, store, verbose=args.verbose)
+        success, elapsed, step_times = run_single_test(
+            args.market,
+            redis,
+            store,
+            account_store=account_store,
+            database_url=DATABASE_URL or "",
+            check_account=not args.no_account,
+            verbose=args.verbose,
+        )
         
         if success:
             successes += 1
@@ -370,10 +451,11 @@ def main() -> int:
                 "2c_polling_overhead": "   → Polling overhead",
                 "3_wait_cancel": "3. Wait for cancel (LIMIT)",
                 "4_verify_downstreams": "4. Verify downstreams",
+                "5_account_flow": "5. Account-flow (Redis + optional Postgres)",
             }
-            
+
             # Group related steps
-            main_steps = ["1_inject_order", "2_wait_fill", "2_wait_place", "3_wait_cancel", "4_verify_downstreams"]
+            main_steps = ["1_inject_order", "2_wait_fill", "2_wait_place", "3_wait_cancel", "4_verify_downstreams", "5_account_flow"]
             sub_steps = ["2b_inject_to_oms_start", "2a_oms_processing_time", "2c_polling_overhead"]
             
             for step_name in sorted(step_times_all.keys()):

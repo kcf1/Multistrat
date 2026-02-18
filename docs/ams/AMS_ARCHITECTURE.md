@@ -40,7 +40,7 @@ Single reference for Account Management within OMS: data flow, Redis/Postgres in
 - **Inbound (event-driven):** Broker user data stream events: `outboundAccountPosition` (balance per asset), `balanceUpdate` (delta), and broker-specific position/balance events. OMS continues to consume `executionReport` only; AMS consumes account/balance/position events (same WebSocket can be shared or separate listener per broker).
 - **Inbound (periodic):** REST snapshot: e.g. `get_account()`, `get_futures_account()`, `get_futures_balance()` at a configurable interval (e.g. 60s) to reconcile and backfill.
 - **Store:** Redis hashes/sets for account metadata, balances, and positions per `(broker, account_id)`.
-- **Outbound:** Postgres `accounts`, `balances`, `balance_changes` (historical deposits/withdrawals), and optional `margin_snapshots`. OMS does not have a `positions` table (positions stored in Redis only; name reserved for PMS). Optional Redis stream `ams_snapshots` for downstream (Risk / Position Keeper) if needed.
+- **Outbound:** Postgres `accounts`, `balances`, `balance_changes` (historical deposits/withdrawals). OMS does not have a `positions` or `margin_snapshots` table (positions in Redis only; margin_snapshots dropped). Optional Redis stream `ams_snapshots` for downstream (Risk / Position Keeper) if needed.
 
 ---
 
@@ -70,7 +70,7 @@ Proposed layout (broker-agnostic; extend per broker as needed):
 | `accounts:by_broker:{broker}`         | Set   | Set of `account_id` for that broker (index). |
 
 - **Pipelines:** Multi-key updates (e.g. apply balance update + update account updated_at) use Redis pipelines for atomicity.
-- **TTL (optional):** After sync to Postgres, set TTL on Redis keys (e.g. `AMS_SYNC_TTL_AFTER_SECONDS`) to avoid unbounded growth; re-populate from REST or stream on next refresh.
+- **TTL:** TTL on Redis account keys is set only when processing `balanceUpdate` events (in main's `on_balance_change` callback), not after periodic sync. Configurable via `OMS_ACCOUNT_TTL_AFTER_BALANCE_CHANGE_SECONDS` (default from sync TTL).
 
 ---
 

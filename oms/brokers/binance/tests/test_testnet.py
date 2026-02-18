@@ -98,7 +98,16 @@ class TestBinanceTestnetAPI:
 
     def test_user_data_stream_start_keepalive_close(self, client):
         """Create listen key, keepalive once, then close (real testnet)."""
-        listen_key = client.start_user_data_stream()
+        from oms.brokers.binance.api_client import BinanceAPIError
+        try:
+            listen_key = client.start_user_data_stream()
+        except BinanceAPIError as e:
+            resp = getattr(e.__cause__, "response", None)
+            if resp is not None and getattr(resp, "status_code", None) == 410:
+                pytest.skip(
+                    "Binance testnet /api/v3/userDataStream returned 410 Gone (endpoint deprecated or moved)"
+                )
+            raise
         assert listen_key
         assert len(listen_key) > 0
         client.keepalive_user_data_stream(listen_key)

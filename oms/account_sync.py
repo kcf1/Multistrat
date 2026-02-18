@@ -3,8 +3,8 @@ OMS → Postgres account sync (task 12.2.7).
 
 Sync accounts and balances from Redis account store to Postgres
 (accounts, balances). No positions table (dropped for PMS). Optionally write
-balance_changes when processing balanceUpdate events; optionally set TTL on
-account keys after sync.
+balance_changes when processing balanceUpdate events. TTL on account keys is
+set only from balance-change callbacks (main), not from periodic sync.
 """
 
 import json
@@ -15,7 +15,6 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from redis import Redis
 
 from oms.log import logger
-from oms.cleanup import set_account_key_ttl as _set_account_key_ttl
 from oms.storage.redis_account_store import RedisAccountStore
 
 # Key pattern to discover brokers (accounts:by_broker:{broker})
@@ -173,9 +172,6 @@ def sync_accounts_to_postgres(
                     cur.execute("DELETE FROM balances WHERE account_id = %s", (account_pk,))
 
                 count += 1
-
-                if ttl_after_sync_seconds is not None and ttl_after_sync_seconds > 0:
-                    _set_account_key_ttl(redis, broker, account_id, ttl_after_sync_seconds)
 
         conn.commit()
         if count:

@@ -169,7 +169,8 @@ class TestSyncAccountsToPostgres:
         assert count == 0
         assert len(calls) == 0
 
-    def test_sync_sets_ttl_when_requested(self, redis_client, account_store):
+    def test_sync_does_not_set_ttl(self, redis_client, account_store):
+        """TTL on account keys is set only on balance change events (main callback), not after periodic sync."""
         account_store.apply_account_position(
             "binance", "acc1",
             [{"asset": "USDT", "available": "100", "locked": "0"}],
@@ -188,8 +189,9 @@ class TestSyncAccountsToPostgres:
                     pass
             return MockConn()
         sync_accounts_to_postgres(redis_client, account_store, connect, ttl_after_sync_seconds=60)
-        assert redis_client.ttl("account:binance:acc1") == 60
-        assert redis_client.ttl("account:binance:acc1:balances") == 60
+        # Sync no longer sets TTL; TTL is set only in on_balance_change callback in main.
+        assert redis_client.ttl("account:binance:acc1") == -1
+        assert redis_client.ttl("account:binance:acc1:balances") == -1
 
 
 class TestWriteBalanceChange:

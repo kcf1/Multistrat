@@ -1,7 +1,6 @@
 """
-Integration test for OMS (task 12.1.9): wire consumer → store → registry → place_order → producer.
-
-Mock Redis (fakeredis) and mock adapter; verify full flow for one order.
+Integration test for OMS (task 12.1.9, 12.2.9): wire consumer → store → registry → place_order → producer;
+account listeners, account store, periodic refresh/sync.
 """
 
 from typing import Any, Dict, Optional
@@ -11,6 +10,7 @@ import pytest
 from oms.redis_flow import make_fill_callback, process_one, process_one_cancel
 from oms.schemas import CANCEL_REQUESTED_STREAM, OMS_FILLS_STREAM, RISK_APPROVED_STREAM
 from oms.streams import add_message, read_latest
+from oms.storage.redis_account_store import RedisAccountStore
 from oms.storage.redis_order_store import RedisOrderStore
 
 
@@ -33,6 +33,60 @@ def _mock_adapter(place_result: Dict[str, Any], cancel_result: Optional[Dict[str
     return MockAdapter()
 
 
+def _mock_listener(stream_connected: bool = True):
+    """Minimal listener object with stream_connected for wait_for_account_listeners_connected."""
+
+    class MockListener:
+        def __init__(self):
+            self.stream_connected = stream_connected
+    return MockListener()
+
+
+def _mock_adapter_with_account_listener(
+    place_result: Optional[Dict[str, Any]] = None,
+    account_snapshot: Optional[Dict[str, Any]] = None,
+    stream_connected: bool = True,
+) -> Any:
+    """
+    Mock adapter with start_account_listener, stop_account_listener, optional get_account_snapshot.
+    If place_result is None, place_order rejects (so order flow still works).
+    """
+    listener = _mock_listener(stream_connected=stream_connected)
+
+    class MockAdapterWithAccount:
+        _account_id = "default"
+
+        def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
+            if place_result is not None:
+                return place_result
+            return {"rejected": True, "reject_reason": "mock reject"}
+
+        def start_fill_listener(self, callback, *, store=None) -> None:
+            pass
+
+        def cancel_order(self, broker_order_id: str, symbol: str) -> Dict[str, Any]:
+            return {"rejected": True, "reject_reason": "cancel not implemented"}
+
+        def start_account_listener(self, callback) -> None:
+            self._account_callback = callback
+            self._account_listener = listener
+
+        def stop_account_listener(self) -> None:
+            self._account_listener = None
+
+        def get_account_snapshot(self, account_id: str = "default") -> Optional[Dict[str, Any]]:
+            if account_snapshot is None:
+                return None
+            out = dict(account_snapshot)
+            out.setdefault("broker", "binance")
+            out.setdefault("account_id", account_id)
+            return out
+
+    adapter = MockAdapterWithAccount()
+    adapter._account_listener = None  # set when start_account_listener is called
+    return adapter
+
+
 @pytest.fixture
 def redis_client():
     from fakeredis import FakeRedis
@@ -42,6 +96,11 @@ def redis_client():
 @pytest.fixture
 def store(redis_client):
     return RedisOrderStore(redis_client)
+
+
+@pytest.fixture
+def account_store(redis_client):
+    return RedisAccountStore(redis_client)
 
 
 def test_oms_integration_consumer_store_registry_producer(redis_client, store):
@@ -615,3 +674,165 @@ def test_oms_main_loop_integration(redis_client, store):
     assert "mock reject" in (fields.get("reject_reason") or "")
     assert fields.get("symbol") == "BTCUSDT"
     assert fields.get("book") == "main_loop_test"
+
+
+# --- Account-flow integration (12.2.9) ---
+
+
+def test_oms_bootstrap_starts_account_listeners(redis_client, store, account_store):
+    """12.2.9: start_account_listeners starts listener for each adapter that has it; callback is passed."""
+    from oms.main import start_account_listeners
+    from oms.registry import AdapterRegistry
+
+    started = []
+
+    class MockAdapterWithAccountOnly:
+        def place_order(self, order):
+            return {"rejected": True}
+
+        def start_fill_listener(self, callback, *, store=None):
+            pass
+
+        def cancel_order(self, broker_order_id, symbol):
+            return {"rejected": True}
+
+        def start_account_listener(self, callback):
+            started.append(("account_listener", callback))
+
+        def stop_account_listener(self):
+            pass
+
+    registry = AdapterRegistry()
+    registry.register("binance", MockAdapterWithAccountOnly())
+    start_account_listeners(redis_client, account_store, registry)
+    assert len(started) == 1
+    assert started[0][0] == "account_listener"
+    assert callable(started[0][1])
+
+
+def test_oms_bootstrap_skips_adapter_without_account_listener(redis_client, store, account_store):
+    """12.2.9: start_account_listeners does not call start_account_listener when adapter lacks it."""
+    from oms.main import start_account_listeners
+    from oms.registry import AdapterRegistry
+
+    registry = AdapterRegistry()
+    registry.register("binance", _mock_adapter({"rejected": True}))  # no start_account_listener
+    start_account_listeners(redis_client, account_store, registry)  # no exception, no call
+
+
+def test_oms_wait_for_account_listeners_connected_no_listeners():
+    """12.2.9: wait_for_account_listeners_connected returns True when no adapter has account listener."""
+    from oms.main import wait_for_account_listeners_connected
+    from oms.registry import AdapterRegistry
+
+    registry = AdapterRegistry()
+    registry.register("binance", _mock_adapter({"rejected": True}))  # no account listener
+    assert wait_for_account_listeners_connected(registry, timeout_seconds=1) is True
+
+
+def test_oms_wait_for_account_listeners_connected_all_connected(account_store, redis_client):
+    """12.2.9: wait_for_account_listeners_connected returns True when all listeners report stream_connected."""
+    from oms.main import start_account_listeners, wait_for_account_listeners_connected
+    from oms.registry import AdapterRegistry
+
+    registry = AdapterRegistry()
+    adapter = _mock_adapter_with_account_listener(stream_connected=True)
+    registry.register("binance", adapter)
+    start_account_listeners(redis_client, account_store, registry)
+    assert wait_for_account_listeners_connected(registry, timeout_seconds=2) is True
+
+
+def test_oms_account_callback_updates_store(redis_client, account_store):
+    """12.2.9: make_account_callback updates account store on account_position event."""
+    from oms.account_flow import make_account_callback
+
+    callback = make_account_callback(redis_client, account_store)
+    event = {
+        "event_type": "account_position",
+        "broker": "binance",
+        "account_id": "default",
+        "balances": [
+            {"asset": "USDT", "available": "10000.0", "locked": "0.0"},
+            {"asset": "BTC", "available": "0.5", "locked": "0.0"},
+        ],
+        "positions": [],
+        "updated_at": "2025-01-15T12:00:00Z",
+        "payload": {},
+    }
+    callback(event)
+
+    account = account_store.get_account("binance", "default")
+    assert account is not None
+    assert account.get("broker") == "binance"
+    assert account.get("account_id") == "default"
+    assert account.get("updated_at") == "2025-01-15T12:00:00Z"
+
+    balances = account_store.get_balances("binance", "default")
+    assert len(balances) == 2
+    assets = {b["asset"] for b in balances}
+    assert "USDT" in assets
+    assert "BTC" in assets
+
+
+def test_oms_main_loop_integration_with_account_refresh(redis_client, store, account_store):
+    """12.2.9: run_oms_loop with account_store runs periodic account refresh; snapshot applied to store."""
+    from oms.consumer import ensure_risk_approved_consumer_group
+    from oms.main import run_oms_loop
+    from oms.registry import AdapterRegistry
+
+    snapshot = {
+        "broker": "binance",
+        "account_id": "default",
+        "balances": [{"asset": "INTTEST", "available": "100.0", "locked": "0.0"}],
+        "positions": [],
+        "updated_at": "2025-01-15T12:00:00Z",
+        "payload": {},
+    }
+    adapter = _mock_adapter_with_account_listener(
+        place_result={"rejected": True, "reject_reason": "mock"},
+        account_snapshot=snapshot,
+    )
+    registry = AdapterRegistry()
+    registry.register("binance", adapter)
+
+    ensure_risk_approved_consumer_group(redis_client, "oms", "0")
+    add_message(redis_client, RISK_APPROVED_STREAM, {
+        "order_id": "acc-refresh-order-1",
+        "broker": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": "0.001",
+        "order_type": "MARKET",
+        "book": "account_refresh_test",
+    })
+
+    # Stop after 2 iterations so the first iteration completes (including account refresh).
+    # With stop_after_n=1 the loop breaks inside process_many and never reaches refresh.
+    iterations = [0]
+
+    def run_until():
+        iterations[0] += 1
+        return iterations[0] >= 2
+
+    processed = run_oms_loop(
+        redis_client,
+        store,
+        registry,
+        account_store=account_store,
+        block_ms=50,
+        trim_every_n=100,
+        run_until=run_until,
+        consumer_group="oms",
+        consumer_name="oms-1",
+        account_refresh_interval_seconds=1,
+        account_sync_interval_seconds=0,
+    )
+    assert processed == 1
+
+    # Periodic account refresh runs after process_many in the first full iteration.
+    account = account_store.get_account("binance", "default")
+    assert account is not None
+    assert account.get("account_id") == "default"
+    balances = account_store.get_balances("binance", "default")
+    assert len(balances) >= 1
+    assert any(b.get("asset") == "INTTEST" for b in balances)
