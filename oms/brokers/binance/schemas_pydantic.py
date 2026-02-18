@@ -1,11 +1,13 @@
 """
-Pydantic models for Binance WebSocket execution report events (task 12.1.17).
+Pydantic models for Binance WebSocket execution report events (task 12.1.17)
+and account events (task 12.2.2).
 
-Defines validated models for raw Binance events and unified fill/reject/cancelled/expired events.
+Defines validated models for raw Binance events and unified fill/reject/cancelled/expired events,
+as well as account/balance/position events.
 """
 
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -244,6 +246,138 @@ class ExpiredEvent(BaseModel):
             return float(v)
         except (TypeError, ValueError):
             return 0.0
+
+    def model_dump_dict(self) -> dict:
+        """Convert model to dict compatible with existing code."""
+        return self.model_dump(exclude_none=False)
+
+
+# --- Account Event Schemas (task 12.2.2) ---
+
+
+class BinanceBalance(BaseModel):
+    """Binance balance object from outboundAccountPosition event."""
+
+    a: str = Field(..., description="Asset symbol (e.g., 'ETH', 'BTC')")
+    f: str = Field(..., description="Free balance amount")
+    l: str = Field(..., description="Locked balance amount")
+
+    @field_validator("a", mode="before")
+    @classmethod
+    def string_asset(cls, v):
+        """Ensure asset is a string."""
+        return str(v).strip() if v is not None else ""
+
+    @field_validator("f", "l", mode="before")
+    @classmethod
+    def string_balance(cls, v):
+        """Ensure balance is a string."""
+        if v is None:
+            return "0.0"
+        return str(v).strip() if isinstance(v, str) else str(v)
+
+
+class BinanceOutboundAccountPosition(BaseModel):
+    """
+    Pydantic model for raw Binance outboundAccountPosition WebSocket event.
+
+    Sent whenever an account balance changes. Contains assets affected by that balance change.
+    """
+
+    e: str = Field(..., description="Event type (should be 'outboundAccountPosition')")
+    E: int = Field(..., description="Event time (milliseconds)")
+    u: int = Field(..., description="Time of last account update (milliseconds)")
+    B: List[BinanceBalance] = Field(..., description="Array of balance objects")
+
+    @field_validator("e")
+    @classmethod
+    def validate_event_type(cls, v):
+        """Ensure event type is outboundAccountPosition."""
+        if v != "outboundAccountPosition":
+            raise ValueError(f"expected 'outboundAccountPosition', got '{v}'")
+        return v
+
+
+class BinanceBalanceUpdate(BaseModel):
+    """
+    Pydantic model for raw Binance balanceUpdate WebSocket event.
+
+    Occurs during account transfers (e.g., Spot to Margin) or deposits/withdrawals.
+    """
+
+    e: str = Field(..., description="Event type (should be 'balanceUpdate')")
+    E: int = Field(..., description="Event time (milliseconds)")
+    a: str = Field(..., description="Asset symbol")
+    d: str = Field(..., description="Balance delta (positive for deposit, negative for withdrawal)")
+    T: int = Field(..., description="Clear time (milliseconds)")
+
+    @field_validator("e")
+    @classmethod
+    def validate_event_type(cls, v):
+        """Ensure event type is balanceUpdate."""
+        if v != "balanceUpdate":
+            raise ValueError(f"expected 'balanceUpdate', got '{v}'")
+        return v
+
+    @field_validator("a", "d", mode="before")
+    @classmethod
+    def string_fields(cls, v):
+        """Ensure string fields are strings."""
+        return str(v).strip() if v is not None else ""
+
+
+class AccountPositionEvent(BaseModel):
+    """
+    Unified account position event model (from Binance outboundAccountPosition).
+
+    Used internally by OMS for account callbacks. Matches AccountEvent structure
+    from oms.brokers.base.
+    """
+
+    event_type: Literal["account_position"] = "account_position"
+    broker: str = Field(default="binance", description="Broker name")
+    account_id: str = Field(..., description="Account identifier")
+    balances: List[dict] = Field(..., description="List of balance dicts: [{'asset': 'USDT', 'available': '1000.0', 'locked': '0.0'}, ...]")
+    positions: List[dict] = Field(default_factory=list, description="List of position dicts (empty for spot)")
+    updated_at: str = Field(..., description="ISO timestamp")
+    payload: dict = Field(..., description="Raw Binance event blob")
+
+    @field_validator("broker", "account_id", "updated_at", mode="before")
+    @classmethod
+    def string_fields(cls, v):
+        """Ensure string fields are strings."""
+        if v is None:
+            return "" if cls.__name__ != "broker" else "binance"
+        return str(v).strip() if isinstance(v, str) else str(v)
+
+    def model_dump_dict(self) -> dict:
+        """Convert model to dict compatible with existing code."""
+        return self.model_dump(exclude_none=False)
+
+
+class BalanceUpdateEvent(BaseModel):
+    """
+    Unified balance update event model (from Binance balanceUpdate).
+
+    Used internally by OMS for account callbacks. Matches AccountEvent structure
+    from oms.brokers.base.
+    """
+
+    event_type: Literal["balance_update"] = "balance_update"
+    broker: str = Field(default="binance", description="Broker name")
+    account_id: str = Field(..., description="Account identifier")
+    balances: List[dict] = Field(..., description="List with single balance dict: [{'asset': 'USDT', 'available': '1000.0', 'locked': '0.0'}]")
+    positions: List[dict] = Field(default_factory=list, description="List of position dicts (empty for balance updates)")
+    updated_at: str = Field(..., description="ISO timestamp")
+    payload: dict = Field(..., description="Raw Binance event blob")
+
+    @field_validator("broker", "account_id", "updated_at", mode="before")
+    @classmethod
+    def string_fields(cls, v):
+        """Ensure string fields are strings."""
+        if v is None:
+            return "" if cls.__name__ != "broker" else "binance"
+        return str(v).strip() if isinstance(v, str) else str(v)
 
     def model_dump_dict(self) -> dict:
         """Convert model to dict compatible with existing code."""

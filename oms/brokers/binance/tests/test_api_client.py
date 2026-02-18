@@ -454,3 +454,85 @@ class TestBinanceAPIClientUserDataStream:
         api_client.close_user_data_stream('some-listen-key')
         assert len(responses.calls) == 1
         assert 'listenKey=some-listen-key' in responses.calls[0].request.url
+
+
+class TestBinanceAPIClientGetAccountSnapshot:
+    """Test get_account_snapshot (task 12.2.3)."""
+
+    @responses.activate
+    def test_get_account_snapshot_converts_to_unified_format(self, api_client):
+        """get_account_snapshot converts Binance REST response to unified AccountEvent format."""
+        responses.add(
+            responses.GET,
+            'https://testnet.binance.vision/api/v3/account',
+            json={
+                'balances': [
+                    {'asset': 'USDT', 'free': '1000.500000', 'locked': '0.000000'},
+                    {'asset': 'BTC', 'free': '0.100000', 'locked': '0.050000'},
+                ],
+                'updateTime': 1564034571105,
+            },
+            status=200
+        )
+        snapshot = api_client.get_account_snapshot(account_id='test-account')
+        assert snapshot['event_type'] == 'account_position'
+        assert snapshot['broker'] == 'binance'
+        assert snapshot['account_id'] == 'test-account'
+        assert len(snapshot['balances']) == 2
+        assert snapshot['balances'][0]['asset'] == 'USDT'
+        assert snapshot['balances'][0]['available'] == '1000.500000'
+        assert snapshot['balances'][0]['locked'] == '0.000000'
+        assert snapshot['balances'][1]['asset'] == 'BTC'
+        assert snapshot['balances'][1]['available'] == '0.100000'
+        assert snapshot['balances'][1]['locked'] == '0.050000'
+        assert snapshot['positions'] == []
+        assert 'updated_at' in snapshot
+        assert 'payload' in snapshot
+        assert snapshot['payload']['updateTime'] == 1564034571105
+
+    @responses.activate
+    def test_get_account_snapshot_default_account_id(self, api_client):
+        """get_account_snapshot uses default account_id if not provided."""
+        responses.add(
+            responses.GET,
+            'https://testnet.binance.vision/api/v3/account',
+            json={'balances': [], 'updateTime': 123456789},
+            status=200
+        )
+        snapshot = api_client.get_account_snapshot()
+        assert snapshot['account_id'] == 'default'
+
+    @responses.activate
+    def test_get_account_snapshot_filters_empty_assets(self, api_client):
+        """get_account_snapshot only includes assets with non-empty asset symbol."""
+        responses.add(
+            responses.GET,
+            'https://testnet.binance.vision/api/v3/account',
+            json={
+                'balances': [
+                    {'asset': 'USDT', 'free': '1000.0', 'locked': '0.0'},
+                    {'asset': '', 'free': '0.0', 'locked': '0.0'},  # Empty asset
+                    {'asset': 'BTC', 'free': '0.0', 'locked': '0.0'},
+                ],
+            },
+            status=200
+        )
+        snapshot = api_client.get_account_snapshot()
+        # Should include USDT and BTC, but not empty asset
+        assert len(snapshot['balances']) == 2
+        assert snapshot['balances'][0]['asset'] == 'USDT'
+        assert snapshot['balances'][1]['asset'] == 'BTC'
+
+    @responses.activate
+    def test_get_account_snapshot_handles_missing_update_time(self, api_client):
+        """get_account_snapshot uses current time if updateTime is missing."""
+        responses.add(
+            responses.GET,
+            'https://testnet.binance.vision/api/v3/account',
+            json={'balances': []},  # No updateTime
+            status=200
+        )
+        snapshot = api_client.get_account_snapshot()
+        assert 'updated_at' in snapshot
+        # Should be recent timestamp
+        assert snapshot['updated_at'] is not None

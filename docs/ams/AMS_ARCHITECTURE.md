@@ -40,7 +40,7 @@ Single reference for Account Management within OMS: data flow, Redis/Postgres in
 - **Inbound (event-driven):** Broker user data stream events: `outboundAccountPosition` (balance per asset), `balanceUpdate` (delta), and broker-specific position/balance events. OMS continues to consume `executionReport` only; AMS consumes account/balance/position events (same WebSocket can be shared or separate listener per broker).
 - **Inbound (periodic):** REST snapshot: e.g. `get_account()`, `get_futures_account()`, `get_futures_balance()` at a configurable interval (e.g. 60s) to reconcile and backfill.
 - **Store:** Redis hashes/sets for account metadata, balances, and positions per `(broker, account_id)`.
-- **Outbound:** Postgres `accounts`, `balances`, `positions` (and optional `margin_snapshots`). Optional Redis stream `ams_snapshots` for downstream (Risk / Position Keeper) if needed.
+- **Outbound:** Postgres `accounts`, `balances`, `positions`, `balance_changes` (historical deposits/withdrawals), and optional `margin_snapshots`. Optional Redis stream `ams_snapshots` for downstream (Risk / Position Keeper) if needed.
 
 ---
 
@@ -80,8 +80,8 @@ Binance user data stream sends (among others):
 
 | Event type                  | Description                    | AMS action |
 |----------------------------|--------------------------------|------------|
-| `outboundAccountPosition`  | Balance per asset (full snapshot) | Update Redis balances for that account; mark updated_at. |
-| `balanceUpdate`            | Single-asset balance delta     | Update Redis balance for asset; optional event_id for idempotency. |
+| `outboundAccountPosition`  | Balance per asset (full snapshot) | Update Redis balances for that account; mark updated_at. Optionally write to `balance_changes` table with `change_type='snapshot'` for reconciliation audit trail. |
+| `balanceUpdate`            | Single-asset balance delta (deposit/withdrawal/transfer) | Update Redis balance for asset; **write to `balance_changes` table** with `change_type` derived from delta sign (deposit if d > 0, withdrawal if d < 0); optional event_id for idempotency. |
 | `executionReport`          | Order/fill events              | Consumed by OMS only; AMS ignores. |
 
 Other brokers (e.g. futures) may add position update events; AMS maps them to a unified internal shape and writes to `account:*:positions`.
@@ -124,6 +124,7 @@ Other brokers (e.g. futures) may add position update events; AMS maps them to a 
 
 - **Trigger:** Optional: on account update from stream (`on_account_updated`); plus **periodic** `sync_accounts_to_postgres` every `sync_interval_seconds`.
 - **Logic:** For each account in Redis (or each account updated since last sync): read account hash, balances hash, positions hash; map to Postgres rows (`_account_to_row`, `_balance_to_row`, `_position_to_row`); UPSERT into `accounts` by (broker, account_id or id), then `balances` (by account_id, asset), then `positions` (by account_id, symbol, side). Set TTL on Redis keys after sync if configured.
+- **Balance changes:** When processing `balanceUpdate` events (deposits/withdrawals), write to `balance_changes` table with `change_type` derived from delta sign. Optionally write `outboundAccountPosition` snapshots to `balance_changes` with `change_type='snapshot'` for reconciliation audit trail.
 - **DB columns / sources:** See `docs/ams/AMS_DB_FIELDS.md`.
 
 **Repairs (post-sync):** `ams/repair.py` — `run_all_repairs(pg_connect)` runs periodically after sync. Fix flawed Postgres fields (e.g. numeric/empty) by recovering from `payload` or raw broker data for the relevant broker (e.g. `broker = 'binance'`).

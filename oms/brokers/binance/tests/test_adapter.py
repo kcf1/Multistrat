@@ -491,3 +491,99 @@ class TestFillPriceFromBinancePayload:
     def test_enrichments_empty_payload(self):
         assert _enrichments_from_binance_payload({}) == {}
         assert _enrichments_from_binance_payload({"payload": {"binance": {}}}) == {}
+
+
+# --- Account methods (task 12.2.3) ---
+
+
+class TestBinanceBrokerAdapterAccountMethods:
+    """Test Binance adapter account methods."""
+
+    @patch("oms.brokers.binance.adapter.BinanceAPIClient")
+    def test_start_account_listener(self, mock_client_class):
+        """start_account_listener starts account listener with callback using factory."""
+        mock_client = MagicMock()
+        mock_client.base_url = "https://testnet.binance.vision"
+        adapter = BinanceBrokerAdapter(mock_client)
+        callback = MagicMock()
+
+        with patch("oms.brokers.binance.adapter.create_account_listener") as mock_create:
+            mock_listener = MagicMock()
+            mock_create.return_value = mock_listener
+            adapter.start_account_listener(callback)
+            mock_create.assert_called_once()
+            # Verify factory was called with correct args
+            call_kwargs = mock_create.call_args[1]
+            assert call_kwargs["account_id"] == "default"
+            assert call_kwargs["on_account_event"] == callback
+            mock_listener.start_background.assert_called_once()
+            assert adapter._account_listener == mock_listener
+
+    @patch("oms.brokers.binance.adapter.BinanceAPIClient")
+    def test_start_account_listener_uses_ws_api_setting(self, mock_client_class):
+        """start_account_listener uses same WebSocket API setting as fills listener."""
+        mock_client = MagicMock()
+        mock_client.base_url = "https://testnet.binance.vision"
+        adapter = BinanceBrokerAdapter(mock_client, use_ws_api=True)
+        callback = MagicMock()
+
+        with patch("oms.brokers.binance.adapter.create_account_listener") as mock_create:
+            mock_listener = MagicMock()
+            mock_create.return_value = mock_listener
+            adapter.start_account_listener(callback)
+            # Verify use_ws_api was passed to factory
+            call_kwargs = mock_create.call_args[1]
+            assert call_kwargs["use_ws_api"] is True
+
+    @patch("oms.brokers.binance.adapter.BinanceAPIClient")
+    def test_get_account_snapshot(self, mock_client_class):
+        """get_account_snapshot calls client.get_account_snapshot and returns unified format."""
+        mock_client = MagicMock()
+        mock_snapshot = {
+            "event_type": "account_position",
+            "broker": "binance",
+            "account_id": "test-account",
+            "balances": [{"asset": "USDT", "available": "1000.0", "locked": "0.0"}],
+            "positions": [],
+            "updated_at": "2024-01-01T00:00:00Z",
+            "payload": {},
+        }
+        mock_client.get_account_snapshot.return_value = mock_snapshot
+        adapter = BinanceBrokerAdapter(mock_client)
+
+        result = adapter.get_account_snapshot(account_id="test-account")
+        mock_client.get_account_snapshot.assert_called_once_with(account_id="test-account")
+        assert result == mock_snapshot
+        assert result["event_type"] == "account_position"
+        assert result["broker"] == "binance"
+
+    @patch("oms.brokers.binance.adapter.BinanceAPIClient")
+    def test_get_account_snapshot_default_account_id(self, mock_client_class):
+        """get_account_snapshot uses default account_id if not provided."""
+        mock_client = MagicMock()
+        mock_client.get_account_snapshot.return_value = {"event_type": "account_position"}
+        adapter = BinanceBrokerAdapter(mock_client)
+
+        adapter.get_account_snapshot()
+        mock_client.get_account_snapshot.assert_called_once_with(account_id="default")
+
+    @patch("oms.brokers.binance.adapter.BinanceAPIClient")
+    def test_stop_account_listener(self, mock_client_class):
+        """stop_account_listener stops account listener if running."""
+        mock_client = MagicMock()
+        adapter = BinanceBrokerAdapter(mock_client)
+        mock_listener = MagicMock()
+        adapter._account_listener = mock_listener
+
+        adapter.stop_account_listener()
+        mock_listener.stop.assert_called_once()
+        assert adapter._account_listener is None
+
+    @patch("oms.brokers.binance.adapter.BinanceAPIClient")
+    def test_stop_account_listener_no_listener(self, mock_client_class):
+        """stop_account_listener is safe to call when no listener is running."""
+        mock_client = MagicMock()
+        adapter = BinanceBrokerAdapter(mock_client)
+        # Should not raise
+        adapter.stop_account_listener()
+        assert adapter._account_listener is None
