@@ -103,6 +103,8 @@ class RedisAccountStore:
                 pipe.hset(balances_key, mapping=balances_dict)
         
         # Replace all positions (delete old, set new)
+        # Note: Positions not in the event are assumed to be zero/flattened.
+        # This handles cases where brokers exclude zero positions from events.
         positions_key = _positions_key(broker, account_id)
         pipe.delete(positions_key)
         if positions:

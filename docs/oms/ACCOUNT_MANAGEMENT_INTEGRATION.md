@@ -51,9 +51,11 @@ Account data stored in Redis:
 Account sync writes to:
 
 - `accounts` - Account metadata
-- `balances` - Balances per account/asset
-- `positions` - Positions per account/symbol/side
+- `balances` - Balances per account/asset (UPSERT)
+- `positions` - Positions per account/symbol/side (UPSERT, then DELETE positions not in event)
 - `margin_snapshots` (optional) - Margin snapshots for futures
+
+**Note:** Positions not included in `outboundAccountPosition` events are deleted from Postgres (handles flattened positions where brokers exclude zero positions).
 
 ## Data Flow
 
