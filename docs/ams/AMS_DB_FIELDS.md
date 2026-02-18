@@ -67,7 +67,7 @@ Filled by AMS from periodic REST (e.g. get_futures_account) when broker supports
 
 ## 5. Sync and repair flow
 
-- **Sync:** `ams/sync.py` reads from Redis account store and writes to Postgres `accounts`, `balances`, `positions` (and optionally `margin_snapshots`). Trigger: optional on account update; periodic every `AMS_SYNC_INTERVAL_SECONDS`.
+- **Sync:** OMS `account_sync.py` reads from Redis account store and writes to Postgres `accounts`, `balances` (and optionally `margin_snapshots`). No `positions` table in OMS (positions in Redis only). Trigger: optional on account update; periodic sync.
 - **Repairs:** `ams/repair.py` — `run_all_repairs(pg_connect)` runs after sync. Fixes flawed numeric/empty fields for `broker = 'binance'` (or other brokers) by recovering from `payload` / raw broker blob stored in Redis or in an optional payload column on accounts/balances/positions.
 
 All columns above are written from Redis to Postgres by AMS sync. Redis is populated by the account event callback (stream) and by periodic REST refresh.

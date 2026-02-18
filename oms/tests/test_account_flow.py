@@ -518,3 +518,35 @@ class TestMakeAccountCallbackPayload:
         # Verify payload was stored
         account = account_store.get_account("binance", "test-account")
         assert account["payload"] == payload
+
+    def test_on_balance_change_called_for_balance_update(self, account_store):
+        """When on_balance_change is provided, it is called with (broker, account_id, asset, delta, event_type, event_time, payload)."""
+        calls = []
+        def on_balance_change(broker, account_id, asset, delta, event_type, event_time, payload):
+            calls.append((broker, account_id, asset, delta, event_type, event_time, payload))
+
+        callback = make_account_callback(
+            MagicMock(), account_store,
+            on_account_updated=None,
+            on_balance_change=on_balance_change,
+        )
+        payload = {"e": "balanceUpdate", "a": "USDT", "d": "50.25", "T": 1704067200000}
+        event = {
+            "event_type": "balance_update",
+            "broker": "binance",
+            "account_id": "test-account",
+            "balances": [{"asset": "USDT", "available": "50.25", "locked": "0.0"}],
+            "positions": [],
+            "updated_at": "2024-01-01T00:00:00Z",
+            "payload": payload,
+        }
+        callback(event)
+        assert len(calls) == 1
+        broker, account_id, asset, delta, event_type, event_time, pl = calls[0]
+        assert broker == "binance"
+        assert account_id == "test-account"
+        assert asset == "USDT"
+        assert delta == "50.25"
+        assert event_type == "balanceUpdate"
+        assert event_time == 1704067200000
+        assert pl == payload

@@ -40,7 +40,7 @@ Single reference for Account Management within OMS: data flow, Redis/Postgres in
 - **Inbound (event-driven):** Broker user data stream events: `outboundAccountPosition` (balance per asset), `balanceUpdate` (delta), and broker-specific position/balance events. OMS continues to consume `executionReport` only; AMS consumes account/balance/position events (same WebSocket can be shared or separate listener per broker).
 - **Inbound (periodic):** REST snapshot: e.g. `get_account()`, `get_futures_account()`, `get_futures_balance()` at a configurable interval (e.g. 60s) to reconcile and backfill.
 - **Store:** Redis hashes/sets for account metadata, balances, and positions per `(broker, account_id)`.
-- **Outbound:** Postgres `accounts`, `balances`, `positions`, `balance_changes` (historical deposits/withdrawals), and optional `margin_snapshots`. Optional Redis stream `ams_snapshots` for downstream (Risk / Position Keeper) if needed.
+- **Outbound:** Postgres `accounts`, `balances`, `balance_changes` (historical deposits/withdrawals), and optional `margin_snapshots`. OMS does not have a `positions` table (positions stored in Redis only; name reserved for PMS). Optional Redis stream `ams_snapshots` for downstream (Risk / Position Keeper) if needed.
 
 ---
 
@@ -64,7 +64,7 @@ Proposed layout (broker-agnostic; extend per broker as needed):
 
 | Key pattern                          | Type  | Purpose |
 |--------------------------------------|-------|--------|
-| `account:{broker}:{account_id}`      | Hash  | Account metadata: broker, account_id, env, updated_at, optional config. |
+| `account:{broker}:{account_id}`      | Hash  | Account metadata: broker, account_id, updated_at, optional config. |
 | `account:{broker}:{account_id}:balances` | Hash | Asset → balance info (available, locked, etc.). Field = asset, value = JSON or pipe-separated. |
 | `account:{broker}:{account_id}:positions`| Hash | Symbol (or symbol_side) → position info (quantity, entry_price_avg, etc.). |
 | `accounts:by_broker:{broker}`         | Set   | Set of `account_id` for that broker (index). |

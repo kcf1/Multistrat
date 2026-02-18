@@ -20,6 +20,9 @@ def make_account_callback(
     redis: Redis,
     account_store: RedisAccountStore,
     on_account_updated: Optional[Callable[[str, str], None]] = None,
+    on_balance_change: Optional[
+        Callable[[str, str, str, Any, str, Any, Optional[Dict[str, Any]]], None]
+    ] = None,
 ) -> Callable[[Dict[str, Any]], None]:
     """
     Return a callback suitable for adapter.start_account_listener(callback).
@@ -29,11 +32,15 @@ def make_account_callback(
     - Updates Redis account store (apply_account_position or apply_balance_update)
     - Uses updated_at timestamp for idempotency (avoids overwriting newer data with older snapshots)
     - Optionally calls on_account_updated(broker, account_id) to trigger sync
+    - For balance_update: optionally calls on_balance_change(broker, account_id, asset, delta,
+      event_type, event_time, payload) so caller can write to balance_changes (delta from payload.d)
 
     Args:
         redis: Redis client (for future use if needed)
         account_store: RedisAccountStore instance
         on_account_updated: Optional callback(broker, account_id) to trigger sync
+        on_balance_change: Optional callback(broker, account_id, asset, delta, event_type,
+            event_time, payload) to write balance_changes row (e.g. via account_sync.write_balance_change)
 
     Returns:
         Callback function that accepts AccountEvent dict
@@ -132,6 +139,25 @@ def make_account_callback(
                 "Account callback: balance_update broker={} account_id={} asset={}",
                 broker, account_id, balance.get("asset", ""),
             )
+            # Optionally write balance_changes (delta from Binance payload.d, event time from payload.T)
+            if on_balance_change and isinstance(payload, dict):
+                asset = (balance.get("asset") or "").strip()
+                delta = payload.get("d")  # Binance balanceUpdate delta
+                event_time = payload.get("T")  # Binance clear time (ms)
+                if asset is not None:
+                    change_type = "deposit" if (delta is not None and float(delta) > 0) else "withdrawal"
+                    if delta is not None and float(delta) == 0:
+                        change_type = "adjustment"
+                    try:
+                        on_balance_change(
+                            broker, account_id, asset, delta,
+                            "balanceUpdate", event_time, payload,
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            "Account callback: on_balance_change error broker={} account_id={}: {}",
+                            broker, account_id, e,
+                        )
 
         # Optionally trigger sync callback
         if on_account_updated:

@@ -37,8 +37,8 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
 ### 3.1 Tables (minimal set)
 
 - **accounts**  
-  - `id` (PK), `name`, `broker` (e.g. `binance`), `env` (e.g. `testnet`/`mainnet`), `created_at`, optional `config` (JSONB).  
-  - One row per broker account if you support multiple; else a single default account.
+  - `id` (PK), `account_id` (broker’s account id), `name` (display; derived as `broker:account_id` if not set), `broker` (e.g. `binance`), `created_at`, optional `config` (JSONB). *(No `env` column; dropped in revision e5f6a7b8c9d0.)*  
+  - One row per broker account; unique `(broker, account_id)` for sync UPSERT.
 
 - **orders** (audit / recovery; **populated by OMS order sync only**)  
   - See table in §3.1 above: includes `book` (strategy/book id), `comment` (freetext), generic broker fields (`executed_qty`, `time_in_force`, etc.), and Binance-specific columns with `binance_` prefix (`binance_cumulative_quote_qty`, `binance_transact_time`).  
@@ -48,10 +48,7 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
   - `id` (PK), `order_id` (FK to orders or internal reference), `account_id` (FK), `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `broker_fill_id`, `executed_at`, `created_at`.  
   - Source of truth for what was executed; populated by downstream consumers of `oms_fills` stream (e.g. Position Keeper or future services). OMS does not write to `fills` table.
 
-- **positions**  
-  - `id` (PK), `account_id` (FK), `symbol`, `side` (long/short for futures), `quantity`, `entry_price_avg`, `updated_at`.  
-  - OMS account sync updates from broker account events (`outboundAccountPosition`). For futures, one row per (account, symbol, side) or net quantity per symbol.  
-  - **Flattened positions:** When `outboundAccountPosition` event is received, positions not included in the event are assumed to be zero/flattened and are **deleted** from Postgres. This handles cases where selling all of a position causes Binance to exclude it from the event (brokers typically only include non-zero positions).
+- **positions** *(OMS: no Postgres table.)* Positions are stored in Redis only (`account:{broker}:{account_id}:positions`). The name `positions` was dropped from OMS Postgres schema for use by PMS (Position Management System). See revision d4e5f6a7b8c9.
 
 - **balances**  
   - `id` (PK), `account_id` (FK), `asset`, `available`, `locked`, `updated_at`.  
@@ -140,7 +137,7 @@ Binance **cancel_order** returns same shape as query.
 
 ### 3.4 Alembic workflow
 
-- Create revision: `alembic revision -m "add_account_tables"` (or split: `add_accounts_orders`, `add_balances_positions`, `add_balance_changes`). Note: `orders` table is synced by OMS order sync; `accounts`, `balances`, `positions`, `balance_changes` are synced by OMS account sync.
+- Create revision: `alembic revision -m "add_account_tables"` (or split). Note: `orders` table is synced by OMS order sync (`oms/sync.py`); `accounts`, `balances`, `balance_changes`, optional `margin_snapshots` are synced by OMS account sync (`oms/account_sync.py`). No `positions` table in OMS Postgres (positions in Redis only; name reserved for PMS).
 - Implement `upgrade()` and `downgrade()` in the new file under `alembic/versions/`.
 - Run `alembic upgrade head` after deploying the revision.
 
@@ -429,8 +426,8 @@ BINANCE_API_SECRET=
 - [x] **12.2.3** **Binance adapter account extension** (`oms/brokers/binance/adapter.py`): implement `start_account_listener(callback)` (uses `account_listener.py`), `get_account_snapshot(account_id)` (REST calls: `get_account()`, `get_futures_account()` if futures), `stop_account_listener()`. **Unit test:** mock Binance API client; verify REST calls, listener start/stop, callback invocation with unified event shape.
 - [x] **12.2.4** **Redis account store** (`oms/storage/redis_account_store.py`): implement Redis storage for accounts, balances, positions based on unified event shape from adapter. Key patterns: `account:{broker}:{account_id}`, `account:{broker}:{account_id}:balances`, `account:{broker}:{account_id}:positions`, `accounts:by_broker:{broker}`. Methods: `apply_account_position`, `apply_balance_update`, `get_account`, `get_balances`, `get_positions`. Use Redis pipelines for atomicity. Store structure should match unified event shape from adapter. **Unit test:** mock Redis or fakeredis; verify key formats, CRUD operations, pipeline atomicity, data structure matches adapter events.
 - [x] **12.2.5** **Account callback** (`oms/account_flow.py`): implement `make_account_callback(redis, account_store, on_account_updated, ...)` that validates account events (using unified shape from adapter), updates Redis account store (`apply_account_position`, `apply_balance_update`), optionally calls `on_account_updated(broker, account_id)` to trigger sync. Use `updated_at` or event_id to avoid overwriting newer data with older periodic snapshot. **Unit test:** mock account store and callback; verify event validation, store updates, idempotency.
-- [ ] **12.2.6** **Account Postgres schema** (Alembic): create revision(s) for `accounts`, `balances`, `positions`, `balance_changes` (historical deposits/withdrawals), optional `margin_snapshots` (per §3.1 and §3.3). Schema should match Redis account store structure (what we store in Redis maps to Postgres columns). Note: `orders` table is written by OMS order sync (`oms/sync.py`), not account sync. `balance_changes` table tracks historical balance changes (deposits, withdrawals, transfers) from `balanceUpdate` events and optionally from `outboundAccountPosition` snapshots. Implement `upgrade()` and `downgrade()`. Run `alembic upgrade head`. **Unit test:** verify schema creation and indexes.
-- [ ] **12.2.7** **Account sync to Postgres** (`oms/account_sync.py`): implement `sync_accounts_to_postgres(redis, account_store, pg_connect, ...)` that reads accounts/balances/positions from Redis and UPSERTs to Postgres (`accounts`, `balances`, `positions`). Map Redis data to Postgres rows (`_account_to_row`, `_balance_to_row`, `_position_to_row`). **Positions cleanup:** After UPSERTing positions from Redis, DELETE any positions for the account that are not present in the current Redis store (handles flattened positions where Binance excludes zero positions from `outboundAccountPosition` events). **Balance changes:** When processing `balanceUpdate` events (from account callback), write to `balance_changes` table with `change_type` derived from delta sign (deposit if delta > 0, withdrawal if delta < 0). Optionally write `outboundAccountPosition` snapshots to `balance_changes` with `change_type='snapshot'` for reconciliation audit trail. Set TTL on Redis keys after sync if configured. **Unit test:** mock Redis and Postgres; verify mapping, UPSERT logic, position deletion for flattened positions, balance_changes writes, TTL setting.
+- [x] **12.2.6** **Account Postgres schema** (Alembic): create revision(s) for `accounts`, `balances`, `balance_changes` (historical deposits/withdrawals), optional `margin_snapshots` (per §3.1 and §3.3). *(Positions table was created then dropped in revision d4e5f6a7b8c9 to free the name for PMS; `accounts.env` dropped in e5f6a7b8c9d0.)* Schema documented in §3.1. **Signed off.**
+- [x] **12.2.7** **Account sync to Postgres** (`oms/account_sync.py`): implement `sync_accounts_to_postgres(redis, account_store, pg_connect, ...)` that reads accounts/balances from Redis and UPSERTs to Postgres (`accounts`, `balances`). Map Redis data to Postgres rows (`_account_to_row`, `_balance_to_row`). No positions table (dropped for PMS). **Balance cleanup:** After UPSERTing balances, DELETE any balances for the account not in current Redis (flattened assets). **Balance changes:** Optional `on_balance_change` in `make_account_callback`; caller can use `write_balance_change` + `get_account_pk_by_broker_and_id` to write to `balance_changes` (change_type from delta sign). Set TTL on account Redis keys after sync via `cleanup.set_account_key_ttl`. **Signed off.**
 - [ ] **12.2.8** **Account repairs** (`oms/account_repair.py`): implement `run_all_account_repairs(pg_connect)` that fixes flawed Postgres account/balance/position fields (e.g. NULL/zero) by recovering from `payload` or raw broker data. Similar pattern to `oms/repair.py` for orders. **Unit test:** mock Postgres with flawed data; verify recovery from payload.
 - [ ] **12.2.9** **OMS main loop integration**: extend `oms/main.py` to start account listeners alongside fill listeners; add periodic account refresh (`get_account_snapshot` every `account_refresh_interval_seconds`); add periodic account sync (`sync_accounts_to_postgres`) and repairs (`run_all_account_repairs`) in main loop. Wait for account listeners connected before processing orders. **Integration test:** fakeredis + mock adapters; verify listeners start, callbacks update store, periodic refresh and sync run.
 - [ ] **12.2.10** **Account cleanup** (`oms/cleanup.py`): extend cleanup module with `set_account_key_ttl(redis, broker, account_id, ttl_seconds)` for TTL on account keys after sync. **Unit test:** mock Redis; verify TTL setting.
@@ -461,9 +458,9 @@ BINANCE_API_SECRET=
 - [ ] **Test script** runs successfully: connects to Redis, XADDs one test order to `risk_approved` with `broker: "binance"`.
 - [ ] One test order injected via script flows: OMS routes to Binance adapter → Binance testnet → fill (or reject) → OMS publishes to `oms_fills` (event_type fill/reject/cancelled/expired as applicable).
 - [ ] **OMS order sync** (trigger on terminal status and/or periodic `sync_terminal_orders`) populates Postgres `orders` from Redis; after sync, `orders` table has the test order row.
-- [ ] **OMS account sync** (periodic `sync_accounts_to_postgres`) populates Postgres `accounts`, `balances`, `positions` from Redis account store (updated by account listener from broker stream events). **Balance changes:** `balanceUpdate` events (deposits/withdrawals) are written to `balance_changes` table for historical tracking.
-- [ ] Position Keeper reads positions/balances from Postgres and writes PnL/margin to Postgres or Redis.
-- [ ] In pgAdmin: `orders` (from OMS order sync), `accounts`, `balances`, `positions` (from OMS account sync) reflect the test order and account state.
+- [ ] **OMS account sync** (periodic `sync_accounts_to_postgres`) populates Postgres `accounts`, `balances` from Redis account store (updated by account listener from broker stream events). No `positions` table (positions in Redis only). **Balance changes:** `balanceUpdate` events (deposits/withdrawals) are written to `balance_changes` table for historical tracking.
+- [ ] Position Keeper reads positions/balances from Postgres (or Redis) and writes PnL/margin to Postgres or Redis.
+- [ ] In pgAdmin: `orders` (from OMS order sync), `accounts`, `balances` (from OMS account sync) reflect the test order and account state.
 - [ ] In RedisInsight: OMS order hashes (e.g. `orders:*`), account hashes (e.g. `account:binance:*`); `oms_fills` stream has the fill (and optionally reject/cancelled/expired) events.
 
 ---
@@ -476,7 +473,7 @@ multistrat/
 ├── .env.example
 ├── alembic/
 │   └── versions/
-│       └── xxxxx_add_account_tables.py  # accounts, balances, positions (orders added in OMS sync)
+│       └── xxxxx_add_account_tables.py  # accounts, balances, balance_changes, margin_snapshots (orders in OMS sync; no positions table)
 ├── oms/
 │   ├── Dockerfile
 │   ├── requirements.txt

@@ -24,7 +24,7 @@ OMS broker adapters now support account management methods:
 
 - **`oms/storage/redis_account_store.py`** - Redis storage for accounts, balances, positions
 - **`oms/account_flow.py`** - Account event callback handler
-- **`oms/account_sync.py`** - Sync accounts/balances/positions to Postgres
+- **`oms/account_sync.py`** - Sync accounts/balances to Postgres (no positions table; positions in Redis only)
 - **`oms/account_repair.py`** - Fix flawed account fields from payload
 - **`oms/brokers/binance/account_listener.py`** - Parse Binance account events
 
@@ -50,12 +50,12 @@ Account data stored in Redis:
 
 Account sync writes to:
 
-- `accounts` - Account metadata
-- `balances` - Balances per account/asset (UPSERT)
-- `positions` - Positions per account/symbol/side (UPSERT, then DELETE positions not in event)
-- `margin_snapshots` (optional) - Margin snapshots for futures
+- `accounts` - Account metadata (id, account_id, name, broker, created_at, config). No `env` column. `name` is derived as `broker:account_id` if not set.
+- `balances` - Balances per account/asset (UPSERT; then DELETE balances not in current Redis snapshot for that account).
+- `balance_changes` - Historical deposits/withdrawals (via `write_balance_change` when processing `balanceUpdate` events).
+- `margin_snapshots` (optional) - Margin snapshots for futures.
 
-**Note:** Positions not included in `outboundAccountPosition` events are deleted from Postgres (handles flattened positions where brokers exclude zero positions).
+**Note:** There is no `positions` table in OMS Postgres; positions are stored in Redis only (`account:{broker}:{account_id}:positions`). The name was reserved for PMS (Position Management System).
 
 ## Data Flow
 
