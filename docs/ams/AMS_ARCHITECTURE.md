@@ -1,6 +1,8 @@
 # AMS Architecture: Data Flow, Interfaces & Design
 
-Single reference for the Account Management System (AMS): data flow, Redis/Postgres interfaces, broker adapter contract, and architecture details. AMS follows the same patterns as OMS: **event-driven from broker streams**, **periodic REST refresh**, **Redis as primary store**, **sync to Postgres**, and **data fixes (repairs)**.
+**Note:** Account Management is **integrated into OMS** (not a separate service). This document describes the account management components within OMS. See `docs/oms/OMS_ARCHITECTURE.md` for the complete OMS architecture including orders and accounts.
+
+Single reference for Account Management within OMS: data flow, Redis/Postgres interfaces, broker adapter contract, and architecture details. Account management follows the same patterns as order management: **event-driven from broker streams**, **periodic REST refresh**, **Redis as primary store**, **sync to Postgres**, and **data fixes (repairs)**.
 
 ---
 
