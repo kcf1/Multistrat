@@ -233,7 +233,7 @@ multistrat/
 ├── migrations/          # Postgres migrations
 ├── oms/                  # OMS service (Redis staging + Postgres sync, Binance adapter)
 ├── booking/              # Booking service
-├── position_keeper/      # Position Keeper service
+├── pms/                  # PMS (Portfolio Management System) — source of truth for PnL/margin
 ├── risk/                 # Risk service (minimal in P2, full in P5)
 ├── admin/                # Admin service + CLI or GUI (Phase 3)
 ├── market_data/          # Market data service (Phase 4)

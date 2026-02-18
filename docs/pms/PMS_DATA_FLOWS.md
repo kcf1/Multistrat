@@ -1,6 +1,6 @@
 # PMS Data Flows: Periodic Rebuild, Event-Driven, Data Fixes
 
-This document details the data flows for the Portfolio Management System (Position Keeper), aligned with OMS patterns: **periodic sync**, **event-driven** behavior where applicable, and **data fixes** (repairs). It also defines how the **orders** table is used to compute or reconcile positions.
+This document details the data flows for the **Portfolio Management System (PMS)**, aligned with OMS patterns: **periodic sync**, **event-driven** behavior where applicable, and **data fixes** (repairs). It also defines how the **orders** table is used to compute or reconcile positions.
 
 ---
 
@@ -17,21 +17,21 @@ PMS applies the same ideas: **primary view** from one store (positions table), *
 
 ---
 
-## 2. Position Keeper: Primary Data Source vs Orders
+## 2. PMS: Primary Data Source vs Orders
 
-- **Primary source for “current positions”:** The **positions** table (and Redis cache) maintained by **Booking** from `oms_fills` (fill events). Position Keeper **reads** this for low-latency PnL/margin.
+- **Primary source for “current positions”:** **Redis** (OMS account store: `account:{broker}:{account_id}:positions`). In Phase 2 there is no Postgres positions table; PMS **reads** positions from Redis for low-latency PnL/margin.
 - **Canonical / audit source:** The **orders** table (OMS sync). Net position can be **recomputed** from orders as: for each (account_id, symbol, side), sum `executed_qty` over terminal orders (e.g. status in `filled`, `partially_filled` with final state, or only `filled` depending on how you treat partials).
 
 So:
 
-- **Live view** → positions table (and Redis cache).
-- **Reconciliation and repairs** → recompute from orders, compare to positions, fix or flag drift.
+- **Live view** → Redis positions (OMS account store).
+- **Reconciliation and repairs** → recompute from orders, compare to Redis positions, fix or flag drift.
 
 ---
 
 ## 3. Periodic Rebuild (From Orders)
 
-**What:** Periodically recompute per-account, per-symbol (and per-side for futures) **net position** from the **orders** table, then compare to the **positions** table.
+**What:** Periodically recompute per-account, per-symbol (and per-side for futures) **net position** from the **orders** table, then compare to **positions** in Redis (OMS account store).
 
 **Why:** Detects drift (e.g. missed fill, duplicate apply, or Booking bug). Keeps positions consistent with the audit trail (orders).
 
@@ -39,10 +39,10 @@ So:
 
 1. **Query orders:** e.g. `SELECT account_id, symbol, side, SUM(executed_qty) AS net_qty FROM orders WHERE status IN ('filled', ...) GROUP BY account_id, symbol, side`.
 2. **Map to “expected” positions:** Convert to the same shape as the positions table (account_id, symbol, side, quantity, optionally entry_price from fills or orders).
-3. **Read current positions** from Postgres (or Redis).
+3. **Read current positions** from Redis (OMS account store).
 4. **Compare:** For each (account_id, symbol, side), compare expected quantity vs current position quantity.
 5. **Repair or flag:** If drift:
-   - **Repair:** Update positions table (and optionally Redis cache) to expected values; or
+   - **Repair:** Update Redis positions (OMS account store) to expected values; or
    - **Flag:** Write to a reconciliation table or log for manual review.
 
 **When:** Every `PMS_REBUILD_FROM_ORDERS_INTERVAL_SECONDS` (e.g. 60–300s), inside the same loop as PnL/margin tick or in a separate periodic task.
@@ -53,20 +53,20 @@ So:
 
 ## 4. Event-Driven Behavior
 
-**Current (minimal) design:** Position Keeper does **not** consume a Redis stream. It runs on a **timer** (e.g. every 5s): read positions/balances → calculate PnL/margin → write snapshots/cache. So “event-driven” here means “Booking and OMS are event-driven”; Position Keeper follows with a short delay.
+**Current (minimal) design:** PMS does **not** consume a Redis stream. It runs on a **timer** (e.g. every 5s): read positions/balances from Redis and Postgres → calculate PnL/margin → write snapshots/cache. So “event-driven” here means “OMS is event-driven”; PMS follows with a short delay.
 
 **Optional extensions:**
 
-- **Redis pub/sub or stream:** Booking (or a thin service) publishes a message on each fill (e.g. `pms_tick` or `position_updated`). Position Keeper subscribes and runs one read→calculate→write cycle on each message (in addition to or instead of timer). Same pattern as OMS waking on `risk_approved`.
-- **Redis keyspace notifications:** If Booking updates `positions:{account_id}`, Position Keeper could subscribe to key events and refresh only that account. More complex; timer is usually enough for Phase 2.
+- **Redis pub/sub or stream:** A thin service (or OMS) publishes a message on each fill (e.g. `pms_tick` or `position_updated`). PMS subscribes and runs one read→calculate→write cycle on each message (in addition to or instead of timer). Same pattern as OMS waking on `risk_approved`.
+- **Redis keyspace notifications:** If OMS updates `account:{broker}:{account_id}:positions`, PMS could subscribe to key events and refresh only that account. More complex; timer is usually enough for Phase 2.
 
-So: **no session or event-driven Position Keeper is required** for Phase 2; timer-based flow is sufficient and matches “periodic” in the OMS sense.
+So: **no session or event-driven PMS consumer is required** for Phase 2; timer-based flow is sufficient and matches “periodic” in the OMS sense.
 
 ---
 
 ## 5. Data Fixes (Repairs)
 
-**What:** Correct **positions** (and optionally balances) when **rebuild from orders** finds drift.
+**What:** Correct **positions** in Redis (and optionally balances) when **rebuild from orders** finds drift.
 
 **Why:** Same as OMS repairs: the derived store (positions) can be wrong; the canonical store (orders) is used to fix it.
 
@@ -74,7 +74,7 @@ So: **no session or event-driven Position Keeper is required** for Phase 2; time
 
 1. Run **periodic rebuild** (see §3) to get expected positions from orders.
 2. For each (account_id, symbol, side) where current ≠ expected:
-   - **Option A (auto-repair):** UPDATE positions table (and Redis cache) to expected quantity/entry_price; optionally log to an audit table.
+   - **Option A (auto-repair):** UPDATE Redis positions (OMS account store) to expected quantity/entry_price; optionally log to an audit table.
    - **Option B (flag only):** Insert into `position_drift` or log; do not auto-update. Admin or batch job fixes later.
 3. Optionally: run repairs only when drift is above a threshold (e.g. quantity difference > 0) or after a cooldown to avoid flapping.
 
@@ -114,7 +114,7 @@ WHERE status = 'filled'
 GROUP BY account_id, symbol, side;
 ```
 
-Then join or compare with `positions` (account_id, symbol, side, quantity). Difference → repair or flag.
+Then join or compare with Redis positions (account_id, symbol, side, quantity). Difference → repair or flag.
 
 ---
 

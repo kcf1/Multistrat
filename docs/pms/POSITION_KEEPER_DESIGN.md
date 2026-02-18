@@ -1,17 +1,17 @@
-# Position Keeper: Design and Orders-Based Positions
+# PMS: Orders-Based Positions and Rebuild Design
 
-This document details the Position Keeper service: its role in the PMS, how it uses the **orders** table to compute and reconcile positions, and how it fits with Booking and OMS. See **docs/PHASE2_DETAILED_PLAN.md** §8 and **docs/pms/PMS_ARCHITECTURE.md**.
+This document details how **PMS** uses the **orders** table to compute and reconcile positions, and how it fits with OMS. See **docs/PHASE2_DETAILED_PLAN.md** §8 and **docs/pms/PMS_ARCHITECTURE.md**.
 
 ---
 
 ## 1. Role Summary
 
-- **Read:** Positions and balances (Postgres and/or Redis cache written by Booking); optionally **orders** and **fills** for reconciliation and PnL.
+- **Read:** Positions and balances (Redis from OMS account store; Postgres balances); optionally **orders** and **fills** for reconciliation and PnL.
 - **Compute:** Realized PnL (from fills), unrealized PnL (from mark price), margin (futures).
-- **Positions:** Primary view from **positions** table; **recompute from orders** for reconciliation and repairs.
+- **Positions:** Primary view from **Redis** (OMS account store); **recompute from orders** for reconciliation and repairs.
 - **Write:** PnL/margin snapshots to Postgres and/or Redis for Admin/UI.
 
-Position Keeper does **not** write to `orders` or `fills`; those are owned by OMS and Booking. It may **update** the `positions` table (and Redis cache) when running **repairs** (drift correction from orders).
+PMS does **not** write to `orders` or `fills`; those are owned by OMS. It may **update** Redis positions (OMS account store) when running **repairs** (drift correction from orders).
 
 ---
 
@@ -45,13 +45,13 @@ GROUP BY account_id, symbol, side;
 - Use **fills** table: average of (price * quantity) / sum(quantity) per (account_id, symbol, side) for realized cost basis.
 - Or derive from orders: weighted average of order `price` by `executed_qty` for filled orders.
 
-Position Keeper can implement a function **expected_positions_from_orders(pg_connect)** that returns a list of (account_id, symbol, side, expected_qty, optional expected_entry_avg).
+PMS can implement a function **expected_positions_from_orders(pg_connect)** that returns a list of (account_id, symbol, side, expected_qty, optional expected_entry_avg).
 
-### 2.3 Reconcile vs Positions Table
+### 2.3 Reconcile vs Redis Positions
 
-- **Read** current positions from Postgres (and optionally Redis).
+- **Read** current positions from Redis (OMS account store).
 - **Compare** (account_id, symbol, side): expected_qty vs current quantity (and optionally entry_price).
-- **Drift:** expected ≠ current → run **repair** (update positions + cache) or **flag** (write to drift table / log).
+- **Drift:** expected ≠ current → run **repair** (update Redis positions) or **flag** (write to drift table / log).
 
 This is the same idea as OMS **repairs**: fix derived state (positions) from canonical state (orders).
 
@@ -61,11 +61,11 @@ This is the same idea as OMS **repairs**: fix derived state (positions) from can
 
 | Step | Source | Action |
 |------|--------|--------|
-| Live view | positions table, Redis cache | Read by account; use for PnL/margin calculation on each tick. |
+| Live view | Redis positions (OMS account store) | Read by account; use for PnL/margin calculation on each tick. |
 | Realized PnL | fills table (or cached) | Sum (price * qty) or use fill-level PnL if stored. |
 | Unrealized PnL | positions + mark price | (mark - entry_avg) * quantity (simplified; futures may use margin/PnL API). |
-| Margin | positions + balances / broker | From Redis cache or REST if futures. |
-| Rebuild | orders table | Periodic: expected_positions_from_orders → compare → repair or flag. |
+| Margin | positions + balances / broker | From Redis or REST if futures. |
+| Rebuild | orders table | Periodic: expected_positions_from_orders → compare to Redis → repair or flag. |
 
 ---
 
@@ -76,9 +76,9 @@ This is the same idea as OMS **repairs**: fix derived state (positions) from can
 **Logic:**
 
 1. For each (account_id, symbol, side) in expected:
-   - If no row in `positions`: INSERT (or treat as 0 and insert if expected_qty ≠ 0).
-   - If row exists and quantity ≠ expected_qty: UPDATE quantity (and optionally entry_price); update Redis cache; log.
-2. For each row in `positions` with no expected (expected_qty = 0): either DELETE or set quantity to 0 (policy choice).
+   - If no entry in Redis positions: add (or treat as 0 and add if expected_qty ≠ 0).
+   - If entry exists and quantity ≠ expected_qty: UPDATE quantity (and optionally entry_price) in Redis; log.
+2. For each entry in Redis positions with no expected (expected_qty = 0): remove or set quantity to 0 (policy choice).
 3. Optionally write to `position_drift_log` (account_id, symbol, side, old_qty, new_qty, source = 'orders_rebuild') for audit.
 
 **When:** After each periodic rebuild-from-orders run (see **docs/pms/PMS_DATA_FLOWS.md**).
@@ -87,9 +87,9 @@ This is the same idea as OMS **repairs**: fix derived state (positions) from can
 
 ## 5. Mark Price (Unrealized PnL)
 
-Phase 2 plan (§8.2): Mark price can come from Binance (REST or websocket) or from Market Data (Phase 4). For Phase 2, optional: fetch in Position Keeper or leave unrealized PnL zero until Phase 4.
+Phase 2 plan (§8.2): Mark price can come from Binance (REST or websocket) or from Market Data (Phase 4). For Phase 2, optional: fetch in PMS or leave unrealized PnL zero until Phase 4.
 
-- **Option A:** Position Keeper calls Binance REST (or existing client) for mark price per symbol when computing unrealized PnL.
+- **Option A:** PMS calls Binance REST (or existing client) for mark price per symbol when computing unrealized PnL.
 - **Option B:** Unrealized PnL = 0 until Market Data service exists; only realized PnL and margin are shown.
 
 ---
