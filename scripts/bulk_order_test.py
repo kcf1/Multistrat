@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
 Bulk order injection test: inject multiple orders at once, then measure timing
-for each order individually to test bulk processing performance.
+for each order individually to test bulk processing performance. Also verifies
+account-flow downstreams (Redis account store and optional Postgres accounts/balances).
 
 Requires: REDIS_URL. Optional: DATABASE_URL for Postgres check.
 OMS must be running separately (e.g. docker compose up -d oms) with testnet config.
 
 Usage:
-    python scripts/bulk_order_test.py [--market] [--count N] [--runs M]
+    python scripts/bulk_order_test.py [--market] [--count N] [--runs M] [--no-account]
     
 Options:
     --market: inject MARKET orders (fill immediately); default: LIMIT (unfillable) + cancel
     --count N: number of orders to inject per run (default: 10)
     --runs M: number of test runs to average (default: 3)
     --verbose: show detailed timing for each order
+    --no-account: skip account-flow downstream check
 
 Examples:
     python scripts/bulk_order_test.py --market --count 20 --runs 3
@@ -184,10 +186,74 @@ def inject_and_track_order(order_id: str, market: bool, redis, store, verbose: b
     return metrics
 
 
-def run_bulk_test(market: bool, count: int, redis, store, verbose: bool = False) -> list:
+def _check_account_downstreams(account_store, database_url: str, market: bool, verbose: bool) -> bool:
+    """Poll Redis account store (and optionally Postgres); return True if account/balances present."""
+    broker, account_id = "binance", "default"
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        acc = account_store.get_account(broker, account_id)
+        balances = account_store.get_balances(broker, account_id) if acc else []
+        if acc and len(balances) >= 1:
+            assets = [b.get("asset") for b in balances if b.get("asset")]
+            if market:
+                if "BTC" in assets:
+                    break
+            else:
+                break
+        else:
+            continue
+    else:
+        if verbose:
+            print("  Account-flow: FAIL (no account/balances in Redis within 90s)", file=sys.stderr)
+        return False
+    if verbose:
+        print("  Account-flow: Redis OK")
+    if database_url:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(database_url)
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT a.id FROM accounts a WHERE a.broker = %s AND a.account_id = %s",
+                    (broker, account_id),
+                )
+                acc_rows = cur.fetchall()
+                if not acc_rows:
+                    if verbose:
+                        print("  Account-flow: Postgres missing account row", file=sys.stderr)
+                    return False
+                cur.execute("SELECT asset FROM balances WHERE account_id = %s", (acc_rows[0][0],))
+                bal_rows = cur.fetchall()
+            finally:
+                conn.close()
+            if len(bal_rows) < 1:
+                if verbose:
+                    print("  Account-flow: Postgres missing balance rows", file=sys.stderr)
+                return False
+            if verbose:
+                print("  Account-flow: Postgres OK")
+        except Exception as e:
+            if verbose:
+                print(f"  Account-flow: Postgres skip ({e})", file=sys.stderr)
+    return True
+
+
+def run_bulk_test(
+    market: bool,
+    count: int,
+    redis,
+    store,
+    account_store=None,
+    database_url: str = "",
+    check_account: bool = True,
+    verbose: bool = False,
+) -> tuple:
     """
     Inject multiple orders at once, then track timing for each.
-    Returns list of metrics dicts, one per order.
+    If check_account, verifies account-flow downstreams (Redis + optional Postgres).
+    Returns (list of metrics dicts, account_ok: bool).
     """
     # Generate order IDs
     order_ids = [f"bulk-{int(time.time() * 1000)}-{i}-{uuid.uuid4().hex[:8]}" for i in range(count)]
@@ -311,11 +377,16 @@ def run_bulk_test(market: bool, count: int, redis, store, verbose: bool = False)
     # Fill in inject_time for all (same for all orders since injected together)
     for m in all_metrics:
         m["inject_time"] = inject_duration / count  # Average per order
-    
+
     # Sort by order_id for consistent output
     all_metrics.sort(key=lambda x: x["order_id"])
-    
-    return all_metrics
+
+    # Account-flow downstream check
+    account_ok = True
+    if check_account and account_store is not None and len(all_metrics) >= count:
+        account_ok = _check_account_downstreams(account_store, database_url, market, verbose)
+
+    return (all_metrics, account_ok)
 
 
 def main() -> int:
@@ -324,19 +395,22 @@ def main() -> int:
     parser.add_argument("--count", type=int, default=10, help="Number of orders to inject per run (default: 10)")
     parser.add_argument("--runs", type=int, default=3, help="Number of test runs to average (default: 3)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed timing for each order")
+    parser.add_argument("--no-account", action="store_true", help="Skip account-flow downstream check")
     args = parser.parse_args()
-    
+
     REDIS_URL = _env("REDIS_URL")
     DATABASE_URL = _env("DATABASE_URL")
     if not REDIS_URL:
         print("REDIS_URL not set", file=sys.stderr)
         return 1
-    
+
     from redis import Redis
     from oms.storage.redis_order_store import RedisOrderStore
-    
+    from oms.storage.redis_account_store import RedisAccountStore
+
     redis = Redis.from_url(REDIS_URL, decode_responses=True)
     store = RedisOrderStore(redis)
+    account_store = RedisAccountStore(redis)
     
     order_type = "MARKET" if args.market else "LIMIT"
     print(f"Running {args.runs} test run(s) with {args.count} {order_type} orders per run...")
@@ -350,17 +424,28 @@ def main() -> int:
         if args.verbose:
             print(f"--- Run {run_num}/{args.runs} ---")
         
-        metrics = run_bulk_test(args.market, args.count, redis, store, verbose=args.verbose)
-        
+        metrics, account_ok = run_bulk_test(
+            args.market,
+            args.count,
+            redis,
+            store,
+            account_store=account_store,
+            database_url=DATABASE_URL or "",
+            check_account=not args.no_account,
+            verbose=args.verbose,
+        )
+
         if not metrics:
             print(f"Run {run_num}: Failed to inject orders", file=sys.stderr)
             continue
-        
+
         success_count = sum(1 for m in metrics if m["success"])
         if success_count < args.count:
             print(f"Run {run_num}: Only {success_count}/{args.count} orders completed", file=sys.stderr)
-        
-        all_runs_metrics.append(metrics)
+        if not account_ok:
+            print(f"Run {run_num}: Account-flow downstream check failed", file=sys.stderr)
+
+        all_runs_metrics.append((metrics, account_ok))
         
         if args.verbose:
             print(f"  Completed: {success_count}/{args.count} orders")
@@ -370,11 +455,19 @@ def main() -> int:
             if len(metrics) > 5:
                 print(f"    ... and {len(metrics) - 5} more")
             print()
-    
+
     if not all_runs_metrics:
         print("No successful runs", file=sys.stderr)
         return 1
-    
+
+    # Check if any run failed account-flow
+    account_failures = sum(1 for _, acc_ok in all_runs_metrics if not acc_ok)
+    if account_failures:
+        print(f"Account-flow check failed in {account_failures}/{args.runs} run(s)", file=sys.stderr)
+
+    # Aggregate metrics across all runs (use metrics only)
+    all_runs_metrics = [m[0] for m in all_runs_metrics]
+
     # Aggregate metrics across all runs
     print("=" * 70)
     print("RESULTS SUMMARY")
@@ -424,8 +517,10 @@ def main() -> int:
         print(f"Throughput: {throughput:.2f} orders/second (average)")
     
     print("=" * 70)
-    
-    return 0 if success_count == args.runs * args.count else 1
+
+    # Exit 1 if any order run failed or any account-flow check failed
+    all_orders_ok = success_count == args.runs * args.count
+    return 0 if (all_orders_ok and account_failures == 0) else 1
 
 
 if __name__ == "__main__":

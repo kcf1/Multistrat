@@ -1,6 +1,6 @@
-# Phase 2: Detailed Plan — OMS, Booking, Position (Binance first)
+# Phase 2: Detailed Plan — OMS, Account Management, Position (Binance first)
 
-**Goal:** End-to-end order flow: approved orders → **generic OMS** (routes to broker adapters) → first broker **Binance** → fills → Booking → Postgres positions/balances/margin; Position Keeper for PnL/margin. The OMS is broker-agnostic; Binance is the first broker adapter. Minimal Risk pass-through for testing.
+**Goal:** End-to-end order flow: approved orders → **generic OMS** (routes to broker adapters) → first broker **Binance** → fills → Postgres orders; OMS also manages account state (balances, positions) from broker streams → Postgres accounts/balances/positions; Position Keeper for PnL/margin. The OMS is broker-agnostic and handles all broker state (orders + accounts); Binance is the first broker adapter. Minimal Risk pass-through for testing.
 
 ---
 
@@ -11,9 +11,9 @@
 | **OMS** | Generic order router: consumes `risk_approved`, stages orders in **Redis** (hashes + indexes), dispatches to a **broker adapter** by `broker`/account; receives fills from adapter and publishes `oms_fills`. Periodically syncs orders to Postgres for audit. Extensible to more brokers later. |
 | **Broker adapters** | Pluggable implementations (e.g. Binance first; others later). Each adapter: place order, subscribe to fills/rejects, report back to OMS in a unified format. |
 | **First broker** | Binance (testnet first; spot or futures — decide one for Phase 2). |
-| **Order path** | Redis `risk_approved` → OMS (router) → broker adapter (Binance) → broker API → fills back to OMS → Redis `oms_fills` → Booking → Postgres (fills, positions, balances) + Redis cache |
-| **OMS persistence** | **Redis** (staging: order hashes, status indexes, broker_order_id lookup); **sync to Postgres** `orders` table (trigger on terminal status + periodic) via `oms/sync.py`; optional repairs via `oms/repair.py`. |
-| **Booking persistence** | Postgres (fills, positions, balances, margin; **orders** table is written by OMS only); Redis cache for Risk/Position Keeper |
+| **Order path** | Redis `risk_approved` → OMS (router) → broker adapter (Binance) → broker API → fills back to OMS → Redis `oms_fills` stream (for downstream consumers); OMS syncs orders to Postgres `orders` table. |
+| **Account path** | Broker user data stream (`outboundAccountPosition`, `balanceUpdate`) → OMS account listener → Redis account store → sync to Postgres (`accounts`, `balances`, `positions`). Periodic REST refresh for reconciliation. |
+| **OMS persistence** | **Redis** (staging: order hashes, account hashes, status indexes, broker_order_id lookup); **sync to Postgres** `orders` table (trigger on terminal status + periodic) via `oms/sync.py`; **sync to Postgres** `accounts`, `balances`, `positions` (periodic) via `oms/account_sync.py`; optional repairs via `oms/repair.py` and `oms/account_repair.py`. |
 | **Position Keeper** | Reads Postgres/Redis; aggregates PnL and margin |
 | **Risk (Phase 2)** | Minimal: consume `strategy_orders`, pass through to `risk_approved` (or use test inject for E2E) |
 
@@ -23,42 +23,44 @@
 
 - **Phase 1 complete:** Postgres, Redis, Alembic, Docker network `multistrat`, `.env` with `DATABASE_URL` and `REDIS_URL`.
 - **Binance:** API key and secret; decide **spot** or **futures** (e.g. futures for margin/leverage). Use **testnet** for development.
-- **Language/runtime:** Choose one for OMS, Booking, Position Keeper, Risk (e.g. Python for consistency with Alembic; or Go/Node per service).
+- **Language/runtime:** Choose one for OMS, Position Keeper, Risk (e.g. Python for consistency with Alembic; or Go/Node per service). Account management is integrated into OMS.
 - **Testing approach:** Build **bottom-up** with unit tests at each layer (mock dependencies) before integration. See §12 Task checklist and §16 Testing for the order and test strategy.
 
 ---
 
-## 3. Postgres schema (Booking / Position Keeper)
+## 3. Postgres schema (OMS / Position Keeper)
 
-**Note:** Postgres schema is **defined and implemented as part of Booking** (see §12.2.1). Position Keeper reads from this schema but does not modify it. This section describes the schema design; implementation happens in the Booking task checklist.
+**Note:** Postgres schema is **defined and implemented as part of OMS** (orders sync: §12.1.10, account sync: §12.2.1). Position Keeper reads from this schema but does not modify it. This section describes the schema design; implementation happens in the OMS task checklist.
 
 All schema changes are **Alembic revisions** (same as Phase 1). Add one or more revisions for the following.
 
 ### 3.1 Tables (minimal set)
 
 - **accounts**  
-  - `id` (PK), `name`, `broker` (e.g. `binance`), `env` (e.g. `testnet`/`mainnet`), `created_at`, optional `config` (JSONB).  
-  - One row per broker account if you support multiple; else a single default account.
+  - `id` (PK), `account_id` (broker’s account id), `name` (display; derived as `broker:account_id` if not set), `broker` (e.g. `binance`), `created_at`, optional `config` (JSONB). *(No `env` column; dropped in revision e5f6a7b8c9d0.)*  
+  - One row per broker account; unique `(broker, account_id)` for sync UPSERT.
 
-- **orders** (audit / recovery; **populated by OMS only**, not by Booking)  
+- **orders** (audit / recovery; **populated by OMS order sync only**)  
   - See table in §3.1 above: includes `book` (strategy/book id), `comment` (freetext), generic broker fields (`executed_qty`, `time_in_force`, etc.), and Binance-specific columns with `binance_` prefix (`binance_cumulative_quote_qty`, `binance_transact_time`).  
   - OMS syncs orders to this table via `sync_one_order` / `sync_terminal_orders` (`oms/sync.py`) on terminal status (from fill callback or reject path) and periodically. Column sources: **docs/oms/OMS_ORDERS_DB_FIELDS.md**. Post-sync repairs for Binance: `oms/repair.py` (`run_all_repairs`).
 
 - **fills**  
   - `id` (PK), `order_id` (FK to orders or internal reference), `account_id` (FK), `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `broker_fill_id`, `executed_at`, `created_at`.  
-  - Source of truth for what was executed; Booking reads from `oms_fills` stream and writes here.
+  - Source of truth for what was executed; populated by downstream consumers of `oms_fills` stream (e.g. Position Keeper or future services). OMS does not write to `fills` table.
 
-- **positions**  
-  - `id` (PK), `account_id` (FK), `symbol`, `side` (long/short for futures), `quantity`, `entry_price_avg`, `updated_at`.  
-  - Booking updates on each fill (add/reduce). For futures, one row per (account, symbol, side) or net quantity per symbol.
+- **positions** *(OMS: no Postgres table.)* Positions are stored in Redis only (`account:{broker}:{account_id}:positions`). The name `positions` was dropped from OMS Postgres schema for use by PMS (Position Management System). See revision d4e5f6a7b8c9.
 
 - **balances**  
   - `id` (PK), `account_id` (FK), `asset`, `available`, `locked`, `updated_at`.  
-  - Booking updates from balance events or derived from fills/cash.
+  - OMS account sync updates from broker balance events (`outboundAccountPosition`, `balanceUpdate`) and periodic REST refresh.  
+  - **Current state only:** Stores current balance per asset; historical changes tracked in `balance_changes` table.
 
-- **margin_snapshots** (optional for spot; useful for futures)  
-  - `id` (PK), `account_id` (FK), `total_margin`, `available_balance`, `timestamp`.  
-  - Position Keeper or Booking can write periodically.
+- **balance_changes** (historical tracking)  
+  - `id` (PK), `account_id` (FK), `asset`, `change_type` (deposit, withdrawal, transfer, adjustment, snapshot), `delta` (NUMERIC: positive for deposit, negative for withdrawal), `balance_before` (NUMERIC NULL), `balance_after` (NUMERIC NULL), `event_type` (balanceUpdate, outboundAccountPosition, manual_adjustment), `broker_event_id` (TEXT NULL), `event_time` (TIMESTAMPTZ), `created_at` (TIMESTAMPTZ), `payload` (JSONB NULL).  
+  - **Historical record:** Tracks all balance changes (deposits, withdrawals, transfers, adjustments). Populated from `balanceUpdate` events via main's `on_balance_change` callback (writes to Postgres and sets TTL on Redis account keys only for balance change events).  
+  - Indexes: `(account_id, asset, event_time)`, `(account_id, change_type)`, `event_time`.
+
+*(**margin_snapshots** table was dropped in revision f6a7b8c9d0e1; unused. Position Keeper can use a dedicated `pnl_snapshots` or Redis keys if needed.)*
 
 **orders** — Extended columns for book (strategy) and freetext comment. Broker-agnostic columns for routing/audit; **Binance-specific** columns use the `binance_` prefix so other brokers can add their own (e.g. `bybit_*`) without collision.
 
@@ -101,9 +103,39 @@ Binance **cancel_order** returns same shape as query.
 - Internal `broker_order_id` = Binance `orderId`.
 - `book` and `comment` are **not** sent to Binance; they are carried from `risk_approved` through OMS and stored in Postgres/Redis for audit and strategy attribution.
 
-### 3.3 Alembic workflow
+### 3.3 Balance changes table schema
 
-- Create revision: `alembic revision -m "add_booking_tables"` (or split: `add_accounts_orders`, `add_fills_positions_balances`).
+**balance_changes** — Historical tracking of deposits, withdrawals, transfers, and balance adjustments.
+
+| Column | Type | Source | Notes |
+|--------|------|--------|-------|
+| `id` | BIGSERIAL PK | internal | |
+| `account_id` | FK → accounts | account event | |
+| `asset` | TEXT | balanceUpdate / outboundAccountPosition | Asset symbol (e.g. USDT, BTC) |
+| `change_type` | TEXT | derived | `deposit`, `withdrawal`, `transfer`, `adjustment`, `snapshot` |
+| `delta` | NUMERIC | balanceUpdate `d` field | Amount changed: positive for deposit, negative for withdrawal |
+| `balance_before` | NUMERIC NULL | calculated | Balance before change (optional, for audit) |
+| `balance_after` | NUMERIC NULL | calculated | Balance after change (optional, for audit) |
+| `event_type` | TEXT | account event | `balanceUpdate`, `outboundAccountPosition`, `manual_adjustment` |
+| `broker_event_id` | TEXT NULL | broker event | Broker's event/trade ID if available |
+| `event_time` | TIMESTAMPTZ | broker event `E` or `T` | Timestamp from broker event (ms converted to timestamp) |
+| `created_at` | TIMESTAMPTZ | internal | When record was created in our system |
+| `payload` | JSONB NULL | broker event | Raw broker event blob (for repairs and audit) |
+
+**Change type derivation:**
+- `deposit`: `balanceUpdate` with positive `delta` (d > 0)
+- `withdrawal`: `balanceUpdate` with negative `delta` (d < 0)
+- `transfer`: `balanceUpdate` during account transfers (may need broker-specific logic)
+- `adjustment`: Manual adjustments or broker corrections
+- `snapshot`: From `outboundAccountPosition` (full account snapshot; delta = 0 or calculated from previous state)
+
+**Indexes:** `(account_id, asset, event_time)` for historical queries, `(account_id, change_type)` for filtering deposits/withdrawals, `event_time` for time-range queries.
+
+**Populated by:** OMS main wires `on_balance_change` when `DATABASE_URL` is set: on each `balanceUpdate` event the callback writes to `balance_changes` (via `write_balance_change`) and sets TTL on Redis account keys. Periodic sync does not set TTL.
+
+### 3.4 Alembic workflow
+
+- Create revision: `alembic revision -m "add_account_tables"` (or split). Note: `orders` table is synced by OMS order sync (`oms/sync.py`); `accounts`, `balances`, `balance_changes` by OMS account sync (`oms/account_sync.py`). No `positions` or `margin_snapshots` table in OMS Postgres (positions in Redis only; margin_snapshots dropped in f6a7b8c9d0e1).
 - Implement `upgrade()` and `downgrade()` in the new file under `alembic/versions/`.
 - Run `alembic upgrade head` after deploying the revision.
 
@@ -148,11 +180,11 @@ Binance **cancel_order** returns same shape as query.
 | `strategy_orders` | Strategies (Phase 5) or test inject | Risk | Order intents from strategies |
 | `risk_approved` | Risk | OMS | Orders approved (or pass-through in P2). Consumer group `oms`, XREADGROUP + XACK. Trimmed by OMS. |
 | `cancel_requested` | Risk / Admin | OMS | Cancel by order_id or (broker_order_id + symbol). Consumer group `oms`. Not trimmed. |
-| `oms_fills` | OMS | Booking | Fill, reject, cancelled, and expired events. Trimmed by OMS. |
+| `oms_fills` | OMS | Downstream (Position Keeper, future services) | Fill, reject, cancelled, and expired events. Trimmed by OMS. |
 
 ### 4.2 Message schemas (JSON)
 
-**Note:** Schemas are **defined and implemented per service** (see §12 Task checklist). OMS defines `risk_approved` input and `oms_fills` output; Booking defines `oms_fills` input (must match OMS output). This ensures each service owns its contract.
+**Note:** Schemas are **defined and implemented per service** (see §12 Task checklist). OMS defines `risk_approved` input and `oms_fills` output; downstream consumers of `oms_fills` must match OMS output schema. OMS also owns account management schemas (Redis account store, Postgres accounts/balances/positions). This ensures each service owns its contract.
 
 **risk_approved (order to execute)** — defined in OMS (12.1.5)  
 - `order_id` (internal UUID or string; optional, OMS can generate)  
@@ -165,16 +197,16 @@ Binance **cancel_order** returns same shape as query.
 - **`comment`** (optional) — Freetext comment; stored with order in Redis and Postgres.  
 - `strategy_id` (optional), `created_at` (ISO)
 
-**oms_fills (fill / reject / cancelled / expired)** — defined in OMS (12.1.5), consumed by Booking (12.2.5). Validation: `OmsFillEvent` in `oms/schemas_pydantic.py`.  
+**oms_fills (fill / reject / cancelled / expired)** — defined in OMS (12.1.5), consumed by downstream services (e.g. Position Keeper, future services). Validation: `OmsFillEvent` in `oms/schemas_pydantic.py`.  
 - `event_type`: `fill` | `reject` | `cancelled` | `expired`  
 - `order_id` (internal), `broker_order_id`, `symbol`, `side`, `quantity`, **`price`** (executed/fill price for this event), `fee`, `fee_asset`  
 - `executed_at` (ISO), `fill_id` (broker), optional `reject_reason` for rejections  
 - **`book`** (optional) — Pass-through from order for attribution.  
 - **`comment`** (optional) — Pass-through from order for audit.  
 
-Booking applies position/balance updates only for `event_type: fill`; `reject` / `cancelled` / `expired` are for audit, logging, or idempotency (no position/balance change).
+Note: OMS account management receives account state directly from broker streams, not from `oms_fills`. Downstream consumers of `oms_fills` may use fill events for their own purposes (e.g. Position Keeper for PnL calculations).
 
-Each service documents its schemas in code or a service README (e.g. `oms/README.md`, `booking/README.md`). Streams are created on first XADD.
+Each service documents its schemas in code or a service README (e.g. `oms/README.md`). Streams are created on first XADD.
 
 ### 4.3 Consumer groups (optional)
 
@@ -245,33 +277,43 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 ---
 
-## 7. Booking service
+## 7. Account Management (integrated into OMS)
 
-**Context:** Booking is the downstream consumer of the OMS. OMS produces to `oms_fills` (stream name `OMS_FILLS_STREAM` = `"oms_fills"` per `oms/schemas.py`). OMS owns syncing the **orders** table to Postgres; Booking owns **fills**, **positions**, and **balances**. See **docs/oms/OMS_ARCHITECTURE.md** for OMS data flow and interfaces.
+**Note:** Booking service (separate consumer of `oms_fills`) is **discarded**. Account management (balances, positions) is **integrated into OMS** instead. This consolidates broker state management in one service and eliminates duplicate broker connections.
 
-### 7.1 Role
+**Context:** OMS extends broker adapters to receive account events from the same user data stream that provides fills. OMS owns syncing both **orders** and **accounts/balances/positions** to Postgres. See **docs/oms/OMS_ARCHITECTURE.md** and **docs/oms/ACCOUNT_MANAGEMENT_INTEGRATION.md** for architecture details.
 
-- Consume from Redis stream **oms_fills** (same stream OMS writes to; optionally use consumer group for at-least-once delivery, similar to OMS `risk_approved`).
-- **event_type handling:** For **`fill`** events only: update **positions** (add or reduce quantity, update avg price), update **balances** (cash/asset), optionally write **margin_snapshots**; insert row into **fills** in Postgres. For **`reject`**, **`cancelled`**, **`expired`**: audit/log only; no position or balance update (order did not result in execution).
-- Update **Redis cache**: e.g. `positions:{account_id}`, `balance:{account_id}:{asset}`, `margin:{account_id}` (JSON or hash) so Risk and Position Keeper can read without hitting Postgres every time.
-- **Orders table:** Booking does **not** write to `orders`; that table is populated by OMS sync (`oms/sync.py`). Booking may read `orders` for attribution (e.g. `book`, `comment`) if not present on the fill event; OMS already passes `book` and `comment` on `oms_fills` events.
+### 7.1 Role (within OMS)
 
-### 7.2 Idempotency
+- **Account event listener:** Receive account/balance/position events from broker user data stream (`outboundAccountPosition`, `balanceUpdate`) via broker adapter. Same WebSocket connection as fills listener (multiplexed by event type).
+- **Periodic REST refresh:** Call `adapter.get_account_snapshot(account_id)` periodically (e.g. every 60s) to reconcile and backfill account state.
+- **Redis account store:** Store account metadata, balances, positions in Redis (`account:{broker}:{account_id}`, `...:balances`, `...:positions`).
+- **Sync to Postgres:** Periodically sync accounts/balances/positions from Redis to Postgres (`accounts`, `balances`, `positions` tables). Same pattern as order sync: trigger on update + periodic sync.
+- **Repairs:** Fix flawed account/balance/position fields from payload (similar to order repairs).
 
-- Use `fill_id` (broker) or (order_id + executed_at) as unique key; ignore duplicate fill events. Reject/cancelled/expired events can be logged or stored for audit without affecting positions/balances.
+### 7.2 Data Sources
 
-### 7.3 Deployment
+- **Event-driven:** Broker user data stream events (`outboundAccountPosition` = full snapshot, `balanceUpdate` = single-asset delta).
+- **Periodic:** REST account snapshot (`get_account()`, `get_futures_account()` for futures) for reconciliation.
 
-- Loop process; Docker service `booking`; env: `REDIS_URL`, `DATABASE_URL`; connect to `multistrat` network.
+### 7.3 Idempotency
+
+- Use `updated_at` or event_id to avoid overwriting newer stream data with older periodic snapshot. Account updates are applied by key (asset, symbol_side).
+
+### 7.4 Deployment
+
+- Integrated into OMS process; no separate service. OMS main loop handles both orders and accounts.
 
 ---
 
 ## 8. Position Keeper service
 
+**Data-model notes:** Order **symbol** (pair, e.g. BTCUSDT) vs balance **asset** (single asset, e.g. BTC, USDT) are not the same; building positions from orders and reconciling two tables (e.g. order-derived positions vs broker positions, balance_changes vs balances) are documented in **docs/position_keeper/README.md**.
+
 ### 8.1 Role
 
 - Periodically (e.g. every few seconds) read **positions** and **balances** from Postgres or from Redis cache; compute **realized PnL** (from fills), **unrealized PnL** (from current mark price if available), and **margin** (for futures).
-- Write results to Postgres (`margin_snapshots` or a dedicated `pnl_snapshots` table) and/or to Redis (e.g. `pnl:{account_id}`, `margin:{account_id}`) for Admin/UI.
+- Write results to Postgres (e.g. a dedicated `pnl_snapshots` table) and/or to Redis (e.g. `pnl:{account_id}`, `margin:{account_id}`) for Admin/UI. *(OMS `margin_snapshots` table was dropped; unused.)*
 
 ### 8.2 Mark price
 
@@ -289,7 +331,7 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 - Consume from Redis stream `strategy_orders` (or skip and use **test inject** only).
 - **Pass-through:** For each message, optionally validate (e.g. symbol format); then publish the same (or enriched) payload to `risk_approved`. No position/margin checks yet.
-- Enables the pipeline Strategy → Risk → OMS for Phase 5; in Phase 2 you can **inject test orders** directly into `risk_approved` to drive OMS/Booking/Position Keeper.
+- Enables the pipeline Strategy → Risk → OMS for Phase 5; in Phase 2 you can **inject test orders** directly into `risk_approved` to drive OMS/Position Keeper.
 
 ### 9.2 Test inject
 
@@ -322,7 +364,7 @@ BINANCE_BASE_URL=https://testnet.binance.vision
 BINANCE_API_KEY=
 BINANCE_API_SECRET=
 
-# Optional: account id used by OMS/Booking if multiple accounts
+# Optional: account id used by OMS if multiple accounts
 # DEFAULT_ACCOUNT_ID=1
 ```
 
@@ -330,16 +372,16 @@ BINANCE_API_SECRET=
 
 - OMS (generic): `REDIS_URL`, `DATABASE_URL` (optional, for order sync to Postgres). Broker-specific vars (e.g. Binance) are used by the Binance adapter.
 - Binance adapter: `BINANCE_*` vars (or passed from OMS env).
-- Booking: `REDIS_URL`, `DATABASE_URL`.
+- OMS account management: `REDIS_URL`, `DATABASE_URL` (same as OMS orders).
 - Position Keeper: `DATABASE_URL`, `REDIS_URL`.
 
 ---
 
 ## 12. Task checklist (implementation order)
 
-**Bottom-up approach:** Build and unit-test each layer before integrating. Start with the lowest-level component (Binance API), then build up: adapter → OMS pieces → OMS integration → Booking pieces → Booking integration → Position Keeper pieces → Position Keeper integration. Each step should have unit tests before moving to the next.
+**Bottom-up approach:** Build and unit-test each layer before integrating. Start with the lowest-level component (Binance API), then build up: adapter → OMS pieces (orders + accounts) → OMS integration → Position Keeper pieces → Position Keeper integration. Each step should have unit tests before moving to the next.
 
-**Schema ownership:** Each service defines and implements its own schemas (Redis structures, Postgres, Redis streams, Redis cache keys) as part of its implementation. OMS owns Redis order staging keys, `risk_approved` input and `oms_fills` output schemas; Booking owns Postgres schema (Alembic) and `oms_fills` input schema (must match OMS output); Position Keeper owns its read/write schemas.
+**Schema ownership:** Each service defines and implements its own schemas (Redis structures, Postgres, Redis streams, Redis cache keys) as part of its implementation. OMS owns Redis order staging keys, Redis account store keys, `risk_approved` input and `oms_fills` output schemas, Postgres `orders` table sync, and Postgres `accounts`/`balances`/`positions` table sync; Position Keeper owns its read/write schemas.
 
 ### 12.1 OMS (build backwards: Binance API → adapter → OMS pieces → integration)
 
@@ -371,24 +413,31 @@ BINANCE_API_SECRET=
 - [x] **12.1.17** **Create Pydantic models for broker streams (Binance WebSocket):** Define Pydantic models for Binance WebSocket execution report events. **Models:** `BinanceExecutionReport` (raw Binance event: e, x, X, c, i, s, S, q, p, l, L, z, t, T, n, N, r, etc.); `FillEvent` (unified fill: event_type="fill", order_id, broker_order_id, symbol, side, quantity, price, fee, fee_asset, executed_at, fill_id, order_status, executed_qty_cumulative); `RejectEvent` (unified reject: event_type="reject", order_id, broker_order_id, symbol, side, quantity, price, reject_reason, executed_at); `CancelledEvent` (unified cancelled: event_type="cancelled", order_id, broker_order_id, symbol, side, quantity, price, executed_at, reject_reason); `ExpiredEvent` (unified expired: event_type="expired", order_id, broker_order_id, symbol, side, quantity, price, executed_at, reject_reason). Use `Literal` for event_type values; `Field()` for validation (quantity > 0 for fills, required fields). **Implementation:** Create `oms/brokers/binance/schemas_pydantic.py` (or add to existing fills_listener module); define BaseModel classes. **Unit test:** `oms/brokers/binance/tests/test_schemas_pydantic.py` — verify models validate correct Binance events, reject invalid events (missing required fields, invalid exec_type, negative quantities), handle optional fields (executed_qty_cumulative, fee_asset).
 - [x] **12.1.18** **Integrate Pydantic validation into broker stream parsers:** Replace manual parsing in `parse_execution_report()` with Pydantic model validation. Update `make_fill_callback()` to validate fill/reject/cancelled/expired events using Pydantic models before processing. **Implementation:** `oms/brokers/binance/fills_listener.py` — use `BinanceExecutionReport(**event)` to validate raw Binance event; catch `ValidationError` and log/skip invalid events. Return `FillEvent`, `RejectEvent`, `CancelledEvent`, or `ExpiredEvent` models (or convert to dict for backward compatibility). `oms/redis_flow.py` — in `make_fill_callback()`, validate event dict with appropriate Pydantic model (`FillEvent`, `RejectEvent`, etc.) before processing; catch `ValidationError` and log error, skip callback. **Unit test:** `oms/brokers/binance/tests/test_fills_listener.py` — verify `parse_execution_report` validates Binance events, rejects invalid events, returns correct unified event models. `oms/tests/test_redis_flow.py` — verify fill callback validates events, skips invalid events with error log. **Integration test:** Invalid Binance WebSocket events are logged and skipped (not processed by OMS).
 
-### 12.2 Booking (build backwards: Postgres writes → Redis cache → consumer → integration)
+### 12.2 Account Management Integration into OMS (build backwards: adapter extension → Redis store → Postgres schema)
 
-**Alignment with OMS:** OMS owns `orders` table sync (`oms/sync.py`); Booking consumes `oms_fills` only. Input schema must match OMS output: `event_type` is `fill` | `reject` | `cancelled` | `expired` (see `oms/schemas_pydantic.py` `OmsFillEvent`, **docs/oms/OMS_ARCHITECTURE.md** §4.3). Only `fill` events drive position/balance/fill writes.
+**Integration approach:** Account management (balances, positions) is **integrated into OMS** rather than being a separate service. OMS extends broker adapters to handle account events from the same user data stream that provides fills. This consolidates broker state management (orders + accounts) in one service. See **docs/oms/ACCOUNT_MANAGEMENT_INTEGRATION.md** for rationale and architecture.
 
-- [ ] **12.2.1** **Booking Postgres schema** (Alembic): create revision(s) for `accounts`, `orders` (with `book`, `comment`, and Binance-mapped columns per §3.1; table is written by **OMS sync**, not Booking), `fills`, `positions`, `balances`, optional `margin_snapshots`; implement `upgrade()` and `downgrade()`. Run `alembic upgrade head`. **Unit test:** verify schema creation and indexes.
-- [ ] **12.2.2** **Booking Postgres writes**: insert fills (from `event_type: fill` only), update positions (add/reduce, avg price), update balances. **Unit test:** test Postgres (or test DB); verify SQL, idempotency (duplicate fill_id).
-- [ ] **12.2.3** **Booking Redis cache schema**: define key formats (`positions:{account_id}`, `balance:{account_id}:{asset}`, `margin:{account_id}`) and value formats (JSON or hash). Document in code or `booking/README.md`.
-- [ ] **12.2.4** **Booking Redis cache updates**: write cache keys per schema (on fill events only). **Unit test:** mock Redis client; verify key format and updates.
-- [ ] **12.2.5** **Booking Redis stream schema** (input): define `oms_fills` input schema to match OMS output (12.1.5): `event_type` (`fill` | `reject` | `cancelled` | `expired`), `order_id`, `broker_order_id`, `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `executed_at`, `fill_id`, `reject_reason`, `book`, `comment`. Reference `oms/schemas.py` and `oms/schemas_pydantic.py`. Document in code or `booking/README.md`.
-- [ ] **12.2.6** **Booking Redis consumer** (XREAD or XREADGROUP from `oms_fills`): parse events per `oms_fills` schema; dispatch by `event_type` — apply position/balance/fill writes only for `fill`; handle `reject`/`cancelled`/`expired` for audit/log. **Unit test:** mock Redis client; verify message parsing and event_type handling.
-- [ ] **12.2.7** **Booking integration** (wire pieces): Redis consumer → Postgres writes (fills, positions, balances) + Redis cache updates for fill events only. **Integration test:** mock Redis stream; verify Postgres and Redis cache updated for one fill event; reject/cancelled/expired do not change positions/balances.
+**Alignment with OMS:** OMS owns `orders` table sync (`oms/sync.py`); OMS also owns `accounts`, `balances`, `positions` sync (`oms/account_sync.py`). Account state comes from broker user data stream events (`outboundAccountPosition`, `balanceUpdate`) and periodic REST refresh (`get_account_snapshot`). Same patterns as orders: event-driven + periodic refresh + sync to Postgres + repairs.
+
+**Build order:** Start with broker adapter extension (define what data we get from broker), then build Redis store (store what adapter provides), then build Postgres schema (based on Redis store structure), then wire everything together.
+
+- [x] **12.2.1** **Broker adapter account interface** (`oms/brokers/base.py`): extend `BrokerAdapter` protocol with account methods: `start_account_listener(callback)`, `get_account_snapshot(account_id)`, `stop_account_listener()`. Document unified event shape: `event_type` (e.g. `balance_update`, `account_position`), `broker`, `account_id`, `balances[]`, `positions[]`, `updated_at`, `payload`. Define return shape for `get_account_snapshot`: same unified structure. **Unit test:** verify protocol definition, method signatures, documentation.
+- [x] **12.2.2** **Binance account listener** (`oms/brokers/binance/account_listener.py`): parse Binance user data stream events (`outboundAccountPosition`, `balanceUpdate`). Convert to unified event shape (`AccountPositionEvent`, `BalanceUpdateEvent` in `brokers/binance/schemas_pydantic.py`). Share WebSocket connection with fills listener (multiplex by event type). **Unit test:** mock WebSocket messages; verify parsing, event type routing, unified shape conversion.
+- [x] **12.2.3** **Binance adapter account extension** (`oms/brokers/binance/adapter.py`): implement `start_account_listener(callback)` (uses `account_listener.py`), `get_account_snapshot(account_id)` (REST calls: `get_account()`, `get_futures_account()` if futures), `stop_account_listener()`. **Unit test:** mock Binance API client; verify REST calls, listener start/stop, callback invocation with unified event shape.
+- [x] **12.2.4** **Redis account store** (`oms/storage/redis_account_store.py`): implement Redis storage for accounts, balances, positions based on unified event shape from adapter. Key patterns: `account:{broker}:{account_id}`, `account:{broker}:{account_id}:balances`, `account:{broker}:{account_id}:positions`, `accounts:by_broker:{broker}`. Methods: `apply_account_position`, `apply_balance_update`, `get_account`, `get_balances`, `get_positions`. Use Redis pipelines for atomicity. Store structure should match unified event shape from adapter. **Unit test:** mock Redis or fakeredis; verify key formats, CRUD operations, pipeline atomicity, data structure matches adapter events.
+- [x] **12.2.5** **Account callback** (`oms/account_flow.py`): implement `make_account_callback(redis, account_store, on_account_updated, ...)` that validates account events (using unified shape from adapter), updates Redis account store (`apply_account_position`, `apply_balance_update`), optionally calls `on_account_updated(broker, account_id)` to trigger sync. Use `updated_at` or event_id to avoid overwriting newer data with older periodic snapshot. **Unit test:** mock account store and callback; verify event validation, store updates, idempotency.
+- [x] **12.2.6** **Account Postgres schema** (Alembic): create revision(s) for `accounts`, `balances`, `balance_changes` (historical deposits/withdrawals). *(Positions table was created then dropped in d4e5f6a7b8c9; `accounts.env` dropped in e5f6a7b8c9d0; `margin_snapshots` dropped in f6a7b8c9d0e1.)* Schema documented in §3.1. **Signed off.**
+- [x] **12.2.7** **Account sync to Postgres** (`oms/account_sync.py`): implement `sync_accounts_to_postgres(redis, account_store, pg_connect, ...)` that reads accounts/balances from Redis and UPSERTs to Postgres (`accounts`, `balances`). No positions table (dropped for PMS). **Balance cleanup:** After UPSERTing balances, DELETE any balances for the account not in current Redis (flattened assets). **Balance changes:** Main wires `on_balance_change` when `DATABASE_URL` is set; callback writes to `balance_changes` (via `write_balance_change` + `get_account_pk_by_broker_and_id`) and sets TTL on Redis account keys only for balance change events (periodic sync does not set TTL). **Signed off.**
+- [x] **12.2.8** **Account repairs** (`oms/account_repair.py`): implement `run_all_account_repairs(pg_connect)` that fixes flawed Postgres account/balance/position fields (e.g. NULL/zero) by recovering from `payload` or raw broker data. Similar pattern to `oms/repair.py` for orders. **Signed off:** Dummy implementation in place: `run_all_account_repairs(pg_connect)` returns 0; unit tests in `oms/tests/test_account_repair.py`. Full payload-based recovery can follow later.
+- [x] **12.2.9** **OMS main loop integration**: extend `oms/main.py` to start account listeners alongside fill listeners; add periodic account refresh (`get_account_snapshot` every `account_refresh_interval_seconds`); add periodic account sync (`sync_accounts_to_postgres`) and repairs (`run_all_account_repairs`) in main loop. Wait for account listeners connected before processing orders. **Signed off:** `get_account_store`, `start_account_listeners`, `stop_account_listeners`, `wait_for_account_listeners_connected`; `run_oms_loop(account_store=..., account_refresh_interval_seconds=..., account_sync_interval_seconds=..., account_sync_ttl_seconds=...)` with refresh/sync/repair logic; `main()` creates account_store, starts account listeners after fill listeners, waits for account listeners, passes env `OMS_ACCOUNT_REFRESH_INTERVAL_SECONDS` / `OMS_ACCOUNT_SYNC_INTERVAL_SECONDS`, stops account listeners in `finally`. Integration test optional.
+- [x] **12.2.10** **Account cleanup** (`oms/cleanup.py`): extend cleanup module with `set_account_key_ttl(redis, broker, account_id, ttl_seconds)` for TTL on account keys after sync. **Signed off:** `set_account_key_ttl` implemented in `oms/cleanup.py`; unit tests in `oms/tests/test_cleanup.py` (`TestSetAccountKeyTtl`).
 
 ### 12.3 Position Keeper (build backwards: calculations → reads → writes → loop)
 
 - [ ] **12.3.1** **Position Keeper PnL/margin calculation**: realized PnL (from fills), unrealized PnL (mark price), margin (futures). **Unit test:** given positions/balances/fills, verify calculations.
-- [ ] **12.3.2** **Position Keeper Postgres schema** (reads): define queries for positions, balances, fills (uses Booking schema from 12.2.1). Document in code or `position_keeper/README.md`.
+- [ ] **12.3.2** **Position Keeper Postgres schema** (reads): define queries for positions, balances, fills (uses OMS account schema from 12.2.1). Document in code or `position_keeper/README.md`.
 - [ ] **12.3.3** **Position Keeper Postgres reads**: query positions, balances, fills. **Unit test:** test Postgres; verify queries.
-- [ ] **12.3.4** **Position Keeper Redis cache schema** (reads): define key formats to read (`positions:{account_id}`, `balance:{account_id}:{asset}`) — must match Booking cache schema from 12.2.3. Document in code or `position_keeper/README.md`.
+- [ ] **12.3.4** **Position Keeper Postgres/Redis reads**: Position Keeper reads positions/balances from Postgres (synced by OMS account sync) or optionally from Redis account store. Document in code or `position_keeper/README.md`.
 - [ ] **12.3.5** **Position Keeper Redis reads**: read cache keys (positions, balances). **Unit test:** mock Redis client; verify reads.
 - [ ] **12.3.6** **Position Keeper Postgres/Redis schema** (writes): define PnL/margin snapshot schema (Postgres table or Redis keys like `pnl:{account_id}`, `margin:{account_id}`). Document in code or `position_keeper/README.md`.
 - [ ] **12.3.7** **Position Keeper Postgres/Redis writes**: write PnL/margin snapshots. **Unit test:** test Postgres and mock Redis; verify writes.
@@ -398,20 +447,21 @@ BINANCE_API_SECRET=
 
 - [ ] **12.4.1** **Write test script** (`scripts/inject_test_order.py`): connect to Redis (`REDIS_URL`), XADD test order to `risk_approved` (broker, symbol, side, quantity, order_type, etc.). Use for manual E2E and automated tests. Optionally add assertions (poll `oms_fills` or Postgres). See §16 Testing.
 - [ ] **12.4.2** Implement **Risk (minimal)** or use test inject only: pass-through `strategy_orders` → `risk_approved`, or rely on test script.
-- [ ] **12.4.3** Add Docker services for OMS, Booking, Position Keeper (and optionally Risk) to `docker-compose.yml`; same network `multistrat`; env from `.env`.
-- [ ] **12.4.4** **E2E:** run test script to inject one test order (broker `binance`) → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills` → Booking updates Postgres/Redis → Position Keeper shows position and PnL/margin. Verify in pgAdmin and RedisInsight.
+- [ ] **12.4.3** Add Docker services for OMS, Position Keeper (and optionally Risk) to `docker-compose.yml`; same network `multistrat`; env from `.env`. Note: Account management is integrated into OMS, no separate Booking service.
+- [ ] **12.4.4** **E2E:** run test script to inject one test order (broker `binance`) → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills`; OMS account listener receives account events → OMS syncs orders and accounts to Postgres → Position Keeper reads positions/balances and shows PnL/margin. Verify in pgAdmin and RedisInsight.
 
 ---
 
 ## 13. Verification (acceptance)
 
-- [ ] `docker compose up -d` brings up infra + OMS, Booking, Position Keeper (and optionally Risk).
+- [ ] `docker compose up -d` brings up infra + OMS, Position Keeper (and optionally Risk).
 - [ ] **Test script** runs successfully: connects to Redis, XADDs one test order to `risk_approved` with `broker: "binance"`.
-- [ ] One test order injected via script flows: OMS routes to Binance adapter → Binance testnet → fill (or reject) → OMS publishes to `oms_fills` (event_type fill/reject/cancelled/expired as applicable) → Booking consumes `oms_fills` and for **fill** events writes to Postgres (fills, positions, balances) and updates Redis cache.
-- [ ] **OMS** sync (trigger on terminal status and/or periodic `sync_terminal_orders`) populates Postgres `orders` from Redis; after sync, `orders` table has the test order row. Booking does not write to `orders`.
-- [ ] Position Keeper reads positions/balances and writes PnL/margin to Postgres or Redis.
-- [ ] In pgAdmin: `orders` (from OMS sync), `fills`, `positions`, `balances` (and optional `margin_snapshots`) reflect the test order and fill.
-- [ ] In RedisInsight: OMS order hashes (e.g. `orders:*`); `oms_fills` stream has the fill (and optionally reject/cancelled/expired) events; Booking cache keys (e.g. `positions:1`) are present and updated on fill.
+- [ ] One test order injected via script flows: OMS routes to Binance adapter → Binance testnet → fill (or reject) → OMS publishes to `oms_fills` (event_type fill/reject/cancelled/expired as applicable).
+- [ ] **OMS order sync** (trigger on terminal status and/or periodic `sync_terminal_orders`) populates Postgres `orders` from Redis; after sync, `orders` table has the test order row.
+- [ ] **OMS account sync** (periodic `sync_accounts_to_postgres`) populates Postgres `accounts`, `balances` from Redis account store (updated by account listener from broker stream events). No `positions` table (positions in Redis only). **Balance changes:** `balanceUpdate` events are written to `balance_changes` via main's `on_balance_change` callback; TTL on Redis account keys is set only when processing balance change events (not after periodic sync).
+- [ ] Position Keeper reads positions/balances from Postgres (or Redis) and writes PnL/margin to Postgres or Redis.
+- [ ] In pgAdmin: `orders` (from OMS order sync), `accounts`, `balances` (from OMS account sync) reflect the test order and account state.
+- [ ] In RedisInsight: OMS order hashes (e.g. `orders:*`), account hashes (e.g. `account:binance:*`); `oms_fills` stream has the fill (and optionally reject/cancelled/expired) events.
 
 ---
 
@@ -419,24 +469,28 @@ BINANCE_API_SECRET=
 
 ```
 multistrat/
-├── docker-compose.yml      # add services: oms, booking, position_keeper, risk
+├── docker-compose.yml      # add services: oms, position_keeper, risk
 ├── .env.example
 ├── alembic/
 │   └── versions/
-│       └── xxxxx_add_booking_tables.py
+│       └── xxxxx_add_account_tables.py  # accounts, balances, balance_changes (margin_snapshots dropped in f6a7b8c9d0e1; no positions table)
 ├── oms/
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   ├── main.py             # loop: risk_approved → Redis order store → adapter → fills → oms_fills; optional sync to Postgres
+│   ├── main.py             # loop: risk_approved → Redis order store → adapter → fills → oms_fills; account listener → Redis account store; sync orders + accounts to Postgres
 │   ├── adapter.py          # broker adapter interface + registry
-│   ├── storage/            # optional: redis_order_store.py, sync job
+│   ├── storage/
+│   │   ├── redis_order_store.py
+│   │   └── redis_account_store.py
+│   ├── account_flow.py      # account callback handler
+│   ├── account_sync.py      # sync accounts/balances/positions to Postgres
+│   ├── account_repair.py   # fix flawed account fields from payload
 │   ├── brokers/
 │   │   ├── __init__.py
-│   │   └── binance.py      # Binance adapter (first broker)
-├── booking/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── main.py             # loop: oms_fills → Postgres + Redis cache
+│   │   └── binance/
+│   │       ├── adapter.py      # Binance adapter (orders + accounts)
+│   │       ├── account_listener.py  # parse account events
+│   │       └── ...
 ├── position_keeper/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -475,9 +529,9 @@ multistrat/
 - **OMS cancel from Redis:** Parse cancel_requested message; read_one_cancel_request; process_one_cancel → store cancelled, oms_fills (12.1.9f).
 - **OMS → Postgres sync:** Unit test: sync writes correct rows; idempotent (12.1.10).
 - **OMS main loop:** Integration: fakeredis + mock adapter, inject one message, assert process_one and XACK; E2E: real Redis + testnet, inject script, assert oms_fills (12.1.11a/12.1.11b).
-- **Booking Postgres writes:** Test Postgres (or testcontainers/test DB); test SQL, idempotency (duplicate fill_id). Only `event_type: fill` triggers position/balance/fill writes.
-- **Booking Redis cache:** Mock Redis; test key format, updates (on fill events only).
-- **Booking consumer:** Parse `oms_fills` with event_type fill | reject | cancelled | expired; verify only fill drives writes.
+- **OMS account store:** Mock Redis or fakeredis; test key formats (`account:*`, `...:balances`, `...:positions`), CRUD operations, pipeline atomicity.
+- **OMS account callback:** Mock account store and callback; verify event validation, store updates, idempotency (updated_at handling).
+- **OMS account sync:** Mock Redis and Postgres; verify mapping to Postgres rows, UPSERT logic, TTL setting.
 - **Position Keeper calculations:** Pure functions; test PnL/margin math given positions/balances/fills.
 - **Position Keeper reads/writes:** Mock Postgres/Redis or use test DB; test queries and writes.
 
@@ -487,20 +541,20 @@ multistrat/
 - **OMS bootstrap and main loop:** Start fill listener(s) and run process_one loop; inject one message; assert processed and (with mock) no double-process (12.1.11a, 12.1.11b).
 - **OMS error path:** Adapter place_order raises → no XACK; optional reject to store/oms_fills (12.1.9d).
 - **OMS cancel from Redis:** XADD cancel_requested → process_one_cancel → store status cancelled, oms_fills event (12.1.9f).
-- **Booking integration:** Mock Redis stream (`oms_fills`); verify: consumer → for fill events only → Postgres writes (fills, positions, balances) → Redis cache updates; reject/cancelled/expired do not change positions or balances.
+- **OMS account integration:** Mock broker adapter account listener; verify: account events → callback → Redis account store updates → periodic sync → Postgres writes (accounts, balances, positions).
 - **Position Keeper integration:** Mock Postgres/Redis data; verify: read → calculate → write loop.
 
 ### 16.3 Test script (required for E2E)
 
 **You need to write a test script to test the flow.** Redis is not HTTP; services consume streams via a Redis client (XREAD/XADD). To drive the pipeline you either run a Risk process that forwards from `strategy_orders`, or (simpler for Phase 2) **a script that publishes a test order into `risk_approved`**. Use the same script for manual E2E and, if you add assertions (e.g. poll `oms_fills` or Postgres), for automated E2E.
 
-- **Purpose:** Inject one or more test orders into `risk_approved` so OMS (and then Booking, Position Keeper) can be tested end-to-end without running a live Strategy or Risk.
-- **Implementation:** Script (e.g. `scripts/inject_test_order.py`) that: connects to Redis using `REDIS_URL`; builds a JSON payload per stream schema (`broker`, `symbol`, `side`, `quantity`, `order_type`, etc.); calls XADD on stream `risk_approved`. Run after OMS and (optionally) Booking/Position Keeper are up.
+- **Purpose:** Inject one or more test orders into `risk_approved` so OMS (and then Position Keeper) can be tested end-to-end without running a live Strategy or Risk.
+- **Implementation:** Script (e.g. `scripts/inject_test_order.py`) that: connects to Redis using `REDIS_URL`; builds a JSON payload per stream schema (`broker`, `symbol`, `side`, `quantity`, `order_type`, etc.); calls XADD on stream `risk_approved`. Run after OMS and (optionally) Position Keeper are up.
 - **Optional:** After inject, poll Redis stream `oms_fills` or query Postgres (fills, positions) with a timeout and assert expected state for automated E2E.
 
 ### 16.4 E2E (real services, testnet)
 
-- **E2E:** Run the test script to inject one order with `broker: "binance"` → OMS → Binance adapter → Binance testnet → fill → OMS → Booking → Postgres and Redis updated; Position Keeper reflects state. Use testnet only; no real funds.
+- **E2E:** Run the test script to inject one order with `broker: "binance"` → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills`; OMS account listener receives account events → OMS syncs orders and accounts to Postgres; Position Keeper reads and reflects state. Use testnet only; no real funds.
 
 ### 16.5 Test classification and file mapping
 
@@ -555,12 +609,15 @@ Tests are classified into four categories based on scope and dependencies:
 
 **Files:**
 - `oms/tests/test_oms_redis_testnet.py` — Real Redis + Binance testnet, OMS code imported
-  - `test_trigger_testnet_via_redis_listen_oms_fills` — MARKET order through Redis → testnet → `oms_fills`
-  - `test_full_pipeline_place_then_cancel_via_redis` — LIMIT order → place → cancel
-  - `test_full_pipeline_redis_order_testnet_status_sync_to_postgres` — MARKET order with Postgres sync
-  - `test_full_pipeline_with_main_loop` — MARKET order via main loop
-  - `test_place_order_raises_retry_then_reject_consumer_group` — Error handling with real Redis
-  - `test_error_order_rejected_via_redis_testnet` — Rejection flow
+  - Order-flow: `test_trigger_testnet_via_redis_listen_oms_fills` — MARKET order through Redis → testnet → `oms_fills`
+  - Order-flow: `test_full_pipeline_place_then_cancel_via_redis` — LIMIT order → place → cancel
+  - Order-flow: `test_full_pipeline_redis_order_testnet_status_sync_to_postgres` — MARKET order with Postgres sync
+  - Order-flow: `test_full_pipeline_with_main_loop` — MARKET order via main loop
+  - Order-flow: `test_place_order_raises_retry_then_reject_consumer_group` — Error handling with real Redis
+  - Order-flow: `test_error_order_rejected_via_redis_testnet` — Rejection flow
+  - Account-flow: `test_account_refresh_e2e` — get_account_snapshot (testnet) → apply to Redis account store → assert account/balances in Redis
+  - Account-flow: `test_account_sync_to_postgres_e2e` — get_account_snapshot → apply to Redis → sync_accounts_to_postgres → assert Postgres `accounts` and `balances` (requires `DATABASE_URL`)
+  - Account-flow: `test_order_fill_matches_balance_change_e2e` — place MARKET BUY → wait for fill → snapshot before/after → assert BTC balance increased by executed_qty and USDT did not increase (order matched to balance change)
 
 **Characteristics:**
 - Real Redis (from `REDIS_URL`)
@@ -588,7 +645,8 @@ pytest oms/tests/test_oms_redis_testnet.py
 - `scripts/full_pipeline_test.py` — Service-level E2E script
   - Supports `--market` flag for MARKET orders
   - Default LIMIT order flow (place → cancel)
-  - Checks downstreams: `oms_fills` stream, Redis order store, Postgres `orders` table
+  - Checks downstreams: `oms_fills` stream, Redis order store
+  - Account-flow: polls Redis account store (OMS periodic refresh) and optionally Postgres `accounts`/`balances`; `--no-account` to skip
 
 **Characteristics:**
 - Assumes OMS service is already running (e.g., `docker compose up -d oms`)
@@ -600,7 +658,7 @@ pytest oms/tests/test_oms_redis_testnet.py
 **Usage:**
 ```bash
 # Start services first
-docker compose up -d oms booking
+docker compose up -d oms position_keeper
 
 # Run script
 python scripts/full_pipeline_test.py --market  # MARKET order

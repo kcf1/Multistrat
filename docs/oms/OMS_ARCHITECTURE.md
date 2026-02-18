@@ -2,41 +2,49 @@
 
 Single reference for the Order Management System (OMS) codebase: data flow, Redis/Postgres interfaces, broker adapter contract, and architecture details.
 
+**Scope:** OMS manages **all broker state interactions**: orders (place/cancel/status) and **account state** (balances, positions). Market data and historical data are handled by separate services.
+
 ---
 
 ## 1. High-Level Data Flow
 
 ```
-┌─────────────────┐     risk_approved      ┌──────────────┐     place_order      ┌─────────────┐
-│ Risk (upstream)  │ ───────────────────►  │              │ ──────────────────►  │   Broker    │
-└─────────────────┘   Redis Stream          │     OMS      │   REST / adapter     │  (Binance)  │
-                                           │              │                      └──────┬──────┘
-┌─────────────────┐     cancel_requested   │              │                             │
-│ Risk / Admin    │ ───────────────────►   │  - consumer  │   user data stream           │
-└─────────────────┘   Redis Stream         │  - store     │   (fills listener)           │
-                                           │  - registry  │ ◄────────────────────────────┘
-                                           │  - adapter   │   fill/reject/cancel/expire
-                                           └──────┬──────┘
-                                                  │
-                    ┌─────────────────────────────┼─────────────────────────────┐
-                    │                             │                             │
-                    ▼                             ▼                             ▼
-           ┌───────────────┐             ┌───────────────┐             ┌───────────────┐
-           │ Redis Store   │             │ oms_fills     │             │ Postgres      │
-           │ orders:*      │             │ Redis Stream  │             │ orders table  │
-           └───────────────┘             └───────┬───────┘             └───────────────┘
-                                                 │                             ▲
-                                                 │                             │
-                                                 ▼                             │
-                                          ┌──────────────┐              sync_one_order /
-                                          │ Booking      │              sync_terminal_orders
-                                          │ (downstream) │              (trigger + periodic)
-                                          └──────────────┘
+┌─────────────────┐     risk_approved      ┌──────────────────────────────────────────────┐
+│ Risk (upstream)  │ ───────────────────►  │                                              │
+└─────────────────┘   Redis Stream          │              OMS                            │
+                                           │  • Order management (place/cancel/status)     │
+┌─────────────────┐     cancel_requested   │  • Account management (balances/positions)   │
+│ Risk / Admin    │ ───────────────────►   │  • Broker adapter registry                   │
+└─────────────────┘   Redis Stream         │  • User data stream (fills + account)       │
+                                           └──────────────┬───────────────────────────────┘
+                                                          │
+                    ┌─────────────────────────────────────┼─────────────────────────────────────┐
+                    │                                     │                                     │
+                    ▼                                     ▼                                     ▼
+           ┌───────────────────┐              ┌───────────────────┐              ┌───────────────────┐
+           │   Broker          │              │   Redis Store     │              │   Postgres        │
+           │  (Binance)        │              │                   │              │                   │
+           │                   │              │  orders:*         │              │  orders           │
+           │  REST API:         │              │  account:*        │              │  accounts         │
+           │  • place_order     │              │  balances:*       │              │  balances         │
+           │  • cancel_order    │              │  positions:*      │              │  positions        │
+           │  • get_account     │              │                   │              │                   │
+           │                    │              └───────────────────┘              └───────────────────┘
+           │  User data stream:  │
+           │  • executionReport  │              ┌───────────────────┐
+           │  • outboundAccount  │              │  oms_fills        │
+           │    Position         │              │  Redis Stream     │
+           │  • balanceUpdate    │              └─────────┬─────────┘
+           └──────────┬──────────┘                        │
+                      │                                   │
+                      │ WebSocket                         ▼
+                      └───────────────────────────►  Booking (downstream)
 ```
 
-- **Inbound:** `risk_approved` (orders to execute), `cancel_requested` (cancel by order_id or broker_order_id+symbol).
-- **Outbound:** `oms_fills` (fill/reject/cancelled/expired events for Booking), Postgres `orders` (sync of terminal orders).
-- **Broker:** Binance REST (place/cancel) + user data stream (execution reports). Other brokers plug in via the same adapter interface.
+- **Inbound (orders):** `risk_approved` (orders to execute), `cancel_requested` (cancel by order_id or broker_order_id+symbol).
+- **Inbound (account):** Broker user data stream events (`outboundAccountPosition`, `balanceUpdate`) + periodic REST (`get_account`, `get_futures_account`).
+- **Outbound:** `oms_fills` (fill/reject/cancelled/expired events for Booking), Postgres `orders`, `accounts`, `balances`, `positions` (sync).
+- **Broker:** Binance REST (place/cancel, account snapshots) + user data stream (execution reports + account updates). Other brokers plug in via the same adapter interface.
 
 ---
 
@@ -53,7 +61,9 @@ Single reference for the Order Management System (OMS) codebase: data flow, Redi
 
 ---
 
-## 3. Redis Key Layout (Order Store)
+## 3. Redis Key Layout
+
+### 3.1 Order Store
 
 Defined in `oms/storage/redis_order_store.py`:
 
@@ -66,6 +76,20 @@ Defined in `oms/storage/redis_order_store.py`:
 
 - **Pipelines:** All multi-key updates (stage, update_status, update_fill_status) use Redis pipelines for atomicity.
 - **Retry key:** `oms:retry:risk_approved:{entry_id}` used for place_order retry count (compared to `OMS_PLACE_ORDER_MAX_RETRIES`).
+
+### 3.2 Account Store
+
+Defined in `oms/storage/redis_account_store.py`:
+
+| Key pattern                          | Type  | Purpose |
+|--------------------------------------|-------|--------|
+| `account:{broker}:{account_id}`      | Hash  | Account metadata: broker, account_id, env, updated_at, optional config. |
+| `account:{broker}:{account_id}:balances` | Hash | Asset → balance info (available, locked, etc.). Field = asset, value = JSON or structured string. |
+| `account:{broker}:{account_id}:positions` | Hash | Symbol (or symbol_side) → position info (quantity, entry_price_avg, etc.). |
+| `accounts:by_broker:{broker}`         | Set   | Set of `account_id` for that broker (index). |
+
+- **Pipelines:** Multi-key updates (apply balance update + update account updated_at) use Redis pipelines for atomicity.
+- **TTL (optional):** After sync to Postgres, set TTL on Redis keys (e.g. `OMS_ACCOUNT_SYNC_TTL_AFTER_SECONDS`) to avoid unbounded growth; re-populate from REST or stream on next refresh.
 
 ---
 
@@ -92,14 +116,24 @@ Defined in `oms/storage/redis_order_store.py`:
 
 **Location:** `oms/brokers/base.py` — `BrokerAdapter` (Protocol).
 
+### 5.1 Order Management Methods
+
 | Method | Purpose |
 |--------|--------|
 | **place_order(order)** | Submit order. Returns unified dict: `broker_order_id`, `status`, … or `rejected: True`, `reject_reason`, optional `payload`. |
 | **cancel_order(broker_order_id, symbol)** | Cancel open order. Returns status/reject in unified form. |
 | **start_fill_listener(callback)** | Start receiving fill/reject/cancel/expire events; callback receives unified event dict. Typically background thread. |
 
+### 5.2 Account Management Methods
+
+| Method | Purpose |
+|--------|--------|
+| **start_account_listener(callback)** | Start receiving account/balance/position events (e.g. from user data stream). Callback receives unified event dict (`event_type`, `account_id`, `balances[]`, `positions[]`, `payload`). Typically background thread (can share WebSocket with fill listener). |
+| **get_account_snapshot(account_id)** | REST: return current account snapshot (balances, positions, margin if applicable). Used for periodic refresh and reconciliation. Returns unified dict. |
+| **stop_account_listener()** | Stop the account event listener. |
+
 - **Registry:** `oms/registry.py` — `AdapterRegistry` maps broker name (e.g. `binance`) → adapter. OMS routes by message field `broker`.
-- **Binance:** `oms/brokers/binance/adapter.py` uses `BinanceAPIClient` (REST) and `create_fills_listener` (ListenKey or WebSocket API). Converts all responses to the same unified shapes.
+- **Binance:** `oms/brokers/binance/adapter.py` uses `BinanceAPIClient` (REST) and `create_fills_listener` / `create_account_listener` (ListenKey or WebSocket API). The user data stream sends multiple event types: `executionReport` (fills), `outboundAccountPosition` (account snapshot), `balanceUpdate` (balance delta). The adapter multiplexes: fill listener processes `executionReport`; account listener processes `outboundAccountPosition` / `balanceUpdate`. Converts all responses to unified shapes.
 
 ---
 
@@ -130,13 +164,25 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 
 ## 8. Sync to Postgres
 
+### 8.1 Order Sync
+
 **Module:** `oms/sync.py`.
 
 - **Trigger:** On terminal status from fill callback (`on_terminal_sync`) or from process_one reject path; plus **periodic** `sync_terminal_orders` every `sync_interval_seconds` (e.g. 60s).
 - **Logic:** For each terminal order: read from Redis store, map to Postgres row (`_order_to_row`), UPSERT by `internal_id`, then set TTL on `orders:{order_id}`.
-- **DB columns / sources:** See `docs/OMS_ORDERS_DB_FIELDS.md` (risk_approved, place_order response, fills → columns).
+- **DB columns / sources:** See `docs/oms/OMS_ORDERS_DB_FIELDS.md` (risk_approved, place_order response, fills → columns).
 
-**Order repairs (post-sync):** `oms/repair.py` — `run_all_repairs(pg_connect)` runs periodically after sync. Fixes flawed Postgres order fields (price, time_in_force, binance_cumulative_quote_qty) by recovering values from the `payload` JSONB when they are NULL/0/empty. Applies only to `broker = 'binance'` orders. See §12 File Map.
+**Order repairs (post-sync):** `oms/repair.py` — `run_all_repairs(pg_connect)` runs periodically after sync. Fixes flawed Postgres order fields (price, time_in_force, binance_cumulative_quote_qty) by recovering values from the `payload` JSONB when they are NULL/0/empty. Applies only to `broker = 'binance'` orders.
+
+### 8.2 Account Sync
+
+**Module:** `oms/account_sync.py`.
+
+- **Trigger:** Optional: on account update from stream (`on_account_updated`); plus **periodic** `sync_accounts_to_postgres` every `sync_interval_seconds` (e.g. 60s).
+- **Logic:** For each account in Redis (or each account updated since last sync): read account hash, balances hash, positions hash; map to Postgres rows (`_account_to_row`, `_balance_to_row`, `_position_to_row`); UPSERT into `accounts` by (broker, account_id or id), then `balances` (by account_id, asset), then `positions` (by account_id, symbol, side). Set TTL on Redis keys after sync if configured.
+- **DB columns / sources:** See `docs/ams/AMS_DB_FIELDS.md` (broker stream vs REST, payload → columns).
+
+**Account repairs (post-sync):** `oms/account_repair.py` — `run_all_account_repairs(pg_connect)` runs periodically after sync. Fixes flawed Postgres account/balance/position fields (e.g. numeric/empty) by recovering from `payload` or raw broker data for the relevant broker (e.g. `broker = 'binance'`).
 
 ---
 
@@ -146,6 +192,7 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 
 - **trim_oms_streams(redis):** XTRIM risk_approved and oms_fills to MAXLEN (default 20000). cancel_requested is **not** trimmed.
 - **set_order_key_ttl(redis, order_id, ttl_seconds):** Set TTL on `orders:{order_id}` after terminal status (e.g. after sync). Default TTL from `OMS_SYNC_TTL_AFTER_SECONDS` (default 300).
+- **set_account_key_ttl(redis, broker, account_id, ttl_seconds):** Set TTL on `account:{broker}:{account_id}` and related balance/position keys after sync. Default TTL from `OMS_ACCOUNT_SYNC_TTL_AFTER_SECONDS` (default 300; 0 = no TTL). Optional: only set TTL if periodic refresh will re-populate.
 
 ---
 
@@ -163,10 +210,12 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 |----------|--------|
 | REDIS_URL | Redis connection (default redis://localhost:6379). |
 | BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_BASE_URL | Binance adapter (testnet vs main). |
-| BINANCE_FILLS_STREAM | `wsapi` (default) or `listenkey` for user data stream. |
+| BINANCE_FILLS_STREAM | `wsapi` (default) or `listenkey` for user data stream (shared for fills + account events). |
 | DATABASE_URL | Postgres; enables sync and on_terminal_sync. |
 | OMS_SYNC_TTL_AFTER_SECONDS | TTL on Redis order key after sync (default 300). |
-| OMS_SYNC_INTERVAL_SECONDS | Periodic sync interval (default from sync.py, e.g. 60). |
+| OMS_SYNC_INTERVAL_SECONDS | Periodic sync interval for orders and accounts (default from sync.py, e.g. 60). |
+| OMS_ACCOUNT_REFRESH_INTERVAL_SECONDS | Periodic REST account snapshot interval (default 60). |
+| OMS_ACCOUNT_SYNC_TTL_AFTER_SECONDS | TTL on Redis account keys after sync (default 300; 0 = no TTL). |
 | OMS_BLOCK_MS | Block timeout for risk_approved read (default 100). |
 | OMS_POLL_SLEEP_SECONDS | Used only when block_ms=0. |
 | OMS_BATCH_SIZE | Max messages per process_many / process_many_cancel (default 50). |
@@ -180,16 +229,20 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 |------|--------|
 | Entry & loop | `main.py` |
 | Flow (process_one/many, fill callback) | `redis_flow.py` |
+| Account flow (account callback, periodic refresh) | `account_flow.py` |
 | Consumers | `consumer.py`, `cancel_consumer.py` |
 | Producer | `producer.py` |
 | Stream helpers | `streams.py` |
 | Schemas (names, field lists) | `schemas.py` |
 | Pydantic validation | `schemas_pydantic.py`, `brokers/binance/schemas_pydantic.py` |
-| Store | `storage/redis_order_store.py` |
+| Order store | `storage/redis_order_store.py` |
+| Account store | `storage/redis_account_store.py` |
 | Registry & adapter contract | `registry.py`, `brokers/base.py` |
-| Binance | `brokers/binance/adapter.py`, `api_client.py`, `fills_listener.py` |
-| Sync to DB | `sync.py` |
+| Binance | `brokers/binance/adapter.py`, `api_client.py`, `fills_listener.py`, `account_listener.py` |
+| Order sync to DB | `sync.py` |
+| Account sync to DB | `account_sync.py` |
 | Order repairs (Binance payload recovery) | `repair.py` |
+| Account repairs | `account_repair.py` |
 | Cleanup | `cleanup.py` |
 | Logging | `log.py` |
 

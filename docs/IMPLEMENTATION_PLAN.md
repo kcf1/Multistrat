@@ -60,7 +60,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 ### Deliverables
 
 - [ ] **Postgres schema (Booking / Position Keeper)**
-  - Tables: e.g. `accounts`, `positions`, `balances`, `margin_snapshots`, `fills`, `orders` (or equivalent minimal set)
+  - Tables: e.g. `accounts`, `balances`, `balance_changes`, `fills`, `orders` (positions in Redis only; margin_snapshots dropped in OMS)
   - Migrations: single initial migration or versioned (e.g. `migrations/` with numbering)
 - [ ] **Redis Streams**
   - Define and document stream names: `strategy_orders`, `risk_approved`, `oms_fills`

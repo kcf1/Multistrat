@@ -368,6 +368,69 @@ class BinanceAPIClient:
                     ) from e
             raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
 
+    def get_account_snapshot(self, account_id: str = "default") -> Dict:
+        """
+        Get current account snapshot (balances) via REST API.
+
+        Converts Binance REST account response to unified AccountEvent format
+        for consistency with account listener events.
+
+        Args:
+            account_id: Account identifier (default: "default")
+
+        Returns:
+            Unified AccountEvent dict:
+            {
+                "event_type": "account_position",
+                "broker": "binance",
+                "account_id": account_id,
+                "balances": [{"asset": "USDT", "available": "1000.0", "locked": "0.0"}, ...],
+                "positions": [],
+                "updated_at": "2024-01-01T00:00:00Z",
+                "payload": {...}  # Raw Binance REST response
+            }
+
+        Raises:
+            BinanceAPIError: On API error
+        """
+        from datetime import datetime, timezone
+
+        account_resp = self.get_account()
+        
+        # Convert Binance balances to unified format
+        balances = []
+        binance_balances = account_resp.get("balances", [])
+        for bal in binance_balances:
+            asset = bal.get("asset", "")
+            free = bal.get("free", "0.0")
+            locked = bal.get("locked", "0.0")
+            if asset:  # Only include non-zero or non-empty assets
+                balances.append({
+                    "asset": asset,
+                    "available": str(free) if free else "0.0",
+                    "locked": str(locked) if locked else "0.0",
+                })
+
+        # Timestamp: use account updateTime if available, else current time
+        update_time_ms = account_resp.get("updateTime")
+        if update_time_ms:
+            try:
+                updated_at = datetime.fromtimestamp(int(update_time_ms) / 1000.0, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            except (TypeError, ValueError):
+                updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        else:
+            updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        return {
+            "event_type": "account_position",
+            "broker": "binance",
+            "account_id": account_id,
+            "balances": balances,
+            "positions": [],  # Spot accounts don't have positions
+            "updated_at": updated_at,
+            "payload": account_resp,  # Store raw REST response
+        }
+
     def start_user_data_stream(self) -> str:
         """
         Create a user data stream listen key (no signature required).

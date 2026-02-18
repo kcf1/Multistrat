@@ -8,6 +8,13 @@ When WebSocket fill event has price 0/null, enriches event from order payload (B
 
 from typing import Any, Callable, Dict, Optional, Union
 
+from oms.brokers.base import AccountEvent
+
+from .account_listener import (
+    BinanceAccountListener,
+    BinanceAccountListenerWsApi,
+    create_account_listener,
+)
 from .api_client import BinanceAPIClient, BinanceAPIError
 from .fills_listener import (
     BinanceFillsListener,
@@ -164,6 +171,8 @@ class BinanceBrokerAdapter:
         self._client = client
         self._use_ws_api = use_ws_api
         self._listener: Optional[Union[BinanceFillsListener, BinanceFillsListenerWsApi]] = None
+        self._account_listener: Optional[Union[BinanceAccountListener, BinanceAccountListenerWsApi]] = None
+        self._account_id: str = "default"
 
     def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -317,3 +326,66 @@ class BinanceBrokerAdapter:
             if e.error_data is not None:
                 rejected["payload"] = {"binance": e.error_data}
             return rejected
+
+    def start_account_listener(
+        self,
+        callback: Callable[[AccountEvent], None],
+    ) -> None:
+        """
+        Start listening for account/balance/position events from Binance user data stream.
+
+        Callback receives unified AccountEvent dict (event_type, broker, account_id,
+        balances[], positions[], updated_at, payload). Uses WebSocket API method by default
+        (same as fills listener). Shares the same WebSocket connection with fill listener
+        (multiplexed by event type).
+
+        Args:
+            callback: Function that receives unified account events.
+        """
+        # Use same WebSocket API setting as fills listener (default: WebSocket API)
+        listener = create_account_listener(
+            client=self._client,
+            use_ws_api=self._use_ws_api,  # Use same setting as fills listener
+            account_id=self._account_id,
+            on_account_event=callback,
+        )
+        self._account_listener = listener
+        listener.start_background()
+
+    def get_account_snapshot(self, account_id: str = "default") -> AccountEvent:
+        """
+        Get current account snapshot via REST API (balances, positions).
+
+        Used for periodic refresh and reconciliation. Returns the same unified
+        structure as account listener events.
+
+        Args:
+            account_id: Account identifier (default: "default")
+
+        Returns:
+            AccountEvent dict with same structure as account listener callback:
+            {
+                "event_type": "account_position",
+                "broker": "binance",
+                "account_id": account_id,
+                "balances": [...],
+                "positions": [],
+                "updated_at": "...",
+                "payload": {...}
+            }
+
+        Raises:
+            BinanceAPIError: On API error
+        """
+        return self._client.get_account_snapshot(account_id=account_id)
+
+    def stop_account_listener(self) -> None:
+        """
+        Stop the account event listener.
+
+        Closes WebSocket connection. Does not close listenKey if shared with
+        fill listener (fill listener will close it).
+        """
+        if self._account_listener:
+            self._account_listener.stop()
+            self._account_listener = None

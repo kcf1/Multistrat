@@ -61,3 +61,31 @@ def set_order_key_ttl(redis: Redis, order_id: str, ttl_seconds: int) -> bool:
         return False
     redis.expire(key, ttl_seconds)
     return True
+
+
+ACCOUNT_KEY_PREFIX = "account:"
+
+
+def set_account_key_ttl(
+    redis: Redis,
+    broker: str,
+    account_id: str,
+    ttl_seconds: int,
+) -> int:
+    """
+    Set TTL on account keys for a given (broker, account_id).
+    Keys: account:{broker}:{account_id}, account:{broker}:{account_id}:balances,
+    account:{broker}:{account_id}:positions.
+    Only sets TTL when the key has no TTL (-1). Returns the number of keys that had TTL set.
+    """
+    base = f"{ACCOUNT_KEY_PREFIX}{broker}:{account_id}"
+    keys = [base, f"{base}:balances", f"{base}:positions"]
+    set_count = 0
+    for key in keys:
+        if not redis.exists(key):
+            continue
+        if redis.ttl(key) != -1:
+            continue
+        redis.expire(key, ttl_seconds)
+        set_count += 1
+    return set_count

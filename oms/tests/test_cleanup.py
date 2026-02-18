@@ -8,8 +8,10 @@ import pytest
 from fakeredis import FakeRedis
 
 from oms.cleanup import (
+    ACCOUNT_KEY_PREFIX,
     DEFAULT_STREAM_MAXLEN,
     ORDER_KEY_PREFIX,
+    set_account_key_ttl,
     set_order_key_ttl,
     trim_oms_streams,
 )
@@ -89,3 +91,37 @@ class TestSetOrderKeyTtl:
         ok = set_order_key_ttl(redis_client, order_id, 600)
         assert ok is False
         assert redis_client.ttl(key) == 300
+
+
+class TestSetAccountKeyTtl:
+    """Unit tests for set_account_key_ttl (task 12.2.10)."""
+
+    def test_set_account_key_ttl_sets_expire_on_all_keys(self, redis_client):
+        broker, account_id = "binance", "default"
+        base = f"{ACCOUNT_KEY_PREFIX}{broker}:{account_id}"
+        redis_client.hset(base, mapping={"broker": broker, "account_id": account_id})
+        redis_client.hset(f"{base}:balances", mapping={"USDT": "1000"})
+        redis_client.hset(f"{base}:positions", mapping={"BTCUSDT": "0.1"})
+        for key in [base, f"{base}:balances", f"{base}:positions"]:
+            assert redis_client.ttl(key) == -1
+        n = set_account_key_ttl(redis_client, broker, account_id, 60)
+        assert n == 3
+        assert redis_client.ttl(base) == 60
+        assert redis_client.ttl(f"{base}:balances") == 60
+        assert redis_client.ttl(f"{base}:positions") == 60
+
+    def test_set_account_key_ttl_skips_missing_keys(self, redis_client):
+        redis_client.hset("account:binance:default", mapping={"broker": "binance"})
+        n = set_account_key_ttl(redis_client, "binance", "default", 60)
+        assert n == 1
+        n2 = set_account_key_ttl(redis_client, "binance", "nonexistent", 60)
+        assert n2 == 0
+
+    def test_set_account_key_ttl_skips_keys_already_with_ttl(self, redis_client):
+        broker, account_id = "binance", "acc1"
+        base = f"{ACCOUNT_KEY_PREFIX}{broker}:{account_id}"
+        redis_client.hset(base, mapping={"broker": broker})
+        redis_client.expire(base, 120)
+        n = set_account_key_ttl(redis_client, broker, account_id, 60)
+        assert n == 0
+        assert redis_client.ttl(base) == 120

@@ -24,6 +24,31 @@ This doc summarizes Binance Spot API rules that affect integration and tests (te
 
 ---
 
+## 1.1 balanceUpdate Events on Testnet (Limitation)
+
+**Issue:** `balanceUpdate` events cannot be easily triggered on Binance testnet.
+
+**Rule:** The `balanceUpdate` WebSocket event is triggered by:
+- Deposits to the account
+- Withdrawals from the account  
+- Transfers between account types (e.g., Spot ↔ Margin)
+
+**Testnet Limitations:**
+
+- **No REST API for deposits/withdrawals:** Binance testnet does not expose deposit/withdrawal endpoints via API
+- **Test balances are non-transferable:** Automatic test balances provided by testnet cannot be transferred between accounts
+- **balanceUpdate events are rare:** Most balance changes on testnet come from trades, which trigger `outboundAccountPosition` events instead
+
+**What to do:**
+
+- **For testing `balanceUpdate` events:** Use production environment with real deposits/withdrawals/transfers
+- **For testing account events:** Use `outboundAccountPosition` events (triggered by trades) which work fine on testnet
+- **Account listener tests:** Current testnet tests verify `outboundAccountPosition` events; `balanceUpdate` testing requires production environment
+
+**Note:** The account listener implementation supports both event types. Testnet tests verify `outboundAccountPosition` (from trades), while `balanceUpdate` (from deposits/withdrawals) should be tested on production.
+
+---
+
 ## 2. Signature for signed endpoints (code -1022)
 
 **Error:** `Signature for this request is not valid` (HTTP 400, code **-1022**).
