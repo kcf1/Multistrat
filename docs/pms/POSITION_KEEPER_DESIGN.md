@@ -6,12 +6,12 @@ This document details how **PMS** uses the **orders** table to compute and recon
 
 ## 1. Role Summary
 
-- **Read:** Positions and balances (Redis from OMS account store; Postgres balances); optionally **orders** and **fills** for reconciliation and PnL.
+- **Read:** **Postgres only** — orders, balances, optional fills. **PMS does not read OMS Redis positions** (that is dummy).
 - **Compute:** Realized PnL (from fills), unrealized PnL (from mark price), margin (futures).
-- **Positions:** Primary view from **Redis** (OMS account store); **recompute from orders** for reconciliation and repairs.
+- **Positions:** **Derived from the orders table** (and optionally fills). No read from OMS Redis.
 - **Write:** PnL/margin snapshots to Postgres and/or Redis for Admin/UI.
 
-PMS does **not** write to `orders` or `fills`; those are owned by OMS. It may **update** Redis positions (OMS account store) when running **repairs** (drift correction from orders).
+PMS does **not** write to `orders` or `fills`; those are owned by OMS. PMS does **not** read or update OMS Redis positions.
 
 ---
 
@@ -47,13 +47,10 @@ GROUP BY account_id, symbol, side;
 
 PMS can implement a function **expected_positions_from_orders(pg_connect)** that returns a list of (account_id, symbol, side, expected_qty, optional expected_entry_avg).
 
-### 2.3 Reconcile vs Redis Positions
+### 2.3 Reconcile (optional)
 
-- **Read** current positions from Redis (OMS account store).
-- **Compare** (account_id, symbol, side): expected_qty vs current quantity (and optionally entry_price).
-- **Drift:** expected ≠ current → run **repair** (update Redis positions) or **flag** (write to drift table / log).
-
-This is the same idea as OMS **repairs**: fix derived state (positions) from canonical state (orders).
+- **Current view:** Order-derived positions are the canonical view for PMS (PMS does not read OMS Redis positions).
+- **Optional:** If PMS or another system maintains a separate position store, compare expected_qty (from orders) to that store and **flag** or repair drift. PMS does not update OMS Redis.
 
 ---
 
@@ -61,11 +58,11 @@ This is the same idea as OMS **repairs**: fix derived state (positions) from can
 
 | Step | Source | Action |
 |------|--------|--------|
-| Live view | Redis positions (OMS account store) | Read by account; use for PnL/margin calculation on each tick. |
+| Position view | **Orders table** (derived) | Derive by account/symbol/side; use for PnL/margin. PMS does not read OMS Redis positions. |
 | Realized PnL | fills table (or cached) | Sum (price * qty) or use fill-level PnL if stored. |
-| Unrealized PnL | positions + mark price | (mark - entry_avg) * quantity (simplified; futures may use margin/PnL API). |
-| Margin | positions + balances / broker | From Redis or REST if futures. |
-| Rebuild | orders table | Periodic: expected_positions_from_orders → compare to Redis → repair or flag. |
+| Unrealized PnL | order-derived positions + mark price | (mark - entry_avg) * quantity (simplified; futures may use margin/PnL API). |
+| Margin | order-derived positions + balances / broker | Balances from Postgres; positions from orders. |
+| Rebuild | orders table | Periodic: expected_positions_from_orders; optional compare/flag if another store exists. |
 
 ---
 
@@ -73,24 +70,21 @@ This is the same idea as OMS **repairs**: fix derived state (positions) from can
 
 **Input:** Expected positions from orders (and optionally fills for entry_avg).
 
-**Logic:**
+**Logic:** Order-derived positions are the canonical view. If PMS (or another system) maintains a separate position store (e.g. future Postgres positions table), repairs can update that store from expected values or **flag** drift in a log. **PMS does not read or update OMS Redis positions** (dummy).
 
-1. For each (account_id, symbol, side) in expected:
-   - If no entry in Redis positions: add (or treat as 0 and add if expected_qty ≠ 0).
-   - If entry exists and quantity ≠ expected_qty: UPDATE quantity (and optionally entry_price) in Redis; log.
-2. For each entry in Redis positions with no expected (expected_qty = 0): remove or set quantity to 0 (policy choice).
-3. Optionally write to `position_drift_log` (account_id, symbol, side, old_qty, new_qty, source = 'orders_rebuild') for audit.
-
-**When:** After each periodic rebuild-from-orders run (see **docs/pms/PMS_DATA_FLOWS.md**).
+**When:** After each periodic rebuild-from-orders run, if a separate position store exists (see **docs/pms/PMS_DATA_FLOWS.md**).
 
 ---
 
-## 5. Mark Price (Unrealized PnL)
+## 5. Mark Price (Unrealized PnL) — Interface First, Then Implementations
 
-Phase 2 plan (§8.2): Mark price can come from Binance (REST or websocket) or from Market Data (Phase 4). For Phase 2, optional: fetch in PMS or leave unrealized PnL zero until Phase 4.
+**Recommended approach:**
 
-- **Option A:** PMS calls Binance REST (or existing client) for mark price per symbol when computing unrealized PnL.
-- **Option B:** Unrealized PnL = 0 until Market Data service exists; only realized PnL and margin are shown.
+1. **Define a mark price provider interface** (e.g. `get_mark_prices(symbols) -> dict[symbol, price]`). PMS uses only this contract when computing unrealized PnL; no direct Binance or Redis calls in calculation code.
+2. **Phase 2:** Implement the interface by **wrapping Binance** (REST or WebSocket). PMS gets real mark prices and unrealized PnL without a separate Market Data service.
+3. **Phase 4:** Add a second implementation that **reads from Redis or DB** (fed by the Market Data service). Same interface; switch via config (`PMS_MARK_PRICE_SOURCE`: `binance` vs `redis` or `market_data`). No change to PMS calculation logic.
+
+Config-driven: `PMS_MARK_PRICE_SOURCE` selects which implementation to inject. If unset or unsupported, unrealized PnL can be zero.
 
 ---
 
@@ -101,7 +95,7 @@ Phase 2 plan (§8.2): Mark price can come from Binance (REST or websocket) or fr
 | 12.3.1 | PnL/margin calculation | Realized from fills; unrealized from mark; margin from positions/balances. |
 | 12.3.2 | Postgres reads | positions, balances, fills; **add** orders for rebuild. |
 | 12.3.3 | Postgres read queries | Standard queries + **expected_positions_from_orders**. |
-| 12.3.4–12.3.5 | Redis cache read | positions:{account_id}, balance:{account_id}:{asset} (Booking schema). |
+| 12.3.4–12.3.5 | Redis | PMS does not read OMS Redis positions/balances (dummy). PMS writes PnL/margin keys only. |
 | 12.3.6–12.3.7 | PnL/margin snapshot writes | Redis + optional pnl_snapshots / margin_snapshots. |
 | 12.3.8 | Loop | Timer: read → calculate → write; **optional** periodic rebuild + repairs. |
 
@@ -114,6 +108,6 @@ Phase 2 plan (§8.2): Mark price can come from Binance (REST or websocket) or fr
 
 ## 7. References
 
-- **docs/PHASE2_DETAILED_PLAN.md** — §8 Position Keeper, §3.1 orders/positions schema.
+- **docs/PHASE2_DETAILED_PLAN.md** — §8 PMS, §3.1 orders/schema.
 - **docs/pms/PMS_ARCHITECTURE.md** — Data flow, Redis/Postgres, account/session.
 - **docs/pms/PMS_DATA_FLOWS.md** — Periodic rebuild, event-driven, data fixes.

@@ -1,6 +1,6 @@
 # PMS Data Model: Symbol vs Asset, Positions, Reconciliation
 
-PMS reads from OMS Postgres/Redis, computes PnL and margin, and writes snapshots. This document covers data-model considerations: order **symbol** vs balance **asset**, building positions from orders, and reconciling multiple views. See **docs/PHASE2_DETAILED_PLAN.md** §8 (PMS role), §12.3 (PMS tasks).
+PMS reads from **OMS Postgres only** (orders, balances, optional fills); **PMS does not read OMS Redis positions** (that path is dummy). Positions used by PMS are **derived from the orders table**. This document covers data-model considerations: order **symbol** vs balance **asset**, building positions from orders, and reconciling multiple views. See **docs/PHASE2_DETAILED_PLAN.md** §8 (PMS role), §12.3 (PMS tasks).
 
 ---
 
@@ -44,15 +44,13 @@ Document the convention or mapping you choose (e.g. in this doc or in PMS code) 
 
 ## Building positions from orders (and fills)
 
-OMS does **not** expose a Postgres **positions** table in Phase 2. Positions are held in Redis only (`account:{broker}:{account_id}:positions`), populated by OMS from broker account streams.
+OMS does **not** expose a Postgres **positions** table in Phase 2. OMS may hold positions in Redis internally; **PMS does not read OMS Redis positions** (that is dummy).
 
-PMS may still need to:
+PMS:
 
-- **Derive positions from orders/fills** — e.g. aggregate fills (or terminal orders) by `(account_id, symbol, side)` to get net quantity per symbol/side. That gives an **order-derived** view of position (e.g. for spot: net BUY quantity − net SELL quantity per symbol).
-- **Compare with account positions** — Redis (or any future Postgres positions table) holds the broker’s view; order-derived positions are your own view. Reconciling them (see below) detects missing fills, duplicate processing, or sync gaps.
-- **Use both in PnL** — Realized PnL comes from fills; unrealized PnL and margin may use either broker positions or your derived positions, depending on where you get mark price and how you want to validate.
-
-So: building positions from orders/fills is a supported and likely approach; document whether you use only order-derived positions, only broker positions, or both with reconciliation.
+- **Derives positions from orders/fills** — e.g. aggregate fills (or terminal orders) by `(account_id, symbol, side)` to get net quantity per symbol/side. That **order-derived** view is the position source for PMS.
+- **Optional reconciliation** — If another source of positions exists (e.g. future Postgres positions table), compare with order-derived for drift. PMS does not read OMS Redis.
+- **Use in PnL** — Realized PnL from fills; unrealized PnL and margin use order-derived positions (and mark price when available).
 
 ---
 
@@ -60,10 +58,9 @@ So: building positions from orders/fills is a supported and likely approach; doc
 
 PMS will often need to reconcile **two sources of truth**:
 
-1. **Order/fill–derived positions vs broker (or Redis) positions**  
-   - **Source A:** Positions built from `orders` / `oms_fills` (or a `fills` table): aggregate by `(account_id, symbol, side)`.  
-   - **Source B:** Positions from Redis `account:{broker}:{account_id}:positions` (or a future Postgres positions table from OMS).  
-   - **Reconciliation:** For each account and symbol, compare net quantity and side. Differences can indicate delayed sync, missing/duplicate fills, or bugs. Log and optionally alert.
+1. **Order/fill–derived positions (PMS source)**  
+   - **Source for PMS:** Positions built from `orders` (and optionally `fills`): aggregate by `(account_id, symbol, side)`. **PMS does not read OMS Redis positions** (dummy).  
+   - **Optional:** If a future Postgres positions table or other store exists, reconcile order-derived vs that store; log and optionally alert on drift.
 
 2. **Balance_changes vs balances (and orders)**  
    - **Source A:** `balance_changes`: historical deltas per `(account_id, asset)`. Sum of `delta` should match current balance minus initial deposit.  
@@ -82,7 +79,7 @@ Document which of these reconciliations you implement, where (e.g. PMS job, scri
 | Topic | Takeaway |
 |-------|----------|
 | **Order symbol vs balance asset** | Orders use **pair** (e.g. BTCUSDT); balances use **asset** (e.g. BTC, USDT). Derive base/quote from symbol before joining or comparing. |
-| **Building positions** | OMS has no Postgres positions table in Phase 2. PMS can build positions from orders/fills (e.g. by account, symbol, side) and optionally reconcile with Redis/broker positions. |
-| **Reconciling two tables** | Plan to reconcile (1) order-derived positions vs broker/Redis positions, (2) balance_changes vs balances, and (3) correct use of symbol→base/quote when joining orders to balances. |
+| **Building positions** | PMS derives positions from orders/fills (by account, symbol, side). PMS does not read OMS Redis positions (dummy). Optionally reconcile with another store or balance_changes. |
+| **Reconciling two tables** | Plan to reconcile (1) order-derived vs any other position store (PMS does not use OMS Redis), (2) balance_changes vs balances, and (3) symbol→base/quote when joining orders to balances. |
 
 Implement helpers or mapping (code or DB) as needed and document them in PMS so future work stays consistent.

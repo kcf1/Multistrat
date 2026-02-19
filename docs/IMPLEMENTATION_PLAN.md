@@ -75,8 +75,9 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
   - For each fill: update positions (add/subtract), update balances, compute margin if applicable
   - Write to Postgres: positions, balances, margin snapshots, and raw fills for audit
   - Update Redis cache: e.g. `positions:{account}`, `balance:{account}`, `margin:{account}` for Risk and Position Keeper
-- [ ] **Position Keeper service**
-  - Single process, loop: read from Postgres (or Redis cache) at interval; aggregate PnL (realized + unrealized if you have mark price), margin
+- [ ] **PMS (Portfolio Management System)**
+  - Single process, loop: read from Postgres (orders, balances); derive positions from orders; aggregate PnL (realized + unrealized via **mark price provider**), margin
+  - **Mark price:** Interface first; Phase 2 wrap Binance; Phase 4 read from Redis/DB (Market Data). Config: `PMS_MARK_PRICE_SOURCE`
   - Expose via simple API (optional) or just write to Postgres/Redis for Admin/UI later
 - [ ] **Risk service (minimal for Phase 2)**
   - Consume `strategy_orders`, pass through to `risk_approved` (no hard checks yet), or inject test orders so OMS/Booking can be tested without strategies
