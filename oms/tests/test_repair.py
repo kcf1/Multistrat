@@ -48,6 +48,17 @@ class TestExtractFromBinancePayload:
         assert _extract_from_binance_payload({"binance": {"status": "NEW"}})["status"] == "sent"
         assert _extract_from_binance_payload({"binance": {"status": "CANCELED"}})["status"] == "cancelled"
 
+    def test_extracts_status_from_X_fallback(self):
+        """Execution report uses X for order status; we accept it as fallback."""
+        assert _extract_from_binance_payload({"binance": {"X": "FILLED"}})["status"] == "filled"
+        assert _extract_from_binance_payload({"binance": {"X": "PARTIALLY_FILLED"}})["status"] == "partially_filled"
+
+    def test_extracts_status_from_top_level_json_string(self):
+        """Payload column can be returned as JSON string (e.g. from Postgres JSONB)."""
+        payload_str = '{"binance": {"status": "FILLED", "orderId": "1"}}'
+        out = _extract_from_binance_payload(payload_str)
+        assert out["status"] == "filled"
+
     def test_empty_payload_returns_empty(self):
         assert _extract_from_binance_payload({}) == {}
         assert _extract_from_binance_payload(None) == {}
@@ -137,10 +148,10 @@ class TestRepairFunctions:
         assert "binance_cumulative_quote_qty" in sql
         assert params[0] == 1000.5
 
-    def test_repair_status_fallback_when_empty(self):
-        """Only update when DB status is NULL/empty; then set from payload."""
+    def test_repair_status_from_payload(self):
+        """Set status from payload (whatever current DB status is)."""
         rows = [
-            ("ord-1", None, {"binance": {"status": "FILLED", "orderId": "1"}}),
+            ("ord-1", {"binance": {"status": "FILLED", "orderId": "1"}}),
         ]
         connect, updates = _mock_pg_connect(select_rows=rows)
         n = repair_binance_status_from_payload(connect)
@@ -148,10 +159,10 @@ class TestRepairFunctions:
         assert len(updates) == 1
         assert updates[0][1][0] == "filled"
 
-    def test_repair_status_unchanged_when_payload_has_no_status(self):
-        """When payload has no status we skip (remain unchanged)."""
+    def test_repair_status_skips_when_payload_has_no_status(self):
+        """When payload has no status we skip (no UPDATE)."""
         rows = [
-            ("ord-1", None, {"binance": {"orderId": "1"}}),  # no status in payload
+            ("ord-1", {"binance": {"orderId": "1"}}),  # no status in payload
         ]
         connect, updates = _mock_pg_connect(select_rows=rows)
         n = repair_binance_status_from_payload(connect)

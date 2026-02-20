@@ -172,7 +172,7 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 - **Logic:** For each terminal order: read from Redis store, map to Postgres row (`_order_to_row`), UPSERT by `internal_id`, then set TTL on `orders:{order_id}`.
 - **DB columns / sources:** See `docs/oms/OMS_ORDERS_DB_FIELDS.md` (risk_approved, place_order response, fills → columns).
 
-**Order repairs (post-sync):** `oms/repair.py` — `run_all_repairs(pg_connect)` runs periodically after sync. Fixes flawed Postgres order fields (price, time_in_force, binance_cumulative_quote_qty, status) by recovering values from the `payload` JSONB when they are NULL/0/empty. Status is a fallback only: set from payload when DB status is NULL/empty; otherwise left unchanged. Applies only to `broker = 'binance'` orders.
+**Order repairs (post-sync):** `oms/repair.py` — `run_all_repairs(pg_connect)` runs periodically after sync. Fixes flawed Postgres order fields (price, time_in_force, binance_cumulative_quote_qty, status) by recovering values from the `payload` JSONB when they are NULL/0/empty. Status is set from payload (payload.binance.status or .X) whenever payload has it; no null check on current DB status. Applies only to `broker = 'binance'` orders.
 
 ### 8.2 Account Sync
 

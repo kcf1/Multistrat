@@ -42,12 +42,18 @@ def _extract_from_binance_payload(payload: Any) -> Dict[str, Any]:
     Extract price, time_in_force, binance_cumulative_quote_qty, status from Binance payload.
 
     Payload shape: {"binance": {...}} with avgPrice, timeInForce, cumulativeQuoteQty,
-    status, fills[0].price. Returns dict with only keys that have valid values.
+    status (REST) or X (execution report), fills[0].price. Returns dict with only keys that have valid values.
     """
     out: Dict[str, Any] = {}
+    # Handle top-level payload as JSON string (e.g. Postgres JSONB returned as string)
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            return out
     if not isinstance(payload, dict):
         return out
-    # Handle payload stored as JSON string (Redis store serializes it)
+    # Handle payload.binance stored as JSON string (Redis store serializes it)
     if isinstance(payload.get("binance"), str):
         try:
             payload = {"binance": json.loads(payload["binance"])}
@@ -56,8 +62,8 @@ def _extract_from_binance_payload(payload: Any) -> Dict[str, Any]:
     binance = payload.get("binance")
     try:
         if isinstance(binance, dict):
-            # Status (e.g. NEW, FILLED; important for market orders that fill before fill callback)
-            st = binance.get("status")
+            # Status: payload.binance.status (Binance REST place_order response) or .X (execution report)
+            st = binance.get("status") or binance.get("X")
             if st is not None and str(st).strip():
                 oms_status = _binance_status_to_oms(str(st))
                 if oms_status:
@@ -224,8 +230,8 @@ def repair_binance_status_from_payload(
     pg_connect: Union[str, Callable[[], Any]],
 ) -> int:
     """
-    Fallback: fix status for Binance orders from payload only when DB status is NULL/empty.
-    If status is already set, leave it unchanged.
+    Set status from payload for Binance orders. Uses whatever status is in the payload
+    (payload.binance.status or payload.binance.X). No null check on current DB status.
     Returns number of rows updated.
     """
     conn = _get_conn(pg_connect)
@@ -234,15 +240,14 @@ def repair_binance_status_from_payload(
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT internal_id, status, payload FROM orders
+            SELECT internal_id, payload FROM orders
             WHERE broker = 'binance'
-              AND (status IS NULL OR status = '')
               AND payload IS NOT NULL
             """
         )
         rows = cur.fetchall()
         updated = 0
-        for internal_id, _current_status, payload in rows:
+        for internal_id, payload in rows:
             vals = _extract_from_binance_payload(payload)
             new_status = vals.get("status")
             if not new_status or not isinstance(new_status, str) or not new_status.strip():
