@@ -10,6 +10,17 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from oms.log import logger
 
+# Binance order status (place_order / executionReport) -> OMS Postgres status
+_BINANCE_TO_OMS_STATUS: Dict[str, str] = {
+    "NEW": "sent",
+    "PENDING": "pending",
+    "PARTIALLY_FILLED": "partially_filled",
+    "FILLED": "filled",
+    "CANCELED": "cancelled",
+    "REJECTED": "rejected",
+    "EXPIRED": "expired",
+}
+
 
 def _get_conn(pg_connect: Union[str, Callable[[], Any]]) -> Any:
     """Open connection from pg_connect (string or callable)."""
@@ -19,12 +30,19 @@ def _get_conn(pg_connect: Union[str, Callable[[], Any]]) -> Any:
     return psycopg2.connect(pg_connect)
 
 
+def _binance_status_to_oms(binance_status: str) -> Optional[str]:
+    """Map Binance order status to OMS status. Returns None if unknown."""
+    if not binance_status or not isinstance(binance_status, str):
+        return None
+    return _BINANCE_TO_OMS_STATUS.get(binance_status.strip().upper())
+
+
 def _extract_from_binance_payload(payload: Any) -> Dict[str, Any]:
     """
-    Extract price, time_in_force, binance_cumulative_quote_qty from Binance payload.
+    Extract price, time_in_force, binance_cumulative_quote_qty, status from Binance payload.
 
     Payload shape: {"binance": {...}} with avgPrice, timeInForce, cumulativeQuoteQty,
-    fills[0].price. Returns dict with only keys that have valid values.
+    status, fills[0].price. Returns dict with only keys that have valid values.
     """
     out: Dict[str, Any] = {}
     if not isinstance(payload, dict):
@@ -38,6 +56,12 @@ def _extract_from_binance_payload(payload: Any) -> Dict[str, Any]:
     binance = payload.get("binance")
     try:
         if isinstance(binance, dict):
+            # Status (e.g. NEW, FILLED; important for market orders that fill before fill callback)
+            st = binance.get("status")
+            if st is not None and str(st).strip():
+                oms_status = _binance_status_to_oms(str(st))
+                if oms_status:
+                    out["status"] = oms_status[:64]
             # Price: avgPrice, fills[0].price
             avg = binance.get("avgPrice")
             if avg is not None and str(avg).strip():
@@ -196,6 +220,51 @@ def repair_binance_cumulative_quote_qty_from_payload(
             conn.close()
 
 
+def repair_binance_status_from_payload(
+    pg_connect: Union[str, Callable[[], Any]],
+) -> int:
+    """
+    Fallback: fix status for Binance orders from payload only when DB status is NULL/empty.
+    If status is already set, leave it unchanged.
+    Returns number of rows updated.
+    """
+    conn = _get_conn(pg_connect)
+    we_opened = not callable(pg_connect)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT internal_id, status, payload FROM orders
+            WHERE broker = 'binance'
+              AND (status IS NULL OR status = '')
+              AND payload IS NOT NULL
+            """
+        )
+        rows = cur.fetchall()
+        updated = 0
+        for internal_id, _current_status, payload in rows:
+            vals = _extract_from_binance_payload(payload)
+            new_status = vals.get("status")
+            if not new_status or not isinstance(new_status, str) or not new_status.strip():
+                continue
+            new_status = new_status.strip()[:64]
+            cur.execute(
+                "UPDATE orders SET status = %s WHERE internal_id = %s",
+                (new_status, internal_id),
+            )
+            updated += cur.rowcount
+        conn.commit()
+        if updated:
+            logger.info(
+                "repair_binance_status_from_payload: updated {} order(s)",
+                updated,
+            )
+        return updated
+    finally:
+        if we_opened:
+            conn.close()
+
+
 def run_all_repairs(pg_connect: Union[str, Callable[[], Any]]) -> int:
     """
     Run all order repairs for Binance orders. Call from OMS loop alongside sync.
@@ -206,6 +275,7 @@ def run_all_repairs(pg_connect: Union[str, Callable[[], Any]]) -> int:
         repair_binance_price_from_payload,
         repair_binance_time_in_force_from_payload,
         repair_binance_cumulative_quote_qty_from_payload,
+        repair_binance_status_from_payload,
     ]
     for repair_fn in repairs:
         try:
