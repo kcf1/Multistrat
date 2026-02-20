@@ -8,18 +8,12 @@ Skips Redis; writes granular positions table only.
 """
 
 import argparse
-import logging
 import sys
 
 from pms.config import PmsSettings
+from pms.log import logger
 from pms.loop import run_one_tick, run_pms_loop
 from pms.mark_price import get_mark_price_provider
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -41,13 +35,13 @@ def main() -> None:
     )
 
     if args.once:
-        logger.info("On-request refresh (one tick); mark source=%s", settings.pms_mark_price_source)
+        logger.info("On-request refresh (one tick); mark source={}", settings.pms_mark_price_source)
         n = run_one_tick(settings.database_url, mark_provider)
-        logger.info("Refreshed %s positions", n)
+        logger.info("Refreshed {} positions", n)
         return
 
     logger.info(
-        "Starting PMS loop (tick every %s s, mark source=%s); Redis skipped",
+        "Starting PMS loop (tick every {} s, mark source={}); Redis skipped",
         settings.pms_tick_interval_seconds,
         settings.pms_mark_price_source,
     )

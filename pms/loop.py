@@ -4,15 +4,13 @@ PMS integration loop (12.3.8): read → derive → calculate → write.
 Skips Redis; writes granular positions table only.
 """
 
-import logging
 from typing import Any, Callable, List, Optional, Union
 
 from pms.granular_store import write_pms_positions
+from pms.log import logger
 from pms.mark_price import MarkPriceProvider
 from pms.reads import derive_positions_from_orders, query_orders_for_positions
 from pms.schemas_pydantic import DerivedPosition
-
-logger = logging.getLogger(__name__)
 
 
 def enrich_positions_with_mark_prices(
@@ -84,9 +82,9 @@ def run_pms_loop(
     while True:
         try:
             n = run_one_tick(pg_connect, mark_provider)
-            logger.debug("PMS tick wrote %s positions", n)
+            logger.info("PMS tick wrote {} positions", n)
         except Exception as e:
-            logger.exception("PMS tick failed: %s", e)
+            logger.exception("PMS tick failed: {}", e)
         if stop_event is not None and stop_event.is_set():
             break
         time.sleep(tick_interval_seconds)
