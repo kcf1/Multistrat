@@ -5,15 +5,13 @@ Task 12.3.1a: Define interface (e.g. get_mark_prices per symbol); Phase 2 implem
 by wrapping Binance REST. Switch via PMS_MARK_PRICE_SOURCE. See docs/pms/PMS_ARCHITECTURE.md §11.
 """
 
-import logging
 from decimal import Decimal, InvalidOperation
 from typing import List, Optional
 
 import requests
 
+from pms.log import logger
 from pms.schemas_pydantic import BinanceTickerPriceItem, MarkPricesResult
-
-logger = logging.getLogger(__name__)
 
 # Default Binance spot URLs (public endpoints; no auth)
 BINANCE_SPOT_BASE_URL = "https://api.binance.com"
@@ -97,10 +95,10 @@ class BinanceMarkPriceProvider(MarkPriceProvider):
             resp.raise_for_status()
             data = resp.json()
         except requests.exceptions.RequestException as e:
-            logger.warning("Binance ticker/price request failed: %s", e)
+            logger.warning("Binance ticker/price request failed: {}", e)
             raise MarkPriceProviderError(f"Binance ticker request failed: {e}") from e
         except (ValueError, KeyError) as e:
-            logger.warning("Binance ticker/price parse error: %s", e)
+            logger.warning("Binance ticker/price parse error: {}", e)
             raise MarkPriceProviderError(f"Binance ticker parse error: {e}") from e
 
         # Response: single dict if ?symbol=X, else list of {symbol, price}
@@ -122,10 +120,10 @@ class BinanceMarkPriceProvider(MarkPriceProvider):
                 try:
                     prices[sym] = Decimal(str(item.price))
                 except (InvalidOperation, TypeError, ValueError):
-                    logger.debug("Skip ticker item with invalid price %s: %s", sym, item.price)
+                    logger.debug("Skip ticker item with invalid price {}: {}", sym, item.price)
                     continue
             except Exception as e:
-                logger.debug("Skip invalid ticker item %s: %s", raw, e)
+                logger.debug("Skip invalid ticker item {}: {}", raw, e)
                 continue
 
         return MarkPricesResult(prices=prices)

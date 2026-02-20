@@ -12,10 +12,10 @@ Write-Host "Running DB migrations (alembic upgrade head)..."
 docker compose run --rm oms python -m alembic upgrade head
 
 Write-Host "Rebuilding app image (oms + pms)..."
-docker compose build --pull oms
+docker compose build --pull oms pms
 
 Write-Host "Deploying oms and pms (force recreate so new image is used)..."
-docker compose up -d --force-recreate oms pms
+docker compose up -d oms pms
 
 Write-Host "Done."
 docker compose ps
