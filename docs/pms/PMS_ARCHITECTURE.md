@@ -36,9 +36,36 @@ Single reference for the **Portfolio Management System (PMS)**: data flow, Redis
 
 ---
 
-## 2. PMS Role (Phase 2)
+## 2. Core vs optional
 
-From **docs/PHASE2_DETAILED_PLAN.md** §8:
+**Core** (minimal PMS — implement these first):
+
+| # | Feature | Description |
+|---|--------|-------------|
+| 1 | **Derive positions from orders** | Read **orders** (and optionally fills) from Postgres; aggregate by **(account_id, book, symbol, side)**. Output: open qty, entry average per position. No OMS Redis. |
+| 2 | **Compute PnL** | **Realized** from fills (or executed order rows). **Unrealized** = (mark_price − entry_avg) × qty per position. One mark price source (e.g. Binance) is enough for core. |
+| 3 | **One granular position store** | One table (e.g. **pms_positions**): one row per (account_id, book, symbol, side) with open_qty, entry_avg, realized_pnl, unrealized_pnl. Updated each run. |
+| 4 | **Write PnL/margin for consumers** | After each run: update granular table; write Redis (e.g. `pnl:{account_id}`, `margin:{account_id}`) for Admin/UI. |
+| 5 | **Timer loop** | Periodically: read orders (and balances if needed for margin) → derive positions → get mark prices → compute PnL/margin → write table + Redis. |
+
+**Minimal reads for core:** `orders`, `balances` (and `accounts` to know which accounts to run). Optional for core: `fills` (if realized PnL can be derived from orders only), `symbols`, allocations.
+
+**Optional** (add when needed):
+
+- **Fills table** — Use for richer realized PnL / cost basis if not derivable from orders alone.
+- **Symbols table** — Reference (base/quote, validation); can use convention or config in core.
+- **book_allocations** (or equivalent) — Capital by book; assume single book or simple rule in core.
+- **pnl_snapshots / margin_snapshots** — Time-series tables; core only needs current state in granular table + Redis.
+- **book_cash ledger** — Internal cash-by-book; only if splitting cash by book without external allocations.
+- **Repairs / rebuild-from-orders** — Periodic full rebuild and drift detection; core can do simple “recompute from orders” each tick.
+- **Multiple mark price sources** — Phase 2: one (e.g. Binance); Phase 4: add Redis/DB; switch via config.
+- **SQL VIEWs** on PMS tables — For grouping by symbol, book/symbol, broker/symbol; core uses one granular table, grouping on request in code or ad-hoc queries.
+
+---
+
+## 3. PMS Role (Phase 2)
+
+From **docs/PHASE2_DETAILED_PLAN.md** §8 (see **§2 Core vs optional** above for minimal scope):
 
 - **Periodically** (e.g. every few seconds) read **balances** from Postgres and **derive positions** from the **orders** table (and optionally fills). **PMS does not read OMS Redis positions** (that is dummy).
 - Compute **realized PnL** (from fills), **unrealized PnL** (from current mark price if available), and **margin** (for futures).
@@ -52,7 +79,7 @@ From **docs/PHASE2_DETAILED_PLAN.md** §8:
 
 ---
 
-## 3. Data Flows (OMS-Aligned)
+## 4. Data Flows (OMS-Aligned)
 
 Same conceptual patterns as OMS:
 
@@ -67,7 +94,7 @@ See **docs/pms/PMS_DATA_FLOWS.md** for detailed flow descriptions.
 
 ---
 
-## 4. Redis Key Layout (PMS)
+## 5. Redis Key Layout (PMS)
 
 **Reads:** PMS reads **Postgres only** (orders, balances, optional fills). **PMS does not read OMS Redis positions or balances** (that path is dummy). Positions are derived from the orders table.
 
@@ -82,23 +109,68 @@ Document exact value format in PMS code for PnL/margin keys.
 
 ---
 
-## 5. Postgres Schema (Reads & Writes)
+## 6. Granular Store, Views, and Tables (PMS Writes Tables Only)
 
-**PMS reads** (no schema ownership; tables from OMS):
+**One granular store, grouping on request:**
 
-- **accounts** — id, name, broker, config (for account list and config).
-- **orders** — To **derive positions** (aggregate executed_qty by account_id, symbol, side). Primary source for position view; PMS does not read OMS Redis positions.
-- **fills** — For realized PnL and audit (if PMS or another consumer writes a fills table from oms_fills).
-- **balances** — Current balances per account/asset (synced by OMS).
+- PMS maintains **one granular store** at a fixed grain: e.g. **(account_id, book, symbol, side)**. One row per (account, book, symbol, side) with open_qty, entry_avg, realized_pnl, unrealized_pnl, etc. This is **derived from orders** (which have `book`) and updated by PMS after each calculation cycle (or incrementally on fill).
+- **Different views** (by symbol, by book/symbol, by broker/symbol) are **computed on request** — either by SQL `GROUP BY` on the granular table(s), or by the PMS/API reading the granular table and returning grouped results. No need to pre-materialize each view unless one is very hot.
+- **PMS writes tables only** (no SQL VIEWs as the primary output). Full valuation needs mark price (external), so PMS must compute and write. Optional: define DB VIEWs **on top of** PMS-written tables for simple groupings (e.g. `valuation_by_symbol`).
 
-**PMS writes:**
+**How this differs from the orders table:**
 
-- **pnl_snapshots** (optional) — account_id, realized_pnl, unrealized_pnl, mark_price_used, timestamp.
-- **margin_snapshots** (optional) — account_id, total_margin, available_balance, timestamp.
+| | Orders table (OMS) | Granular store (PMS) |
+|--|--------------------|----------------------|
+| **Grain** | One row per order | One row per (account_id, book, symbol, side) |
+| **Content** | Order fields (qty, price, status, book, broker, …) | Aggregated state (open_qty, entry_avg, realized_pnl, unrealized_pnl) |
+| **Purpose** | Audit trail, source of truth for “what happened” | Current state for fast reads and on-demand grouping |
+
+Orders = ledger; granular store = materialized position/snapshot written by PMS after calculations.
 
 ---
 
-## 6. Main Loop and Processing (PMS)
+## 7. Reference Data: Symbols and Allocations (optional for core)
+
+**Symbol properties (reference table):**
+
+- **Symbols table** (e.g. `symbols` or `instruments`): maps symbol → base_asset, quote_asset, tick_size, lot_size, min_qty, product_type (spot/futures), broker, etc. Used for base/quote derivation, validation, and display. Populated by sync from broker (e.g. exchange info) or config; **PMS only reads** it. See **docs/pms/PMS_DATA_MODEL.md** (symbol vs asset).
+
+**Cash vs positions (keep separate):**
+
+- **Positions** = open exposure in a **trading pair** (symbol). Stored in PMS granular table; grain (account_id, book, symbol, side). Do **not** put cash (asset balances) into the positions table.
+- **Cash** = holdings per **asset** (e.g. USDT, BTC). Stays in OMS **balances** table. PMS reads it for margin and for capital-by-book. A combined “holdings” view (positions + cash) can be derived in a VIEW or API, not by mixing concepts in one table.
+
+**Capital by book:**
+
+- **capital(book) = asset_value(book) + cash(book)**. Asset value by book = sum of position values (qty × mark price) for that book — requires **book** in the granular store grain. Cash by book is not provided by the broker (balances are per account/asset). Two options:
+  - **Allocation:** Split account cash across books by a rule (e.g. shares or fixed amounts). Allocations are **managed outside** the system (admin, config, another service). The system is **provided with** allocations via a defined **interface** (table, API, or file) and uses them as **read-only input**.
+  - **Internal book_cash ledger:** Table (account_id, book, asset) → balance, updated by PMS on each fill (e.g. book A sells BTC → credit USDT for book A). Initial state from allocation or config.
+- **Allocations:** Managed outside; system reads via interface (e.g. table `book_allocations`, or config API, or file). PMS does not decide allocation percentages or amounts; it only consumes them.
+
+---
+
+## 8. Postgres Schema (Reads & Writes)
+
+**PMS reads** (no schema ownership; from OMS or reference):
+
+- **accounts** — id, name, broker, config (for account list and config). **Core.**
+- **orders** — To **derive positions** (aggregate executed_qty by account_id, **book**, symbol, side). Primary source; PMS does not read OMS Redis positions. **Core.**
+- **balances** — Current balances per account/asset (synced by OMS). **Cash** stays here; not in positions table. **Core** (for margin).
+- **fills** — **(Optional)** For realized PnL and audit (if PMS or another consumer writes a fills table from oms_fills).
+- **symbols** (reference) — **(Optional)** symbol, base_asset, quote_asset, tick_size, lot_size, etc. PMS reads for base/quote and validation.
+- **book_allocations** (or equivalent) — **(Optional)** (account_id, book, asset, amount_or_share). Provided via interface; managed outside; PMS reads only.
+
+**PMS writes:**
+
+- **pms_positions** (or equivalent) — account_id, book, symbol, side, open_qty, entry_avg, realized_pnl, unrealized_pnl, updated_at. Grain = (account_id, book, symbol, side). Updated after each calculation cycle. **Core.**
+- **Redis** `pnl:{account_id}`, `margin:{account_id}` — **Core.**
+- **pnl_snapshots** — **(Optional)** account_id, book (optional), realized_pnl, unrealized_pnl, mark_price_used, timestamp.
+- **margin_snapshots** — **(Optional)** account_id, total_margin, available_balance, timestamp.
+- **book_cash** — **(Optional)** If using internal ledger for cash by book: (account_id, book, asset) → balance. Updated on fills.
+
+---
+
+## 9. Main Loop and Processing (PMS)
 
 **Entrypoint:** e.g. `pms/main.py` → `run_pms_loop()`.
 
@@ -106,15 +178,15 @@ Document exact value format in PMS code for PnL/margin keys.
 2. **Loop (each iteration or timer):**
    - **Read:** Balances from Postgres; **derive positions** from **orders** table (PMS does not read OMS Redis positions).
    - **Calculate:** Realized PnL (from fills or cached), unrealized PnL (mark price if available), margin.
-   - **Optional periodic rebuild:** Recompute positions from **orders**; optionally compare to other sources or run **repairs** if drift (flag or correct).
-   - **Write:** Update Redis cache (`pnl:{account_id}`, `margin:{account_id}`); optionally write Postgres `pnl_snapshots` / `margin_snapshots`.
-3. **Periodic repairs:** Same loop or separate interval: rebuild-from-orders, diff, fix/flag (see **docs/pms/PMS_DATA_FLOWS.md**).
+   - **Optional:** Periodic rebuild from orders; compare to other sources or run **repairs** if drift (flag or correct).
+   - **Write (core):** Update granular position table (`pms_positions`); update Redis (`pnl:{account_id}`, `margin:{account_id}`). **Optional:** Postgres `pnl_snapshots` / `margin_snapshots`.
+3. **Optional:** Periodic repairs — rebuild-from-orders, diff, fix/flag (see **docs/pms/PMS_DATA_FLOWS.md**).
 
 Blocking vs polling: PMS is **timer-driven** (no Redis stream consumer in minimal design). For event-driven behavior later, could subscribe to Redis keyspace or a small “tick” stream on fill.
 
 ---
 
-## 7. Configuration (Environment)
+## 10. Configuration (Environment)
 
 | Variable | Purpose |
 |----------|--------|
@@ -126,7 +198,7 @@ Blocking vs polling: PMS is **timer-driven** (no Redis stream consumer in minima
 
 ---
 
-## 8. Mark Price (Unrealized PnL) — Interface and Implementations
+## 11. Mark Price (Unrealized PnL) — Interface and Implementations
 
 **Approach:** Define a **mark price provider interface** first; PMS depends only on this contract. Implementations are swappable via config.
 
@@ -142,7 +214,7 @@ Blocking vs polling: PMS is **timer-driven** (no Redis stream consumer in minima
 
 ---
 
-## 9. Pydantic (recommended usage)
+## 12. Pydantic (recommended usage)
 
 Align with OMS, which uses Pydantic for stream messages and broker events. Recommended in PMS:
 
@@ -158,13 +230,14 @@ PMS can depend on the same `pydantic>=2.0.0` as OMS (root or shared requirements
 
 ---
 
-## 10. File Map (Concise)
+## 13. File Map (Concise)
 
 | Area | Files (suggested) |
 |------|-------------------|
 | Entry & loop | `pms/main.py` |
 | Read positions/balances | `pms/read_store.py` or `storage/` |
 | Rebuild from orders | `pms/rebuild_from_orders.py` |
+| Granular position store | `pms_positions` table (grain: account_id, book, symbol, side) |
 | PnL / margin calculation | `pms/calculations.py` |
 | Repairs (position drift) | `pms/repair.py` |
 | Redis cache read/write | `pms/cache.py` (PMS writes PnL/margin keys only; does not read OMS Redis) |
@@ -174,7 +247,7 @@ PMS can depend on the same `pydantic>=2.0.0` as OMS (root or shared requirements
 
 ---
 
-## 11. Account Data and Session Dependency
+## 14. Account Data and Session Dependency
 
 Whether **account data management** (or session) must be built **before** PMS:
 
@@ -185,7 +258,7 @@ Whether **account data management** (or session) must be built **before** PMS:
 
 ---
 
-## 12. References
+## 15. References
 
 - **docs/oms/OMS_ARCHITECTURE.md** — OMS data flow, sync, repairs, Redis/Postgres.
 - **docs/PHASE2_DETAILED_PLAN.md** — §3 Postgres schema, §8 PMS, §12.3 PMS task checklist.

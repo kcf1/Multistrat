@@ -21,7 +21,7 @@ PMS does **not** write to `orders` or `fills`; those are owned by OMS. PMS does 
 
 - **orders** is the audit trail: every executed order is synced by OMS with `executed_qty`, `price`, `status`, etc.
 - **positions** is maintained by Booking from `oms_fills`. If a fill is missed, applied twice, or Booking has a bug, positions can drift from what orders imply.
-- **Recomputing** net position from orders gives a **canonical** view: for each (account_id, symbol, side), sum of `executed_qty` over filled orders.
+- **Recomputing** net position from orders gives a **canonical** view: for each (account_id, **book**, symbol, side), sum of `executed_qty` over filled orders. Including **book** supports capital-by-book and grouping by book/symbol. See **docs/pms/PMS_ARCHITECTURE.md** §6–7 (granular store, reference data / capital by book).
 
 ### 2.2 Derived Position from Orders
 
@@ -33,11 +33,11 @@ PMS does **not** write to `orders` or `fills`; those are owned by OMS. PMS does 
 **SQL (expected net from orders):**
 
 ```sql
-SELECT account_id, symbol, side,
+SELECT account_id, book, symbol, side,
        SUM(COALESCE(executed_qty, 0)) AS expected_qty
 FROM orders
 WHERE status = 'filled'
-GROUP BY account_id, symbol, side;
+GROUP BY account_id, book, symbol, side;
 ```
 
 **Entry price:** Positions table usually stores `entry_price_avg`. From orders alone you have per-order `price` (executed). Optionally:
@@ -45,7 +45,7 @@ GROUP BY account_id, symbol, side;
 - Use **fills** table: average of (price * quantity) / sum(quantity) per (account_id, symbol, side) for realized cost basis.
 - Or derive from orders: weighted average of order `price` by `executed_qty` for filled orders.
 
-PMS can implement a function **expected_positions_from_orders(pg_connect)** that returns a list of (account_id, symbol, side, expected_qty, optional expected_entry_avg).
+PMS can implement a function **expected_positions_from_orders(pg_connect)** that returns a list of (account_id, book, symbol, side, expected_qty, optional expected_entry_avg). Grain (account_id, book, symbol, side) supports capital-by-book and on-request grouping.
 
 ### 2.3 Reconcile (optional)
 

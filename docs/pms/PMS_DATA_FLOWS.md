@@ -19,7 +19,7 @@ PMS applies the same ideas: **primary view** from one store (positions table), *
 
 ## 2. PMS: Primary Data Source for Positions
 
-- **Source for “current positions”:** PMS **derives** positions from the **orders** table (e.g. for each (account_id, symbol, side), sum `executed_qty` over terminal orders). **PMS does not read OMS Redis positions** (that path is dummy).
+- **Source for “current positions”:** PMS **derives** positions from the **orders** table at grain (account_id, **book**, symbol, side); sum `executed_qty` over terminal orders. **PMS does not read OMS Redis positions** (that path is dummy). Book in grain supports capital-by-book and grouping.
 - **Balances:** Read from Postgres (OMS account sync). PMS does not read OMS Redis for positions or balances.
 
 So:
@@ -38,8 +38,8 @@ So:
 
 **How:**
 
-1. **Query orders:** e.g. `SELECT account_id, symbol, side, SUM(executed_qty) AS net_qty FROM orders WHERE status IN ('filled', ...) GROUP BY account_id, symbol, side`.
-2. **Map to “expected” positions:** Convert to the same shape as the positions table (account_id, symbol, side, quantity, optionally entry_price from fills or orders).
+1. **Query orders:** e.g. `SELECT account_id, book, symbol, side, SUM(executed_qty) AS net_qty FROM orders WHERE status IN ('filled', ...) GROUP BY account_id, book, symbol, side`.
+2. **Map to “expected” positions:** Convert to the same shape as the granular store (account_id, book, symbol, side, quantity, optionally entry_price from fills or orders).
 3. **Use order-derived positions** as the current view (PMS does not read from OMS Redis).
 4. **Compare (optional):** If another source of positions exists (e.g. future Postgres positions table), compare expected quantity vs that source.
 5. **Repair or flag:** If drift: **flag** (write to a reconciliation table or log for manual review) or update the other source if PMS owns it.
@@ -98,18 +98,18 @@ So: **no session or event-driven PMS consumer is required** for Phase 2; timer-b
 **Query pattern for “expected” net position from orders:**
 
 - Filter: `status IN ('filled')` (and optionally handle `partially_filled` if you store final state in orders).
-- Group by: `account_id`, `symbol`, `side`.
+- Group by: `account_id`, `book`, `symbol`, `side`.
 - Aggregate: `SUM(executed_qty)` for quantity; for **entry_price_avg** you can derive from **fills** (avg price per fill) or from orders (e.g. order-level price when filled).
 
 **Example (conceptual):**
 
 ```sql
 -- Expected net position per account/symbol/side from orders
-SELECT account_id, symbol, side,
+SELECT account_id, book, symbol, side,
        SUM(COALESCE(executed_qty, 0)) AS expected_qty
 FROM orders
 WHERE status = 'filled'
-GROUP BY account_id, symbol, side;
+GROUP BY account_id, book, symbol, side;
 ```
 
 Order-derived positions are the canonical view for PMS. Optionally compare with another source (e.g. balance_changes) for reconciliation; difference → flag or repair that source.
