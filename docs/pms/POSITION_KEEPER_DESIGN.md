@@ -6,12 +6,12 @@ This document details how **PMS** uses the **orders** table to compute and recon
 
 ## 1. Role Summary
 
-- **Read:** **Postgres only** — orders, balances, optional fills. **PMS does not read OMS Redis positions** (that is dummy).
-- **Compute:** Realized PnL (from fills), unrealized PnL (from mark price), margin (futures).
-- **Positions:** **Derived from the orders table** (and optionally fills). No read from OMS Redis.
+- **Read:** **Postgres only** — orders, balances. **No fills table;** orders are the primary data source. **PMS does not read OMS Redis positions** (that is dummy).
+- **Compute:** Realized PnL (from executed order rows), unrealized PnL (mark price × open qty only when open_qty > 0; flattened positions have no unrealized), margin (futures).
+- **Positions:** **Derived from the orders table only** (filter by status: **partially_filled**, **filled**). No read from OMS Redis.
 - **Write:** PnL/margin snapshots to Postgres and/or Redis for Admin/UI.
 
-PMS does **not** write to `orders` or `fills`; those are owned by OMS. PMS does **not** read or update OMS Redis positions.
+PMS does **not** write to `orders`. PMS does **not** use or write a fills table. PMS does **not** read or update OMS Redis positions.
 
 ---
 
@@ -30,22 +30,19 @@ PMS does **not** write to `orders` or `fills`; those are owned by OMS. PMS does 
 - For **spot:** One position per (account_id, symbol): net quantity = sum of (executed_qty for BUY) − sum of (executed_qty for SELL). Often stored as long-only quantity with sign or as two “sides.”
 - For **futures:** One row per (account_id, symbol, side) with quantity; net = long_qty − short_qty per symbol.
 
-**SQL (expected net from orders):**
+**SQL (expected net from orders):** Filter orders by **partially_filled** and **filled** only:
 
 ```sql
 SELECT account_id, book, symbol, side,
        SUM(COALESCE(executed_qty, 0)) AS expected_qty
 FROM orders
-WHERE status = 'filled'
+WHERE status IN ('partially_filled', 'filled')
 GROUP BY account_id, book, symbol, side;
 ```
 
-**Entry price:** Positions table usually stores `entry_price_avg`. From orders alone you have per-order `price` (executed). Optionally:
+**Entry average (entry_avg):** Must be the **cost basis of the open quantity only**, not an average over all orders. For unrealized PnL we value only **open** exposure: (mark_price − entry_avg) × open_qty. For **flattened** positions (open_qty = 0) there is no unrealized — PnL is already realized. Derive entry_avg from **orders only** (no fills table): e.g. volume-weighted average of order `price` by `executed_qty` for the portion of orders that is still “open” (use FIFO or similar cost-basis so closed chunks are excluded). Do **not** average over all filled orders (that would mix in closed exposure).
 
-- Use **fills** table: average of (price * quantity) / sum(quantity) per (account_id, symbol, side) for realized cost basis.
-- Or derive from orders: weighted average of order `price` by `executed_qty` for filled orders.
-
-PMS can implement a function **expected_positions_from_orders(pg_connect)** that returns a list of (account_id, book, symbol, side, expected_qty, optional expected_entry_avg). Grain (account_id, book, symbol, side) supports capital-by-book and on-request grouping.
+PMS can implement **expected_positions_from_orders(pg_connect)** that returns (account_id, book, symbol, side, expected_qty, expected_entry_avg). Grain (account_id, book, symbol, side) supports capital-by-book and on-request grouping.
 
 ### 2.3 Reconcile (optional)
 
@@ -58,17 +55,17 @@ PMS can implement a function **expected_positions_from_orders(pg_connect)** that
 
 | Step | Source | Action |
 |------|--------|--------|
-| Position view | **Orders table** (derived) | Derive by account/symbol/side; use for PnL/margin. PMS does not read OMS Redis positions. |
-| Realized PnL | fills table (or cached) | Sum (price * qty) or use fill-level PnL if stored. |
-| Unrealized PnL | order-derived positions + mark price | (mark - entry_avg) * quantity (simplified; futures may use margin/PnL API). |
+| Position view | **Orders table** (derived) | Filter status partially_filled/filled; derive by account, book, symbol, side. No fills table. PMS does not read OMS Redis positions. |
+| Realized PnL | **Orders** (executed rows) | From order-level executed_qty and price (the part that has been closed/flattened). |
+| Unrealized PnL | order-derived **open** positions + mark price | (mark - entry_avg) × **open_qty** only when open_qty > 0; flattened positions: no unrealized (PnL already realized). |
 | Margin | order-derived positions + balances / broker | Balances from Postgres; positions from orders. |
-| Rebuild | orders table | Periodic: expected_positions_from_orders; optional compare/flag if another store exists. |
+| Rebuild | orders table | Periodic: expected_positions_from_orders (filter partial/fully filled); optional compare/flag if another store exists. |
 
 ---
 
 ## 4. Repairs (Position Drift)
 
-**Input:** Expected positions from orders (and optionally fills for entry_avg).
+**Input:** Expected positions from orders only (filter partial/fully filled; entry_avg = cost basis of open qty).
 
 **Logic:** Order-derived positions are the canonical view. If PMS (or another system) maintains a separate position store (e.g. future Postgres positions table), repairs can update that store from expected values or **flag** drift in a log. **PMS does not read or update OMS Redis positions** (dummy).
 
@@ -92,8 +89,8 @@ Config-driven: `PMS_MARK_PRICE_SOURCE` selects which implementation to inject. I
 
 | Task | Description | Orders usage |
 |------|-------------|--------------|
-| 12.3.1 | PnL/margin calculation | Realized from fills; unrealized from mark; margin from positions/balances. |
-| 12.3.2 | Postgres reads | positions, balances, fills; **add** orders for rebuild. |
+| 12.3.1 | PnL/margin calculation | Realized from orders (executed rows); unrealized from mark × open qty only; margin from positions/balances. |
+| 12.3.2 | Postgres reads | orders (primary), balances, accounts; no fills table. |
 | 12.3.3 | Postgres read queries | Standard queries + **expected_positions_from_orders**. |
 | 12.3.4–12.3.5 | Redis | PMS does not read OMS Redis positions/balances (dummy). PMS writes PnL/margin keys only. |
 | 12.3.6–12.3.7 | PnL/margin snapshot writes | Redis + optional pnl_snapshots / margin_snapshots. |

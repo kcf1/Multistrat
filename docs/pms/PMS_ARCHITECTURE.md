@@ -1,6 +1,6 @@
 # PMS Architecture: Data Flow, Interfaces & Design
 
-Single reference for the **Portfolio Management System (PMS)**: data flow, Redis/Postgres interfaces, and alignment with OMS. PMS is the **source of truth** for PnL and margin; it reads from OMS **Postgres only** (orders, accounts, balances). **PMS does not read OMS Redis positions** (that path is dummy). Positions used by PMS are **derived from the orders table** (and optionally fills). Follows the same patterns as **OMS** (periodic sync, event-driven updates, data fixes). See **docs/PHASE2_DETAILED_PLAN.md** §8 for the PMS role.
+Single reference for the **Portfolio Management System (PMS)**: data flow, Redis/Postgres interfaces, and alignment with OMS. PMS is the **source of truth** for PnL and margin; it reads from OMS **Postgres only** (orders, accounts, balances). **PMS does not read OMS Redis positions** (that path is dummy). Positions used by PMS are **derived from the orders table only** (no fills table; filter orders by partial/fully filled status). Follows the same patterns as **OMS** (periodic sync, event-driven updates, data fixes). See **docs/PHASE2_DETAILED_PLAN.md** §8 for the PMS role.
 
 ---
 
@@ -14,7 +14,7 @@ Single reference for the **Portfolio Management System (PMS)**: data flow, Redis
        │          • (OMS Redis positions exist but PMS does not read them — dummy)
        ▼
 ┌───────────────┐
-│ Postgres      │     (optional: fills table from oms_fills consumer)
+│ Postgres      │     (PMS does not use a fills table)
 │ orders        │
 │ accounts      │
 │ balances      │
@@ -24,15 +24,15 @@ Single reference for the **Portfolio Management System (PMS)**: data flow, Redis
         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                        PMS                                   │
-│  - Read: orders, balances, optional fills (PG only)           │
-│  - Positions: derived from orders table (not from OMS Redis) │
-│  - Compute: realized PnL (fills), unrealized (mark), margin   │
+│  - Read: orders, balances (PG only; no fills table)           │
+│  - Positions: derived from orders (filter partial/fully filled)│
+│  - Compute: realized PnL (orders), unrealized (mark × open qty)│
 │  - Write: pnl_snapshots / margin_snapshots, Redis cache       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- **Upstream:** OMS syncs **orders** and **accounts/balances** to Postgres. OMS may keep positions in Redis internally; **PMS does not read OMS Redis positions** (that path is dummy). OMS produces **oms_fills**; a downstream consumer (e.g. PMS) may write a **fills** table.
-- **PMS:** Reads **Postgres only** (orders, balances, optional fills). **Positions** used by PMS are **derived from the orders table** (and optionally fills), not from OMS Redis. PMS aggregates PnL and margin and writes snapshots and cache. **PMS is the source of truth for PnL and margin.**
+- **Upstream:** OMS syncs **orders** and **accounts/balances** to Postgres. OMS may keep positions in Redis internally; **PMS does not read OMS Redis positions** (that path is dummy). OMS produces **oms_fills**; PMS does **not** consume a fills table — **orders are the primary data source**.
+- **PMS:** Reads **Postgres only** (orders, balances). **Positions** are **derived from the orders table only** (filter by status: partially_filled, filled), not from OMS Redis or a fills table. PMS aggregates PnL and margin and writes snapshots and cache. **PMS is the source of truth for PnL and margin.**
 
 ---
 
@@ -42,17 +42,16 @@ Single reference for the **Portfolio Management System (PMS)**: data flow, Redis
 
 | # | Feature | Description |
 |---|--------|-------------|
-| 1 | **Derive positions from orders** | Read **orders** (and optionally fills) from Postgres; aggregate by **(account_id, book, symbol, side)**. Output: open qty, entry average per position. No OMS Redis. |
-| 2 | **Compute PnL** | **Realized** from fills (or executed order rows). **Unrealized** = (mark_price − entry_avg) × qty per position. One mark price source (e.g. Binance) is enough for core. |
+| 1 | **Derive positions from orders** | Read **orders only** from Postgres (no fills table); filter by status **partially_filled**, **filled**. Aggregate by **(account_id, book, symbol, side)**. Output: **open_qty**, **entry_avg** (cost basis of the **open** quantity only — not an average over all orders; use FIFO/cost-basis so flattened chunks are excluded). No OMS Redis. |
+| 2 | **Compute PnL** | **Realized** from executed order rows (the part that has been closed/flattened). **Unrealized** = (mark_price − entry_avg) × **open_qty** **only when open_qty > 0**; for **flattened** positions (open_qty = 0) there is no unrealized — PnL is already realized. One mark price source (e.g. Binance) is enough for core. |
 | 3 | **One granular position store** | One table (e.g. **pms_positions**): one row per (account_id, book, symbol, side) with open_qty, entry_avg, realized_pnl, unrealized_pnl. Updated each run. |
 | 4 | **Write PnL/margin for consumers** | After each run: update granular table; write Redis (e.g. `pnl:{account_id}`, `margin:{account_id}`) for Admin/UI. |
 | 5 | **Timer loop** | Periodically: read orders (and balances if needed for margin) → derive positions → get mark prices → compute PnL/margin → write table + Redis. |
 
-**Minimal reads for core:** `orders`, `balances` (and `accounts` to know which accounts to run). Optional for core: `fills` (if realized PnL can be derived from orders only), `symbols`, allocations.
+**Minimal reads for core:** `orders`, `balances` (and `accounts` to know which accounts to run). **No fills table:** orders are the primary data source. Optional for core: `symbols`, allocations.
 
 **Optional** (add when needed):
 
-- **Fills table** — Use for richer realized PnL / cost basis if not derivable from orders alone.
 - **Symbols table** — Reference (base/quote, validation); can use convention or config in core.
 - **book_allocations** (or equivalent) — Capital by book; assume single book or simple rule in core.
 - **pnl_snapshots / margin_snapshots** — Time-series tables; core only needs current state in granular table + Redis.
@@ -67,13 +66,13 @@ Single reference for the **Portfolio Management System (PMS)**: data flow, Redis
 
 From **docs/PHASE2_DETAILED_PLAN.md** §8 (see **§2 Core vs optional** above for minimal scope):
 
-- **Periodically** (e.g. every few seconds) read **balances** from Postgres and **derive positions** from the **orders** table (and optionally fills). **PMS does not read OMS Redis positions** (that is dummy).
-- Compute **realized PnL** (from fills), **unrealized PnL** (from current mark price if available), and **margin** (for futures).
+- **Periodically** (e.g. every few seconds) read **balances** from Postgres and **derive positions** from the **orders** table only (filter: status partially_filled / filled; no fills table). **PMS does not read OMS Redis positions** (that is dummy).
+- Compute **realized PnL** (from executed order rows), **unrealized PnL** (mark price × open qty only when open_qty > 0; flattened positions have no unrealized), and **margin** (for futures).
 - Write results to Postgres (`pnl_snapshots` or similar) and/or to Redis (e.g. `pnl:{account_id}`, `margin:{account_id}`) for Admin/UI.
 
 **Using the orders table for positions:**
 
-- **Source for positions:** PMS **derives** positions from the **orders** table (e.g. net executed quantity per account/symbol/side from terminal orders). PMS does **not** read positions from OMS Redis (dummy).
+- **Source for positions:** PMS **derives** positions from the **orders** table only (filter orders by status: **partially_filled**, **filled**; no fills table). Net executed quantity per (account_id, book, symbol, side); **entry_avg** = cost basis of the **open** quantity (not all orders — flattened exposure is already realized). PMS does **not** read positions from OMS Redis (dummy).
 - **Reconciliation / audit:** Order-derived positions are the canonical view; optional reconciliation can compare with other sources (e.g. a future Postgres positions table) or balance_changes.
 - **Consistency:** Orders table is the audit trail (OMS sync); positions derived from orders are the source of truth for PMS. **PMS is the source of truth for PnL and margin.**
 
@@ -154,9 +153,8 @@ Orders = ledger; granular store = materialized position/snapshot written by PMS 
 **PMS reads** (no schema ownership; from OMS or reference):
 
 - **accounts** — id, name, broker, config (for account list and config). **Core.**
-- **orders** — To **derive positions** (aggregate executed_qty by account_id, **book**, symbol, side). Primary source; PMS does not read OMS Redis positions. **Core.**
+- **orders** — **Primary data source** for positions (no fills table). Filter by status **partially_filled**, **filled**; aggregate executed_qty by account_id, **book**, symbol, side. **entry_avg** = cost basis of **open** quantity only. PMS does not read OMS Redis positions. **Core.**
 - **balances** — Current balances per account/asset (synced by OMS). **Cash** stays here; not in positions table. **Core** (for margin).
-- **fills** — **(Optional)** For realized PnL and audit (if PMS or another consumer writes a fills table from oms_fills).
 - **symbols** (reference) — **(Optional)** symbol, base_asset, quote_asset, tick_size, lot_size, etc. PMS reads for base/quote and validation.
 - **book_allocations** (or equivalent) — **(Optional)** (account_id, book, asset, amount_or_share). Provided via interface; managed outside; PMS reads only.
 
@@ -176,8 +174,8 @@ Orders = ledger; granular store = materialized position/snapshot written by PMS 
 
 1. **Bootstrap:** Redis client, Postgres connection (or callable), config (interval, which accounts).
 2. **Loop (each iteration or timer):**
-   - **Read:** Balances from Postgres; **derive positions** from **orders** table (PMS does not read OMS Redis positions).
-   - **Calculate:** Realized PnL (from fills or cached), unrealized PnL (mark price if available), margin.
+   - **Read:** Balances from Postgres; **derive positions** from **orders** table only (filter partial/fully filled; no fills table).
+   - **Calculate:** Realized PnL (from executed order rows), unrealized PnL (mark × open_qty only when open_qty > 0), margin.
    - **Optional:** Periodic rebuild from orders; compare to other sources or run **repairs** if drift (flag or correct).
    - **Write (core):** Update granular position table (`pms_positions`); update Redis (`pnl:{account_id}`, `margin:{account_id}`). **Optional:** Postgres `pnl_snapshots` / `margin_snapshots`.
 3. **Optional:** Periodic repairs — rebuild-from-orders, diff, fix/flag (see **docs/pms/PMS_DATA_FLOWS.md**).
@@ -191,7 +189,7 @@ Blocking vs polling: PMS is **timer-driven** (no Redis stream consumer in minima
 | Variable | Purpose |
 |----------|--------|
 | REDIS_URL | Redis connection; PMS writes PnL/margin keys only. |
-| DATABASE_URL | Postgres; read orders, balances, optional fills; write snapshots. |
+| DATABASE_URL | Postgres; read orders, balances (no fills table); write snapshots. |
 | PMS_TICK_INTERVAL_SECONDS | How often to run read → derive → calculate → write (e.g. 5). |
 | PMS_REBUILD_FROM_ORDERS_INTERVAL_SECONDS | How often to rebuild positions from orders and run repairs (e.g. 60 or 300). |
 | PMS_MARK_PRICE_SOURCE | `binance` (Phase 2: wrap Binance REST/WS) or `redis` / `market_data` (Phase 4: read from Redis/DB fed by Market Data service). Chooses which **mark price provider** implementation to use. |

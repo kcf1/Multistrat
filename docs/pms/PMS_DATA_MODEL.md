@@ -1,6 +1,6 @@
 # PMS Data Model: Symbol vs Asset, Positions, Reconciliation
 
-PMS reads from **OMS Postgres only** (orders, balances, optional fills); **PMS does not read OMS Redis positions** (that path is dummy). Positions used by PMS are **derived from the orders table**. This document covers data-model considerations: order **symbol** vs balance **asset**, building positions from orders, and reconciling multiple views. See **docs/PHASE2_DETAILED_PLAN.md** §8 (PMS role), §12.3 (PMS tasks).
+PMS reads from **OMS Postgres only** (orders, balances); **PMS does not use a fills table** — orders are the primary data source. **PMS does not read OMS Redis positions** (that path is dummy). Positions used by PMS are **derived from the orders table** (filter by status: partially_filled, filled). This document covers data-model considerations: order **symbol** vs balance **asset**, building positions from orders, and reconciling multiple views. See **docs/PHASE2_DETAILED_PLAN.md** §8 (PMS role), §12.3 (PMS tasks).
 
 ---
 
@@ -8,7 +8,7 @@ PMS reads from **OMS Postgres only** (orders, balances, optional fills); **PMS d
 
 - **Phase 2 plan:** [PHASE2_DETAILED_PLAN.md](../PHASE2_DETAILED_PLAN.md) §8 (PMS role), §12.3 (PMS tasks).
 - **OMS schema:** Postgres `orders`, `accounts`, `balances`, `balance_changes`; OMS syncs **positions** to Redis only (no Postgres `positions` table in current Phase 2). See [AMS_DB_FIELDS.md](../ams/AMS_DB_FIELDS.md), [PHASE2_DETAILED_PLAN.md](../PHASE2_DETAILED_PLAN.md) §3.1.
-- **Fills:** Source of truth for executions is downstream of OMS (e.g. PMS consumes `oms_fills` and may write to a `fills` table). OMS does not write to `fills`.
+- **Fills:** OMS does not write to a `fills` table. PMS **does not use a fills table**; orders (with executed_qty, price, status) are the primary source for position derivation.
 
 ---
 
@@ -28,10 +28,10 @@ So **order symbol and balance asset are not the same**: one is a pair, the other
    - Derive **base** and **quote** from the order/fill **symbol** (e.g. `BTCUSDT` → base `BTC`, quote `USDT`).
    - Then match **quote** or **base** to `balances.asset` / `balance_changes.asset`.
 
-2. **Building positions from orders/fills**  
+2. **Building positions from orders**  
    Positions are often expressed per **symbol** (pair) and **side** (e.g. BTCUSDT, long 0.5). Balance movements are per **asset** (e.g. BTC +0.5, USDT −25k). To reconcile:
-   - From **orders/fills**: aggregate by `(account_id, book, symbol, side)` to get a **derived position** (e.g. net quantity per book/symbol/side) for capital-by-book and grouping.
-   - From **balances**: you see asset-level deltas (e.g. BTC, USDT). To compare with derived positions, map symbol → base/quote and check base-asset balance change vs filled quantity (and quote vs quote spent).
+   - From **orders only** (no fills table): filter by status **partially_filled**, **filled**; aggregate by `(account_id, book, symbol, side)` to get **open_qty** and **entry_avg** (cost basis of open quantity only; do not average over all orders — flattened exposure is already realized). **Unrealized PnL** = (mark − entry_avg) × open_qty only when open_qty > 0.
+   - From **balances**: you see asset-level deltas (e.g. BTC, USDT). To compare with derived positions, map symbol → base/quote and check base-asset balance change vs executed quantity (and quote vs quote spent).
 
 3. **Possible approaches**  
    - **Helper:** `symbol_to_base_quote(symbol)` (e.g. `BTCUSDT` → `("BTC", "USDT")`). Use when normalizing or joining; can be convention-based (e.g. known quote list) or a small config/table.
@@ -42,15 +42,15 @@ Document the convention or mapping you choose (e.g. in this doc or in PMS code) 
 
 ---
 
-## Building positions from orders (and fills)
+## Building positions from orders
 
-OMS does **not** expose a Postgres **positions** table in Phase 2. OMS may hold positions in Redis internally; **PMS does not read OMS Redis positions** (that is dummy).
+OMS does **not** expose a Postgres **positions** table in Phase 2. OMS may hold positions in Redis internally; **PMS does not read OMS Redis positions** (that is dummy). **PMS does not use a fills table** — orders are the primary data source.
 
 PMS:
 
-- **Derives positions from orders/fills** — e.g. aggregate by `(account_id, book, symbol, side)` to get net quantity per book/symbol/side. That **order-derived** view is the position source for PMS; grain includes **book** for capital-by-book and grouping.
+- **Derives positions from orders only** — Filter by status **partially_filled**, **filled**; aggregate by `(account_id, book, symbol, side)` to get **open_qty** and **entry_avg** (cost basis of the **open** quantity only; use FIFO/cost-basis so closed/flattened chunks are excluded). That **order-derived** view is the position source for PMS; grain includes **book** for capital-by-book and grouping.
 - **Optional reconciliation** — If another source of positions exists (e.g. future Postgres positions table), compare with order-derived for drift. PMS does not read OMS Redis.
-- **Use in PnL** — Realized PnL from fills; unrealized PnL and margin use order-derived positions (and mark price when available).
+- **Use in PnL** — Realized PnL from executed order rows (the part that has been closed); unrealized PnL = (mark − entry_avg) × open_qty **only when open_qty > 0** (flattened positions have no unrealized — PnL already realized). Margin uses order-derived positions and mark price when available.
 
 ---
 
@@ -58,8 +58,8 @@ PMS:
 
 PMS will often need to reconcile **two sources of truth**:
 
-1. **Order/fill–derived positions (PMS source)**  
-   - **Source for PMS:** Positions built from `orders` (and optionally `fills`): aggregate by `(account_id, book, symbol, side)`. **PMS does not read OMS Redis positions** (dummy).  
+1. **Order-derived positions (PMS source)**  
+   - **Source for PMS:** Positions built from **orders only** (filter status partially_filled, filled); aggregate by `(account_id, book, symbol, side)`. No fills table. **PMS does not read OMS Redis positions** (dummy). **entry_avg** = cost basis of open quantity only; unrealized PnL only when open_qty > 0.  
    - **Optional:** If a future Postgres positions table or other store exists, reconcile order-derived vs that store; log and optionally alert on drift.
 
 2. **Balance_changes vs balances (and orders)**  
@@ -100,7 +100,7 @@ Document which of these reconciliations you implement, where (e.g. PMS job, scri
 |-------|----------|
 | **Order symbol vs balance asset** | Orders use **pair** (e.g. BTCUSDT); balances use **asset** (e.g. BTC, USDT). Derive base/quote from symbol before joining or comparing. |
 | **Symbol properties** | Reference table (symbol → base_asset, quote_asset, etc.); PMS reads. |
-| **Building positions** | PMS derives positions from orders/fills (by account, **book**, symbol, side). Writes granular store; grouping on request. Does not read OMS Redis positions (dummy). |
+| **Building positions** | PMS derives positions from **orders only** (filter partial/fully filled; no fills table), by account, **book**, symbol, side. entry_avg = cost basis of open qty; unrealized only when open_qty > 0. Writes granular store; grouping on request. Does not read OMS Redis positions (dummy). |
 | **Cash vs positions** | Keep separate: positions = trading pairs; cash = balances table (OMS). |
 | **Capital by book** | asset_value(book) + cash(book); allocations provided via interface, managed outside. |
 | **Reconciling two tables** | Plan to reconcile (1) order-derived vs any other position store, (2) balance_changes vs balances, and (3) symbol→base/quote when joining orders to balances. |
