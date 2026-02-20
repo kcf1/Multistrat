@@ -447,8 +447,8 @@ BINANCE_API_SECRET=
 **Core vs optional:** Implement **Core** tasks first for a minimal PMS; add **(Optional)** tasks when needed. See **docs/pms/PMS_ARCHITECTURE.md** §2.
 
 - [ ] **12.3.1** **(Core)** **PMS PnL/margin calculation**: realized PnL (from fills or orders), unrealized PnL (mark price), margin (futures). **Unit test:** given positions/balances/fills, verify calculations.
-- [ ] **12.3.1a** **(Core)** **Mark price provider**: define **interface** (e.g. get mark prices per symbol); **Phase 2:** implement by wrapping Binance (REST/WS). **(Optional)** Phase 4: add implementation reading from Redis/DB (Market Data). Switch via `PMS_MARK_PRICE_SOURCE`. See **docs/pms/PMS_ARCHITECTURE.md** §11.
-- [ ] **12.3.1b** **(Optional)** **Pydantic in PMS**: Use Pydantic (same as OMS) for config, mark price, internal shapes, snapshot writes. See **docs/pms/PMS_ARCHITECTURE.md** §12.
+- [x] **12.3.1a** **(Core)** **Mark price provider**: define **interface** (e.g. get mark prices per symbol); **Phase 2:** implement by wrapping Binance (REST/WS). **(Optional)** Phase 4: add implementation reading from Redis/DB (Market Data). Switch via `PMS_MARK_PRICE_SOURCE`. See **docs/pms/PMS_ARCHITECTURE.md** §11.
+- [x] **12.3.1b** **(Optional)** **Pydantic in PMS**: Use Pydantic (same as OMS) for config, mark price, internal shapes, snapshot writes. See **docs/pms/PMS_ARCHITECTURE.md** §12.
 - [ ] **12.3.2** **(Core)** **PMS Postgres schema** (reads): orders, balances, accounts. **(Optional):** fills, **symbols** (reference), **book_allocations** or equivalent. Grain includes **book**. Document in **docs/pms/PMS_ARCHITECTURE.md** §8.
 - [ ] **12.3.3** **(Core)** **PMS Postgres reads**: query orders, balances; **derive positions** at grain (account_id, book, symbol, side). **(Optional):** fills, symbols, allocations. **Unit test:** verify queries and position derivation.
 - [ ] **12.3.4** **(Core)** **PMS granular store** (writes): **pms_positions** (or equivalent) at grain (account_id, book, symbol, side); update after each calculation. Grouping on request. Document in **docs/pms/PMS_ARCHITECTURE.md** §6.
