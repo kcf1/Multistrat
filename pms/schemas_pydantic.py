@@ -73,8 +73,41 @@ class BinanceTickerPriceItem(BaseModel):
         return str(v).strip() or "0"
 
 
-# --- Placeholders for future PMS modules (12.3.4+); document shape here ---
-# DerivedPosition: account_id, book, symbol, side, open_qty, entry_avg, ...
-# PnlSnapshot: account_id, book?, realized_pnl, unrealized_pnl, mark_price_used, timestamp
-# MarginSnapshot: account_id, total_margin, available_balance, timestamp
-# Redis pnl:{account_id} / margin:{account_id} can validate with these before write.
+# --- Order row (from Postgres) and derived position (12.3.3–12.3.4) ---
+# Quantity from orders uses executed_quantity (source: DB column executed_qty).
+
+
+class OrderRow(BaseModel):
+    """One order row from Postgres for position derivation. Uses executed_quantity (from orders.executed_qty)."""
+
+    account_id: str = Field(..., description="Broker account id (matches orders.account_id)")
+    book: str = Field("", description="Strategy/book identifier")
+    symbol: str = Field(..., description="Trading symbol")
+    side: str = Field(..., description="BUY or SELL")
+    executed_quantity: float = Field(0.0, ge=0, description="Filled quantity (from orders.executed_qty)")
+    price: Optional[float] = Field(None, ge=0, description="Executed (average fill) price")
+    created_at: Optional[str] = Field(None, description="Order creation timestamp")
+
+    @field_validator("executed_quantity", mode="before")
+    @classmethod
+    def coerce_executed_quantity(cls, v):
+        if v is None:
+            return 0.0
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+
+class DerivedPosition(BaseModel):
+    """One derived position at grain (account_id, book, symbol). Written to positions table."""
+
+    account_id: str = Field(..., description="Broker account id")
+    book: str = Field("", description="Book identifier")
+    symbol: str = Field(..., description="Trading symbol")
+    open_qty: float = Field(0.0, description="Signed net quantity: positive = long, negative = short")
+    position_side: str = Field("flat", description="'long' | 'short' | 'flat'")
+    entry_avg: Optional[float] = Field(None, ge=0, description="Cost basis of open quantity only (FIFO)")
+    mark_price: Optional[float] = Field(None, ge=0, description="Mark price used to compute unrealized_pnl")
+    notional: Optional[float] = Field(None, description="Position notional value (e.g. open_qty * mark_price)")
+    unrealized_pnl: float = Field(0.0, description="Unrealized PnL (when open_qty != 0)")

@@ -7,7 +7,7 @@ This document details how **PMS** uses the **orders** table to compute and recon
 ## 1. Role Summary
 
 - **Read:** **Postgres only** — orders, balances. **No fills table;** orders are the primary data source. **PMS does not read OMS Redis positions** (that is dummy).
-- **Compute:** Realized PnL (from executed order rows), unrealized PnL (mark price × open qty only when open_qty > 0; flattened positions have no unrealized), margin (futures).
+- **Compute:** Realized PnL (from executed order rows), unrealized PnL (mark price × signed open_qty when open_qty ≠ 0; flattened positions have no unrealized), margin (futures).
 - **Positions:** **Derived from the orders table only** (filter by status: **partially_filled**, **filled**). No read from OMS Redis.
 - **Write:** PnL/margin snapshots to Postgres and/or Redis for Admin/UI.
 
@@ -21,28 +21,30 @@ PMS does **not** write to `orders`. PMS does **not** use or write a fills table.
 
 - **orders** is the audit trail: every executed order is synced by OMS with `executed_qty`, `price`, `status`, etc.
 - **positions** is maintained by Booking from `oms_fills`. If a fill is missed, applied twice, or Booking has a bug, positions can drift from what orders imply.
-- **Recomputing** net position from orders gives a **canonical** view: for each (account_id, **book**, symbol, side), sum of `executed_qty` over filled orders. Including **book** supports capital-by-book and grouping by book/symbol. See **docs/pms/PMS_ARCHITECTURE.md** §6–7 (granular store, reference data / capital by book).
+- **Recomputing** net position from orders gives a **canonical** view: for each (account_id, **book**, symbol), **signed net** = sum(executed_qty for BUY) − sum(executed_qty for SELL). Including **book** supports capital-by-book and grouping by book/symbol. See **docs/pms/PMS_ARCHITECTURE.md** §6–7 (granular store, reference data / capital by book).
 
-### 2.2 Derived Position from Orders
+### 2.2 Derived Position from Orders (signed approach)
 
-**Formula (conceptual):**
+**Formula:** One position per (account_id, book, symbol) with **signed** quantity. Closing orders offset opens; flattened position has open_qty = 0.
 
-- For **spot:** One position per (account_id, symbol): net quantity = sum of (executed_qty for BUY) − sum of (executed_qty for SELL). Often stored as long-only quantity with sign or as two “sides.”
-- For **futures:** One row per (account_id, symbol, side) with quantity; net = long_qty − short_qty per symbol.
+- **open_qty** (signed): positive = net long, negative = net short, zero = flat.
+- **position_side**: 'long' | 'short' | 'flat' — derived from sign of open_qty (shows net long/short for display and queries).
 
-**SQL (expected net from orders):** Filter orders by **partially_filled** and **filled** only:
+**SQL (expected net from orders):** Filter by **partially_filled** and **filled**; net BUY − SELL per (account_id, book, symbol):
 
 ```sql
-SELECT account_id, book, symbol, side,
-       SUM(COALESCE(executed_qty, 0)) AS expected_qty
+SELECT account_id, book, symbol,
+       SUM(CASE WHEN side = 'BUY' THEN COALESCE(executed_qty, 0) ELSE -COALESCE(executed_qty, 0) END) AS open_qty
 FROM orders
 WHERE status IN ('partially_filled', 'filled')
-GROUP BY account_id, book, symbol, side;
+GROUP BY account_id, book, symbol;
 ```
 
-**Entry average (entry_avg):** Must be the **cost basis of the open quantity only**, not an average over all orders. For unrealized PnL we value only **open** exposure: (mark_price − entry_avg) × open_qty. For **flattened** positions (open_qty = 0) there is no unrealized — PnL is already realized. Derive entry_avg from **orders only** (no fills table): e.g. volume-weighted average of order `price` by `executed_qty` for the portion of orders that is still “open” (use FIFO or similar cost-basis so closed chunks are excluded). Do **not** average over all filled orders (that would mix in closed exposure).
+Then derive **position_side**: 'long' when open_qty > 0, 'short' when open_qty < 0, 'flat' when open_qty = 0.
 
-PMS can implement **expected_positions_from_orders(pg_connect)** that returns (account_id, book, symbol, side, expected_qty, expected_entry_avg). Grain (account_id, book, symbol, side) supports capital-by-book and on-request grouping.
+**Entry average (entry_avg):** Cost basis of the **open** (net) quantity only — use FIFO over orders so closed chunks are excluded. For unrealized PnL: (mark_price − entry_avg) × open_qty (signed); **only when open_qty ≠ 0**. Flattened positions have no unrealized (PnL already realized).
+
+PMS can implement **expected_positions_from_orders(pg_connect)** that returns (account_id, book, symbol, open_qty, position_side, entry_avg). Grain (account_id, book, symbol) with signed open_qty and position_side supports capital-by-book and on-request grouping.
 
 ### 2.3 Reconcile (optional)
 
@@ -55,9 +57,9 @@ PMS can implement **expected_positions_from_orders(pg_connect)** that returns (a
 
 | Step | Source | Action |
 |------|--------|--------|
-| Position view | **Orders table** (derived) | Filter status partially_filled/filled; derive by account, book, symbol, side. No fills table. PMS does not read OMS Redis positions. |
+| Position view | **Orders table** (derived) | Filter status partially_filled/filled; **signed net** per (account, book, symbol); position_side = long/short/flat. No fills table. PMS does not read OMS Redis positions. |
 | Realized PnL | **Orders** (executed rows) | From order-level executed_qty and price (the part that has been closed/flattened). |
-| Unrealized PnL | order-derived **open** positions + mark price | (mark - entry_avg) × **open_qty** only when open_qty > 0; flattened positions: no unrealized (PnL already realized). |
+| Unrealized PnL | order-derived **open** positions + mark price | (mark - entry_avg) × **open_qty** (signed) when open_qty ≠ 0; flattened positions: no unrealized (PnL already realized). |
 | Margin | order-derived positions + balances / broker | Balances from Postgres; positions from orders. |
 | Rebuild | orders table | Periodic: expected_positions_from_orders (filter partial/fully filled); optional compare/flag if another store exists. |
 
@@ -89,7 +91,7 @@ Config-driven: `PMS_MARK_PRICE_SOURCE` selects which implementation to inject. I
 
 | Task | Description | Orders usage |
 |------|-------------|--------------|
-| 12.3.1 | PnL/margin calculation | Realized from orders (executed rows); unrealized from mark × open qty only; margin from positions/balances. |
+| 12.3.1 | PnL/margin calculation | Realized from orders (executed rows); unrealized from mark × signed open qty when open_qty ≠ 0; margin from positions/balances. |
 | 12.3.2 | Postgres reads | orders (primary), balances, accounts; no fills table. |
 | 12.3.3 | Postgres read queries | Standard queries + **expected_positions_from_orders**. |
 | 12.3.4–12.3.5 | Redis | PMS does not read OMS Redis positions/balances (dummy). PMS writes PnL/margin keys only. |

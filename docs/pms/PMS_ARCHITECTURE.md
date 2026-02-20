@@ -42,9 +42,9 @@ Single reference for the **Portfolio Management System (PMS)**: data flow, Redis
 
 | # | Feature | Description |
 |---|--------|-------------|
-| 1 | **Derive positions from orders** | Read **orders only** from Postgres (no fills table); filter by status **partially_filled**, **filled**. Aggregate by **(account_id, book, symbol, side)**. Output: **open_qty**, **entry_avg** (cost basis of the **open** quantity only — not an average over all orders; use FIFO/cost-basis so flattened chunks are excluded). No OMS Redis. |
-| 2 | **Compute PnL** | **Realized** from executed order rows (the part that has been closed/flattened). **Unrealized** = (mark_price − entry_avg) × **open_qty** **only when open_qty > 0**; for **flattened** positions (open_qty = 0) there is no unrealized — PnL is already realized. One mark price source (e.g. Binance) is enough for core. |
-| 3 | **One granular position store** | One table (e.g. **pms_positions**): one row per (account_id, book, symbol, side) with open_qty, entry_avg, realized_pnl, unrealized_pnl. Updated each run. |
+| 1 | **Derive positions from orders** | Read **orders only** from Postgres (no fills table); filter by status **partially_filled**, **filled**. **Signed approach:** net quantity per (account_id, book, symbol) = sum(executed_qty for BUY) − sum(executed_qty for SELL). Output: **open_qty** (signed: positive = long, negative = short), **position_side** ('long' | 'short' | 'flat'), **entry_avg** (cost basis of the **open** quantity only — FIFO/cost-basis so flattened chunks are excluded). No OMS Redis. |
+| 2 | **Compute PnL** | **Realized** from executed order rows (the part that has been closed/flattened). **Unrealized** = (mark_price − entry_avg) × **open_qty** (signed); **only when open_qty ≠ 0** (flattened positions have no unrealized — PnL already realized). One mark price source (e.g. Binance) is enough for core. |
+| 3 | **One granular position store** | One table (**positions**): one row per (account_id, book, symbol) with **open_qty** (signed), **position_side** ('long' | 'short' | 'flat'), entry_avg, mark_price, notional, unrealized_pnl. Updated each run. |
 | 4 | **Write PnL/margin for consumers** | After each run: update granular table; write Redis (e.g. `pnl:{account_id}`, `margin:{account_id}`) for Admin/UI. |
 | 5 | **Timer loop** | Periodically: read orders (and balances if needed for margin) → derive positions → get mark prices → compute PnL/margin → write table + Redis. |
 
@@ -72,7 +72,7 @@ From **docs/PHASE2_DETAILED_PLAN.md** §8 (see **§2 Core vs optional** above fo
 
 **Using the orders table for positions:**
 
-- **Source for positions:** PMS **derives** positions from the **orders** table only (filter orders by status: **partially_filled**, **filled**; no fills table). Net executed quantity per (account_id, book, symbol, side); **entry_avg** = cost basis of the **open** quantity (not all orders — flattened exposure is already realized). PMS does **not** read positions from OMS Redis (dummy).
+- **Source for positions:** PMS **derives** positions from the **orders** table only (filter orders by status: **partially_filled**, **filled**; no fills table). **Signed** net quantity per (account_id, book, symbol): open_qty = sum(BUY executed_qty) − sum(SELL executed_qty); **position_side** = 'long' | 'short' | 'flat' from sign of open_qty; **entry_avg** = cost basis of the **open** quantity (FIFO; flattened exposure excluded). PMS does **not** read positions from OMS Redis (dummy).
 - **Reconciliation / audit:** Order-derived positions are the canonical view; optional reconciliation can compare with other sources (e.g. a future Postgres positions table) or balance_changes.
 - **Consistency:** Orders table is the audit trail (OMS sync); positions derived from orders are the source of truth for PMS. **PMS is the source of truth for PnL and margin.**
 
@@ -112,7 +112,7 @@ Document exact value format in PMS code for PnL/margin keys.
 
 **One granular store, grouping on request:**
 
-- PMS maintains **one granular store** at a fixed grain: e.g. **(account_id, book, symbol, side)**. One row per (account, book, symbol, side) with open_qty, entry_avg, realized_pnl, unrealized_pnl, etc. This is **derived from orders** (which have `book`) and updated by PMS after each calculation cycle (or incrementally on fill).
+- PMS maintains **one granular store** at a fixed grain: **(account_id, book, symbol)**. One row per (account, book, symbol) with **open_qty** (signed: positive = long, negative = short), **position_side** ('long' | 'short' | 'flat' — net long/short indicator), entry_avg, realized_pnl, unrealized_pnl, etc. This is **derived from orders** (which have `book`) and updated by PMS after each calculation cycle (or incrementally on fill).
 - **Different views** (by symbol, by book/symbol, by broker/symbol) are **computed on request** — either by SQL `GROUP BY` on the granular table(s), or by the PMS/API reading the granular table and returning grouped results. No need to pre-materialize each view unless one is very hot.
 - **PMS writes tables only** (no SQL VIEWs as the primary output). Full valuation needs mark price (external), so PMS must compute and write. Optional: define DB VIEWs **on top of** PMS-written tables for simple groupings (e.g. `valuation_by_symbol`).
 
@@ -120,8 +120,8 @@ Document exact value format in PMS code for PnL/margin keys.
 
 | | Orders table (OMS) | Granular store (PMS) |
 |--|--------------------|----------------------|
-| **Grain** | One row per order | One row per (account_id, book, symbol, side) |
-| **Content** | Order fields (qty, price, status, book, broker, …) | Aggregated state (open_qty, entry_avg, realized_pnl, unrealized_pnl) |
+| **Grain** | One row per order | One row per (account_id, book, symbol) |
+| **Content** | Order fields (qty, price, status, book, broker, …) | Aggregated state (open_qty signed, position_side, entry_avg, realized_pnl, unrealized_pnl) |
 | **Purpose** | Audit trail, source of truth for “what happened” | Current state for fast reads and on-demand grouping |
 
 Orders = ledger; granular store = materialized position/snapshot written by PMS after calculations.
@@ -136,7 +136,7 @@ Orders = ledger; granular store = materialized position/snapshot written by PMS 
 
 **Cash vs positions (keep separate):**
 
-- **Positions** = open exposure in a **trading pair** (symbol). Stored in PMS granular table; grain (account_id, book, symbol, side). Do **not** put cash (asset balances) into the positions table.
+- **Positions** = open exposure in a **trading pair** (symbol). Stored in PMS granular table; grain (account_id, book, symbol) with **open_qty** signed and **position_side** ('long' | 'short' | 'flat'). Do **not** put cash (asset balances) into the positions table.
 - **Cash** = holdings per **asset** (e.g. USDT, BTC). Stays in OMS **balances** table. PMS reads it for margin and for capital-by-book. A combined “holdings” view (positions + cash) can be derived in a VIEW or API, not by mixing concepts in one table.
 
 **Capital by book:**
@@ -153,14 +153,14 @@ Orders = ledger; granular store = materialized position/snapshot written by PMS 
 **PMS reads** (no schema ownership; from OMS or reference):
 
 - **accounts** — id, name, broker, config (for account list and config). **Core.**
-- **orders** — **Primary data source** for positions (no fills table). Filter by status **partially_filled**, **filled**; aggregate executed_qty by account_id, **book**, symbol, side. **entry_avg** = cost basis of **open** quantity only. PMS does not read OMS Redis positions. **Core.**
+- **orders** — **Primary data source** for positions (no fills table). Filter by status **partially_filled**, **filled**; compute **signed net** per (account_id, book, symbol): open_qty = sum(BUY executed_qty) − sum(SELL executed_qty); **position_side** = 'long' | 'short' | 'flat'; **entry_avg** = cost basis of **open** quantity only (FIFO). PMS does not read OMS Redis positions. **Core.**
 - **balances** — Current balances per account/asset (synced by OMS). **Cash** stays here; not in positions table. **Core** (for margin).
 - **symbols** (reference) — **(Optional)** symbol, base_asset, quote_asset, tick_size, lot_size, etc. PMS reads for base/quote and validation.
 - **book_allocations** (or equivalent) — **(Optional)** (account_id, book, asset, amount_or_share). Provided via interface; managed outside; PMS reads only.
 
 **PMS writes:**
 
-- **pms_positions** (or equivalent) — account_id, book, symbol, side, open_qty, entry_avg, realized_pnl, unrealized_pnl, updated_at. Grain = (account_id, book, symbol, side). Updated after each calculation cycle. **Core.**
+- **positions** — PMS granular store table (PMS-owned; not the old OMS positions table). account_id, book, symbol, **open_qty** (signed), **position_side** ('long' | 'short' | 'flat'), entry_avg, mark_price, notional, unrealized_pnl, updated_at. Grain = (account_id, book, symbol). Updated after each calculation cycle. **Core.**
 - **Redis** `pnl:{account_id}`, `margin:{account_id}` — **Core.**
 - **pnl_snapshots** — **(Optional)** account_id, book (optional), realized_pnl, unrealized_pnl, mark_price_used, timestamp.
 - **margin_snapshots** — **(Optional)** account_id, total_margin, available_balance, timestamp.
@@ -175,9 +175,9 @@ Orders = ledger; granular store = materialized position/snapshot written by PMS 
 1. **Bootstrap:** Redis client, Postgres connection (or callable), config (interval, which accounts).
 2. **Loop (each iteration or timer):**
    - **Read:** Balances from Postgres; **derive positions** from **orders** table only (filter partial/fully filled; no fills table).
-   - **Calculate:** Realized PnL (from executed order rows), unrealized PnL (mark × open_qty only when open_qty > 0), margin.
+   - **Calculate:** Realized PnL (from executed order rows), unrealized PnL (mark × open_qty when open_qty ≠ 0; signed open_qty), margin.
    - **Optional:** Periodic rebuild from orders; compare to other sources or run **repairs** if drift (flag or correct).
-   - **Write (core):** Update granular position table (`pms_positions`); update Redis (`pnl:{account_id}`, `margin:{account_id}`). **Optional:** Postgres `pnl_snapshots` / `margin_snapshots`.
+   - **Write (core):** Update granular position table (`positions`: signed open_qty, position_side); update Redis (`pnl:{account_id}`, `margin:{account_id}`). **Optional:** Postgres `pnl_snapshots` / `margin_snapshots`.
 3. **Optional:** Periodic repairs — rebuild-from-orders, diff, fix/flag (see **docs/pms/PMS_DATA_FLOWS.md**).
 
 Blocking vs polling: PMS is **timer-driven** (no Redis stream consumer in minimal design). For event-driven behavior later, could subscribe to Redis keyspace or a small “tick” stream on fill.
@@ -235,7 +235,7 @@ PMS can depend on the same `pydantic>=2.0.0` as OMS (root or shared requirements
 | Entry & loop | `pms/main.py` |
 | Read positions/balances | `pms/read_store.py` or `storage/` |
 | Rebuild from orders | `pms/rebuild_from_orders.py` |
-| Granular position store | `pms_positions` table (grain: account_id, book, symbol, side) |
+| Granular position store | `positions` table (grain: account_id, book, symbol; open_qty signed, position_side) |
 | PnL / margin calculation | `pms/calculations.py` |
 | Repairs (position drift) | `pms/repair.py` |
 | Redis cache read/write | `pms/cache.py` (PMS writes PnL/margin keys only; does not read OMS Redis) |

@@ -30,7 +30,7 @@ So **order symbol and balance asset are not the same**: one is a pair, the other
 
 2. **Building positions from orders**  
    Positions are often expressed per **symbol** (pair) and **side** (e.g. BTCUSDT, long 0.5). Balance movements are per **asset** (e.g. BTC +0.5, USDT −25k). To reconcile:
-   - From **orders only** (no fills table): filter by status **partially_filled**, **filled**; aggregate by `(account_id, book, symbol, side)` to get **open_qty** and **entry_avg** (cost basis of open quantity only; do not average over all orders — flattened exposure is already realized). **Unrealized PnL** = (mark − entry_avg) × open_qty only when open_qty > 0.
+   - From **orders only** (no fills table): filter by status **partially_filled**, **filled**; compute **signed net** per (account_id, book, symbol): **open_qty** = sum(BUY executed_qty) − sum(SELL executed_qty); **position_side** = 'long' | 'short' | 'flat'; **entry_avg** = cost basis of open quantity only (FIFO). **Unrealized PnL** = (mark − entry_avg) × open_qty when open_qty ≠ 0.
    - From **balances**: you see asset-level deltas (e.g. BTC, USDT). To compare with derived positions, map symbol → base/quote and check base-asset balance change vs executed quantity (and quote vs quote spent).
 
 3. **Possible approaches**  
@@ -48,9 +48,9 @@ OMS does **not** expose a Postgres **positions** table in Phase 2. OMS may hold 
 
 PMS:
 
-- **Derives positions from orders only** — Filter by status **partially_filled**, **filled**; aggregate by `(account_id, book, symbol, side)` to get **open_qty** and **entry_avg** (cost basis of the **open** quantity only; use FIFO/cost-basis so closed/flattened chunks are excluded). That **order-derived** view is the position source for PMS; grain includes **book** for capital-by-book and grouping.
+- **Derives positions from orders only** — Filter by status **partially_filled**, **filled**; compute **signed net** per (account_id, book, symbol): **open_qty** (signed), **position_side** ('long' | 'short' | 'flat'), **entry_avg** (cost basis of the **open** quantity only; FIFO so closed/flattened chunks excluded). That **order-derived** view is the position source for PMS; grain (account_id, book, symbol) includes **book** for capital-by-book and grouping.
 - **Optional reconciliation** — If another source of positions exists (e.g. future Postgres positions table), compare with order-derived for drift. PMS does not read OMS Redis.
-- **Use in PnL** — Realized PnL from executed order rows (the part that has been closed); unrealized PnL = (mark − entry_avg) × open_qty **only when open_qty > 0** (flattened positions have no unrealized — PnL already realized). Margin uses order-derived positions and mark price when available.
+- **Use in PnL** — Realized PnL from executed order rows (the part that has been closed); unrealized PnL = (mark − entry_avg) × open_qty when open_qty ≠ 0 (signed open_qty; flattened positions have no unrealized — PnL already realized). Margin uses order-derived positions and mark price when available.
 
 ---
 
@@ -59,7 +59,7 @@ PMS:
 PMS will often need to reconcile **two sources of truth**:
 
 1. **Order-derived positions (PMS source)**  
-   - **Source for PMS:** Positions built from **orders only** (filter status partially_filled, filled); aggregate by `(account_id, book, symbol, side)`. No fills table. **PMS does not read OMS Redis positions** (dummy). **entry_avg** = cost basis of open quantity only; unrealized PnL only when open_qty > 0.  
+   - **Source for PMS:** Positions built from **orders only** (filter status partially_filled, filled); compute signed net per (account_id, book, symbol) with open_qty, position_side, entry_avg. No fills table. **PMS does not read OMS Redis positions** (dummy). **entry_avg** = cost basis of open quantity only; unrealized PnL only when open_qty > 0.  
    - **Optional:** If a future Postgres positions table or other store exists, reconcile order-derived vs that store; log and optionally alert on drift.
 
 2. **Balance_changes vs balances (and orders)**  
@@ -82,7 +82,7 @@ Document which of these reconciliations you implement, where (e.g. PMS job, scri
 
 ## Cash vs positions (keep separate)
 
-- **Positions** = open exposure in a **trading pair** (symbol). Grain (account_id, book, symbol, side). Do **not** put cash into the positions table.
+- **Positions** = open exposure in a **trading pair** (symbol). Grain (account_id, book, symbol) with **open_qty** (signed) and **position_side** ('long' | 'short' | 'flat'). Do **not** put cash into the positions table.
 - **Cash** = holdings per **asset** (USDT, BTC, …). Stays in OMS **balances** table. PMS reads it; a combined “holdings” view (positions + cash) can be derived in a VIEW or API.
 
 ---
@@ -100,7 +100,7 @@ Document which of these reconciliations you implement, where (e.g. PMS job, scri
 |-------|----------|
 | **Order symbol vs balance asset** | Orders use **pair** (e.g. BTCUSDT); balances use **asset** (e.g. BTC, USDT). Derive base/quote from symbol before joining or comparing. |
 | **Symbol properties** | Reference table (symbol → base_asset, quote_asset, etc.); PMS reads. |
-| **Building positions** | PMS derives positions from **orders only** (filter partial/fully filled; no fills table), by account, **book**, symbol, side. entry_avg = cost basis of open qty; unrealized only when open_qty > 0. Writes granular store; grouping on request. Does not read OMS Redis positions (dummy). |
+| **Building positions** | PMS derives positions from **orders only** (filter partial/fully filled; no fills table), by account, **book**, symbol (signed open_qty, position_side). entry_avg = cost basis of open qty; unrealized when open_qty ≠ 0. Writes granular store; grouping on request. Does not read OMS Redis positions (dummy). |
 | **Cash vs positions** | Keep separate: positions = trading pairs; cash = balances table (OMS). |
 | **Capital by book** | asset_value(book) + cash(book); allocations provided via interface, managed outside. |
 | **Reconciling two tables** | Plan to reconcile (1) order-derived vs any other position store, (2) balance_changes vs balances, and (3) symbol→base/quote when joining orders to balances. |

@@ -19,7 +19,7 @@ PMS applies the same ideas: **primary view** from one store (positions table), *
 
 ## 2. PMS: Primary Data Source for Positions
 
-- **Source for “current positions”:** PMS **derives** positions from the **orders** table only (no fills table). Filter by status **partially_filled**, **filled**; at grain (account_id, **book**, symbol, side) sum `executed_qty` → open_qty; **entry_avg** = cost basis of open quantity only. **PMS does not read OMS Redis positions** (that path is dummy). Book in grain supports capital-by-book and grouping.
+- **Source for “current positions”:** PMS **derives** positions from the **orders** table only (no fills table). Filter by status **partially_filled**, **filled**; at grain (account_id, **book**, symbol) compute **signed net**: open_qty = sum(BUY executed_qty) − sum(SELL executed_qty); **position_side** = 'long' | 'short' | 'flat'; **entry_avg** = cost basis of open quantity only (FIFO). **PMS does not read OMS Redis positions** (that path is dummy). Book in grain supports capital-by-book and grouping.
 - **Balances:** Read from Postgres (OMS account sync). PMS does not read OMS Redis for positions or balances.
 
 So:
@@ -32,14 +32,14 @@ So:
 
 ## 3. Periodic Rebuild (From Orders)
 
-**What:** Periodically recompute per-account, per-symbol (and per-side for futures) **net position** from the **orders** table. This is the canonical position view for PMS (no comparison to OMS Redis — PMS does not read OMS Redis positions).
+**What:** Periodically recompute per-account, per-symbol **signed net position** from the **orders** table (open_qty = sum(BUY) − sum(SELL); position_side = long/short/flat). This is the canonical position view for PMS (no comparison to OMS Redis — PMS does not read OMS Redis positions).
 
 **Why:** Detects drift (e.g. missed fill, duplicate apply, or Booking bug). Keeps positions consistent with the audit trail (orders).
 
 **How:**
 
-1. **Query orders:** Filter by status **partially_filled**, **filled**: e.g. `SELECT account_id, book, symbol, side, SUM(executed_qty) AS net_qty FROM orders WHERE status IN ('partially_filled', 'filled') GROUP BY account_id, book, symbol, side`.
-2. **Map to “expected” positions:** Convert to the same shape as the granular store (account_id, book, symbol, side, open_qty, entry_avg). **entry_avg** = cost basis of the **open** quantity only (from orders; no fills table).
+1. **Query orders:** Filter by status **partially_filled**, **filled**: compute signed net per (account_id, book, symbol): open_qty = sum(BUY executed_qty) − sum(SELL executed_qty); derive position_side ('long' | 'short' | 'flat').
+2. **Map to “expected” positions:** Convert to the same shape as the granular store (account_id, book, symbol, open_qty, position_side, entry_avg). **entry_avg** = cost basis of the **open** (net) quantity only (FIFO from orders; no fills table).
 3. **Use order-derived positions** as the current view (PMS does not read from OMS Redis).
 4. **Compare (optional):** If another source of positions exists (e.g. future Postgres positions table), compare expected quantity vs that source.
 5. **Repair or flag:** If drift: **flag** (write to a reconciliation table or log for manual review) or update the other source if PMS owns it.
@@ -78,7 +78,7 @@ So: **no session or event-driven PMS consumer is required** for Phase 2; timer-b
 
 **When:** Same interval as rebuild (e.g. after each rebuild-from-orders run), or on a separate, slower schedule.
 
-**Isolation:** One repair per (account, symbol, side) or one repair function per “kind” (e.g. `repair_positions_from_orders`), similar to OMS `repair_binance_*_from_payload`.
+**Isolation:** One repair per (account, book, symbol) or one repair function per “kind” (e.g. `repair_positions_from_orders`), similar to OMS `repair_binance_*_from_payload`.
 
 ---
 
@@ -98,18 +98,19 @@ So: **no session or event-driven PMS consumer is required** for Phase 2; timer-b
 **Query pattern for “expected” net position from orders:**
 
 - **Filter:** `status IN ('partially_filled', 'filled')` — orders only; no fills table.
-- Group by: `account_id`, `book`, `symbol`, `side`.
-- Aggregate: `SUM(executed_qty)` → open_qty. **entry_avg** = cost basis of the **open** quantity only (from orders; do not average over all orders). **Unrealized PnL** only when open_qty > 0.
+- **Signed net** per (account_id, book, symbol): open_qty = sum(BUY executed_qty) − sum(SELL executed_qty); **position_side** = 'long' | 'short' | 'flat' from sign of open_qty.
+- **entry_avg** = cost basis of the **open** (net) quantity only (FIFO; from orders; do not average over all orders). **Unrealized PnL** when open_qty ≠ 0 (signed open_qty).
 
 **Example (conceptual):**
 
 ```sql
--- Expected net position per account/book/symbol/side from orders (no fills table)
-SELECT account_id, book, symbol, side,
-       SUM(COALESCE(executed_qty, 0)) AS expected_qty
+-- Expected signed net position per account/book/symbol from orders (no fills table)
+SELECT account_id, book, symbol,
+       SUM(CASE WHEN side = 'BUY' THEN COALESCE(executed_qty, 0) ELSE -COALESCE(executed_qty, 0) END) AS open_qty
 FROM orders
 WHERE status IN ('partially_filled', 'filled')
-GROUP BY account_id, book, symbol, side;
+GROUP BY account_id, book, symbol;
+-- Then derive position_side: 'long' when open_qty > 0, 'short' when open_qty < 0, 'flat' when open_qty = 0.
 ```
 
 Order-derived positions are the canonical view for PMS. Optionally compare with another source (e.g. balance_changes) for reconciliation; difference → flag or repair that source.
