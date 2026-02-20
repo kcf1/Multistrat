@@ -27,8 +27,9 @@ Single reference for the Order Management System (OMS) codebase: data flow, Redi
            │                   │              │  orders:*         │              │  orders           │
            │  REST API:         │              │  account:*        │              │  accounts         │
            │  • place_order     │              │  balances:*       │              │  balances         │
-           │  • cancel_order    │              │  positions:*      │              │  positions        │
-           │  • get_account     │              │                   │              │                   │
+           │  • cancel_order    │              │  positions:*      │              │                   │
+           │  • get_account     │              │                   │              │  (no positions     │
+           │                    │              │                   │              │   table in P2)    │
            │                    │              └───────────────────┘              └───────────────────┘
            │  User data stream:  │
            │  • executionReport  │              ┌───────────────────┐
@@ -38,12 +39,12 @@ Single reference for the Order Management System (OMS) codebase: data flow, Redi
            └──────────┬──────────┘                        │
                       │                                   │
                       │ WebSocket                         ▼
-                      └───────────────────────────►  Booking (downstream)
+                      └───────────────────────────►  PMS / downstream consumers
 ```
 
 - **Inbound (orders):** `risk_approved` (orders to execute), `cancel_requested` (cancel by order_id or broker_order_id+symbol).
 - **Inbound (account):** Broker user data stream events (`outboundAccountPosition`, `balanceUpdate`) + periodic REST (`get_account`, `get_futures_account`).
-- **Outbound:** `oms_fills` (fill/reject/cancelled/expired events for Booking), Postgres `orders`, `accounts`, `balances`, `positions` (sync).
+- **Outbound:** `oms_fills` (fill/reject/cancelled/expired events for PMS and downstream), Postgres `orders`, `accounts`, `balances` (sync); **positions** in Redis only (no Postgres positions table in Phase 2). See **docs/pms/PMS_ARCHITECTURE.md**.
 - **Broker:** Binance REST (place/cancel, account snapshots) + user data stream (execution reports + account updates). Other brokers plug in via the same adapter interface.
 
 ---
@@ -54,7 +55,7 @@ Single reference for the Order Management System (OMS) codebase: data flow, Redi
 |---------------------|-------------|----------|-----------------------------|-------|
 | **risk_approved**   | Risk        | OMS      | `RISK_APPROVED_STREAM`      | Order to execute. Consumer group `oms`, XREADGROUP + XACK. Trimmed by `trim_oms_streams`. |
 | **cancel_requested**| Risk/Admin  | OMS      | `CANCEL_REQUESTED_STREAM`  | Cancel by order_id or (broker_order_id + symbol). Consumer group `oms`. **Not** trimmed by cleanup. |
-| **oms_fills**       | OMS         | Booking  | `OMS_FILLS_STREAM`          | Unified fill/reject/cancelled/expired. Trimmed by `trim_oms_streams`. |
+| **oms_fills**       | OMS         | PMS / downstream | `OMS_FILLS_STREAM`          | Unified fill/reject/cancelled/expired. Trimmed by `trim_oms_streams`. |
 
 - **Stream helpers:** `oms/streams.py` — `add_message`, `read_messages`, `read_messages_group`, `ack_message`, `ensure_consumer_group`, `get_pending_delivery_count`.
 - **Consumer groups:** Created at startup for `risk_approved` and `cancel_requested` (idempotent XGROUP CREATE MKSTREAM). Single consumer name (e.g. `oms-1`).

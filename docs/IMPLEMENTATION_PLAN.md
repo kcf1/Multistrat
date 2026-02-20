@@ -75,8 +75,10 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
   - For each fill: update positions (add/subtract), update balances, compute margin if applicable
   - Write to Postgres: positions, balances, margin snapshots, and raw fills for audit
   - Update Redis cache: e.g. `positions:{account}`, `balance:{account}`, `margin:{account}` for Risk and Position Keeper
-- [ ] **Position Keeper service**
-  - Single process, loop: read from Postgres (or Redis cache) at interval; aggregate PnL (realized + unrealized if you have mark price), margin
+- [ ] **PMS (Portfolio Management System)** — *Core vs optional: **docs/pms/PMS_ARCHITECTURE.md** §2; task list **docs/PHASE2_DETAILED_PLAN.md** §12.3*
+  - **Core:** Single process, loop: read orders + balances from Postgres → derive positions (signed open_qty, position_side per account/book/symbol) → one mark price provider (e.g. Binance) → compute PnL/margin → write **positions** table (open_qty signed, position_side) + Redis (`pnl:{account_id}`, `margin:{account_id}`)
+  - **Optional:** fills table, symbols table, book_allocations, pnl_snapshots, margin_snapshots, book_cash, Pydantic, repairs, second mark price source (Phase 4 Redis/DB)
+  - **Mark price:** Interface first; Phase 2 wrap Binance; Phase 4 read from Redis/DB (Market Data). Config: `PMS_MARK_PRICE_SOURCE`
   - Expose via simple API (optional) or just write to Postgres/Redis for Admin/UI later
 - [ ] **Risk service (minimal for Phase 2)**
   - Consume `strategy_orders`, pass through to `risk_approved` (no hard checks yet), or inject test orders so OMS/Booking can be tested without strategies
@@ -233,7 +235,7 @@ multistrat/
 ├── migrations/          # Postgres migrations
 ├── oms/                  # OMS service (Redis staging + Postgres sync, Binance adapter)
 ├── booking/              # Booking service
-├── position_keeper/      # Position Keeper service
+├── pms/                  # PMS (Portfolio Management System) — source of truth for PnL/margin
 ├── risk/                 # Risk service (minimal in P2, full in P5)
 ├── admin/                # Admin service + CLI or GUI (Phase 3)
 ├── market_data/          # Market data service (Phase 4)

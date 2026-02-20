@@ -1,6 +1,6 @@
 # Phase 2: Detailed Plan — OMS, Account Management, Position (Binance first)
 
-**Goal:** End-to-end order flow: approved orders → **generic OMS** (routes to broker adapters) → first broker **Binance** → fills → Postgres orders; OMS also manages account state (balances, positions) from broker streams → Postgres accounts/balances/positions; Position Keeper for PnL/margin. The OMS is broker-agnostic and handles all broker state (orders + accounts); Binance is the first broker adapter. Minimal Risk pass-through for testing.
+**Goal:** End-to-end order flow: approved orders → **generic OMS** (routes to broker adapters) → first broker **Binance** → fills → Postgres orders; OMS also manages account state (balances, positions) from broker streams → Postgres accounts/balances, positions in Redis; **PMS** as source of truth for PnL/margin. The OMS is broker-agnostic and handles all broker state (orders + accounts); Binance is the first broker adapter. Minimal Risk pass-through for testing.
 
 ---
 
@@ -12,9 +12,9 @@
 | **Broker adapters** | Pluggable implementations (e.g. Binance first; others later). Each adapter: place order, subscribe to fills/rejects, report back to OMS in a unified format. |
 | **First broker** | Binance (testnet first; spot or futures — decide one for Phase 2). |
 | **Order path** | Redis `risk_approved` → OMS (router) → broker adapter (Binance) → broker API → fills back to OMS → Redis `oms_fills` stream (for downstream consumers); OMS syncs orders to Postgres `orders` table. |
-| **Account path** | Broker user data stream (`outboundAccountPosition`, `balanceUpdate`) → OMS account listener → Redis account store → sync to Postgres (`accounts`, `balances`, `positions`). Periodic REST refresh for reconciliation. |
-| **OMS persistence** | **Redis** (staging: order hashes, account hashes, status indexes, broker_order_id lookup); **sync to Postgres** `orders` table (trigger on terminal status + periodic) via `oms/sync.py`; **sync to Postgres** `accounts`, `balances`, `positions` (periodic) via `oms/account_sync.py`; optional repairs via `oms/repair.py` and `oms/account_repair.py`. |
-| **Position Keeper** | Reads Postgres/Redis; aggregates PnL and margin |
+| **Account path** | Broker user data stream (`outboundAccountPosition`, `balanceUpdate`) → OMS account listener → Redis account store → sync to Postgres (`accounts`, `balances`); positions in Redis only. Periodic REST refresh for reconciliation. |
+| **OMS persistence** | **Redis** (staging: order hashes, account hashes, status indexes, broker_order_id lookup); **sync to Postgres** `orders` table (trigger on terminal status + periodic) via `oms/sync.py`; **sync to Postgres** `accounts`, `balances` (periodic) via `oms/account_sync.py`; positions in Redis only; optional repairs via `oms/repair.py` and `oms/account_repair.py`. |
+| **PMS** | Reads Postgres/Redis; **source of truth** for PnL and margin |
 | **Risk (Phase 2)** | Minimal: consume `strategy_orders`, pass through to `risk_approved` (or use test inject for E2E) |
 
 ---
@@ -23,14 +23,14 @@
 
 - **Phase 1 complete:** Postgres, Redis, Alembic, Docker network `multistrat`, `.env` with `DATABASE_URL` and `REDIS_URL`.
 - **Binance:** API key and secret; decide **spot** or **futures** (e.g. futures for margin/leverage). Use **testnet** for development.
-- **Language/runtime:** Choose one for OMS, Position Keeper, Risk (e.g. Python for consistency with Alembic; or Go/Node per service). Account management is integrated into OMS.
+- **Language/runtime:** Choose one for OMS, PMS, Risk (e.g. Python for consistency with Alembic; or Go/Node per service). Account management is integrated into OMS.
 - **Testing approach:** Build **bottom-up** with unit tests at each layer (mock dependencies) before integration. See §12 Task checklist and §16 Testing for the order and test strategy.
 
 ---
 
-## 3. Postgres schema (OMS / Position Keeper)
+## 3. Postgres schema (OMS / PMS)
 
-**Note:** Postgres schema is **defined and implemented as part of OMS** (orders sync: §12.1.10, account sync: §12.2.1). Position Keeper reads from this schema but does not modify it. This section describes the schema design; implementation happens in the OMS task checklist.
+**Note:** Postgres schema is **defined and implemented as part of OMS** (orders sync: §12.1.10, account sync: §12.2.1). PMS reads from this schema but does not modify it. This section describes the schema design; implementation happens in the OMS task checklist.
 
 All schema changes are **Alembic revisions** (same as Phase 1). Add one or more revisions for the following.
 
@@ -46,7 +46,7 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
 
 - **fills**  
   - `id` (PK), `order_id` (FK to orders or internal reference), `account_id` (FK), `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `broker_fill_id`, `executed_at`, `created_at`.  
-  - Source of truth for what was executed; populated by downstream consumers of `oms_fills` stream (e.g. Position Keeper or future services). OMS does not write to `fills` table.
+  - Source of truth for what was executed; populated by downstream consumers of `oms_fills` stream (e.g. PMS or future services). OMS does not write to `fills` table.
 
 - **positions** *(OMS: no Postgres table.)* Positions are stored in Redis only (`account:{broker}:{account_id}:positions`). The name `positions` was dropped from OMS Postgres schema for use by PMS (Position Management System). See revision d4e5f6a7b8c9.
 
@@ -60,7 +60,7 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
   - **Historical record:** Tracks all balance changes (deposits, withdrawals, transfers, adjustments). Populated from `balanceUpdate` events via main's `on_balance_change` callback (writes to Postgres and sets TTL on Redis account keys only for balance change events).  
   - Indexes: `(account_id, asset, event_time)`, `(account_id, change_type)`, `event_time`.
 
-*(**margin_snapshots** table was dropped in revision f6a7b8c9d0e1; unused. Position Keeper can use a dedicated `pnl_snapshots` or Redis keys if needed.)*
+*(**margin_snapshots** table was dropped in revision f6a7b8c9d0e1; unused. PMS can use a dedicated `pnl_snapshots` or Redis keys if needed.)*
 
 **orders** — Extended columns for book (strategy) and freetext comment. Broker-agnostic columns for routing/audit; **Binance-specific** columns use the `binance_` prefix so other brokers can add their own (e.g. `bybit_*`) without collision.
 
@@ -180,7 +180,7 @@ Binance **cancel_order** returns same shape as query.
 | `strategy_orders` | Strategies (Phase 5) or test inject | Risk | Order intents from strategies |
 | `risk_approved` | Risk | OMS | Orders approved (or pass-through in P2). Consumer group `oms`, XREADGROUP + XACK. Trimmed by OMS. |
 | `cancel_requested` | Risk / Admin | OMS | Cancel by order_id or (broker_order_id + symbol). Consumer group `oms`. Not trimmed. |
-| `oms_fills` | OMS | Downstream (Position Keeper, future services) | Fill, reject, cancelled, and expired events. Trimmed by OMS. |
+| `oms_fills` | OMS | Downstream (PMS, future services) | Fill, reject, cancelled, and expired events. Trimmed by OMS. |
 
 ### 4.2 Message schemas (JSON)
 
@@ -197,14 +197,14 @@ Binance **cancel_order** returns same shape as query.
 - **`comment`** (optional) — Freetext comment; stored with order in Redis and Postgres.  
 - `strategy_id` (optional), `created_at` (ISO)
 
-**oms_fills (fill / reject / cancelled / expired)** — defined in OMS (12.1.5), consumed by downstream services (e.g. Position Keeper, future services). Validation: `OmsFillEvent` in `oms/schemas_pydantic.py`.  
+**oms_fills (fill / reject / cancelled / expired)** — defined in OMS (12.1.5), consumed by downstream services (e.g. PMS, future services). Validation: `OmsFillEvent` in `oms/schemas_pydantic.py`.  
 - `event_type`: `fill` | `reject` | `cancelled` | `expired`  
 - `order_id` (internal), `broker_order_id`, `symbol`, `side`, `quantity`, **`price`** (executed/fill price for this event), `fee`, `fee_asset`  
 - `executed_at` (ISO), `fill_id` (broker), optional `reject_reason` for rejections  
 - **`book`** (optional) — Pass-through from order for attribution.  
 - **`comment`** (optional) — Pass-through from order for audit.  
 
-Note: OMS account management receives account state directly from broker streams, not from `oms_fills`. Downstream consumers of `oms_fills` may use fill events for their own purposes (e.g. Position Keeper for PnL calculations).
+Note: OMS account management receives account state directly from broker streams, not from `oms_fills`. Downstream consumers of `oms_fills` may use fill events for their own purposes (e.g. PMS for PnL calculations).
 
 Each service documents its schemas in code or a service README (e.g. `oms/README.md`). Streams are created on first XADD.
 
@@ -306,22 +306,32 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 ---
 
-## 8. Position Keeper service
+## 8. PMS service
 
-**Data-model notes:** Order **symbol** (pair, e.g. BTCUSDT) vs balance **asset** (single asset, e.g. BTC, USDT) are not the same; building positions from orders and reconciling two tables (e.g. order-derived positions vs broker positions, balance_changes vs balances) are documented in **docs/position_keeper/README.md**.
+**Core vs optional:** See **docs/pms/PMS_ARCHITECTURE.md** §2. **Core** = derive positions from **orders only** (filter partial/fully filled) → compute PnL (realized + unrealized, one mark source) → one granular table (`positions`) + Redis (`pnl:{account_id}`, `margin:{account_id}`) → timer loop. **Optional** = symbols table, book_allocations, pnl_snapshots, margin_snapshots, book_cash, repairs, multiple mark price sources, Pydantic. **No fills table:** orders are the primary data source; PMS does not use a fills table. Implement **core** first; add optional as needed.
+
+**Data-model notes:** Order **symbol** (pair, e.g. BTCUSDT) vs balance **asset** (single asset, e.g. BTC, USDT) are not the same; building positions from orders and reconciling two tables (e.g. order-derived positions vs broker positions, balance_changes vs balances) are documented in **docs/pms/PMS_DATA_MODEL.md**.
 
 ### 8.1 Role
 
-- Periodically (e.g. every few seconds) read **positions** and **balances** from Postgres or from Redis cache; compute **realized PnL** (from fills), **unrealized PnL** (from current mark price if available), and **margin** (for futures).
+- Periodically (e.g. every few seconds) read **orders** and **balances** from **Postgres**; **derive positions from the orders table only** (filter orders by status: partial/fully filled; PMS does **not** read OMS Redis positions — that path is dummy). Compute **realized PnL** (from executed order rows), **unrealized PnL** (from current mark price × **open** quantity only; flattened positions have no unrealized — PnL already realized), and **margin** (for futures).
 - Write results to Postgres (e.g. a dedicated `pnl_snapshots` table) and/or to Redis (e.g. `pnl:{account_id}`, `margin:{account_id}`) for Admin/UI. *(OMS `margin_snapshots` table was dropped; unused.)*
 
-### 8.2 Mark price
+### 8.2 Mark price (unrealized PnL)
 
-- For futures, mark price can come from Binance (REST or websocket) or from Market Data service (Phase 4). For Phase 2, optional: fetch mark price from Binance in Position Keeper or leave unrealized PnL as zero until Phase 4.
+- **Interface first:** Define a **mark price provider interface** (e.g. get mark prices per symbol). PMS depends only on this contract; implementations are swappable via config.
+- **Phase 2:** Implement the interface by **wrapping Binance** (REST or WebSocket). PMS gets real unrealized PnL without a separate Market Data service.
+- **Phase 4:** Add an implementation that **reads from Redis or DB** (fed by the Market Data service). Switch with `PMS_MARK_PRICE_SOURCE` (e.g. `binance` vs `redis` or `market_data`). No change to PMS calculation logic.
 
-### 8.3 Deployment
+### 8.3 Granular store, views, and reference data
 
-- Loop process; Docker service `position_keeper`; env: `DATABASE_URL`, `REDIS_URL`; connect to `multistrat` network.
+- **One granular store (core):** PMS writes a **position/snapshot table** at grain **(account_id, book, symbol)** (e.g. `positions`) with **open_qty** (signed), **position_side** ('long' | 'short' | 'flat'). One row per grain; updated after each calculation. **Grouping** (by symbol, by book/symbol, by broker/symbol) is **on request** (SQL GROUP BY or API); optional DB VIEWs on PMS-written tables. See **docs/pms/PMS_ARCHITECTURE.md** §6.
+- **Reference data (optional for core):** **Symbols table** (symbol → base_asset, quote_asset, tick_size, etc.): populated by sync or config; PMS reads. **Allocations** (cash by book): **managed outside**; system **provided with** via interface (table, API, or file); PMS reads only.
+- **Cash vs positions:** Cash stays in OMS **balances** table; do not put cash in positions table. **Capital by book** = asset_value(book) + cash(book); cash(book) from allocation or internal book_cash ledger (optional).
+
+### 8.4 Deployment
+
+- Loop process; Docker service `pms`; env: `DATABASE_URL`, `REDIS_URL`; connect to `multistrat` network.
 
 ---
 
@@ -331,7 +341,7 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 - Consume from Redis stream `strategy_orders` (or skip and use **test inject** only).
 - **Pass-through:** For each message, optionally validate (e.g. symbol format); then publish the same (or enriched) payload to `risk_approved`. No position/margin checks yet.
-- Enables the pipeline Strategy → Risk → OMS for Phase 5; in Phase 2 you can **inject test orders** directly into `risk_approved` to drive OMS/Position Keeper.
+- Enables the pipeline Strategy → Risk → OMS for Phase 5; in Phase 2 you can **inject test orders** directly into `risk_approved` to drive OMS/PMS.
 
 ### 9.2 Test inject
 
@@ -373,15 +383,15 @@ BINANCE_API_SECRET=
 - OMS (generic): `REDIS_URL`, `DATABASE_URL` (optional, for order sync to Postgres). Broker-specific vars (e.g. Binance) are used by the Binance adapter.
 - Binance adapter: `BINANCE_*` vars (or passed from OMS env).
 - OMS account management: `REDIS_URL`, `DATABASE_URL` (same as OMS orders).
-- Position Keeper: `DATABASE_URL`, `REDIS_URL`.
+- PMS: `DATABASE_URL`, `REDIS_URL`.
 
 ---
 
 ## 12. Task checklist (implementation order)
 
-**Bottom-up approach:** Build and unit-test each layer before integrating. Start with the lowest-level component (Binance API), then build up: adapter → OMS pieces (orders + accounts) → OMS integration → Position Keeper pieces → Position Keeper integration. Each step should have unit tests before moving to the next.
+**Bottom-up approach:** Build and unit-test each layer before integrating. Start with the lowest-level component (Binance API), then build up: adapter → OMS pieces (orders + accounts) → OMS integration → PMS pieces → PMS integration. Each step should have unit tests before moving to the next.
 
-**Schema ownership:** Each service defines and implements its own schemas (Redis structures, Postgres, Redis streams, Redis cache keys) as part of its implementation. OMS owns Redis order staging keys, Redis account store keys, `risk_approved` input and `oms_fills` output schemas, Postgres `orders` table sync, and Postgres `accounts`/`balances`/`positions` table sync; Position Keeper owns its read/write schemas.
+**Schema ownership:** Each service defines and implements its own schemas (Redis structures, Postgres, Redis streams, Redis cache keys) as part of its implementation. OMS owns Redis order staging keys, Redis account store keys, `risk_approved` input and `oms_fills` output schemas, Postgres `orders` table sync, and Postgres `accounts`/`balances` sync (positions in Redis only); PMS owns its read/write schemas (PnL/margin snapshots).
 
 ### 12.1 OMS (build backwards: Binance API → adapter → OMS pieces → integration)
 
@@ -432,34 +442,38 @@ BINANCE_API_SECRET=
 - [x] **12.2.9** **OMS main loop integration**: extend `oms/main.py` to start account listeners alongside fill listeners; add periodic account refresh (`get_account_snapshot` every `account_refresh_interval_seconds`); add periodic account sync (`sync_accounts_to_postgres`) and repairs (`run_all_account_repairs`) in main loop. Wait for account listeners connected before processing orders. **Signed off:** `get_account_store`, `start_account_listeners`, `stop_account_listeners`, `wait_for_account_listeners_connected`; `run_oms_loop(account_store=..., account_refresh_interval_seconds=..., account_sync_interval_seconds=..., account_sync_ttl_seconds=...)` with refresh/sync/repair logic; `main()` creates account_store, starts account listeners after fill listeners, waits for account listeners, passes env `OMS_ACCOUNT_REFRESH_INTERVAL_SECONDS` / `OMS_ACCOUNT_SYNC_INTERVAL_SECONDS`, stops account listeners in `finally`. Integration test optional.
 - [x] **12.2.10** **Account cleanup** (`oms/cleanup.py`): extend cleanup module with `set_account_key_ttl(redis, broker, account_id, ttl_seconds)` for TTL on account keys after sync. **Signed off:** `set_account_key_ttl` implemented in `oms/cleanup.py`; unit tests in `oms/tests/test_cleanup.py` (`TestSetAccountKeyTtl`).
 
-### 12.3 Position Keeper (build backwards: calculations → reads → writes → loop)
+### 12.3 PMS (build backwards: calculations → reads → writes → loop)
 
-- [ ] **12.3.1** **Position Keeper PnL/margin calculation**: realized PnL (from fills), unrealized PnL (mark price), margin (futures). **Unit test:** given positions/balances/fills, verify calculations.
-- [ ] **12.3.2** **Position Keeper Postgres schema** (reads): define queries for positions, balances, fills (uses OMS account schema from 12.2.1). Document in code or `position_keeper/README.md`.
-- [ ] **12.3.3** **Position Keeper Postgres reads**: query positions, balances, fills. **Unit test:** test Postgres; verify queries.
-- [ ] **12.3.4** **Position Keeper Postgres/Redis reads**: Position Keeper reads positions/balances from Postgres (synced by OMS account sync) or optionally from Redis account store. Document in code or `position_keeper/README.md`.
-- [ ] **12.3.5** **Position Keeper Redis reads**: read cache keys (positions, balances). **Unit test:** mock Redis client; verify reads.
-- [ ] **12.3.6** **Position Keeper Postgres/Redis schema** (writes): define PnL/margin snapshot schema (Postgres table or Redis keys like `pnl:{account_id}`, `margin:{account_id}`). Document in code or `position_keeper/README.md`.
-- [ ] **12.3.7** **Position Keeper Postgres/Redis writes**: write PnL/margin snapshots. **Unit test:** test Postgres and mock Redis; verify writes.
-- [ ] **12.3.8** **Position Keeper integration** (loop): periodic read → calculate → write. **Integration test:** mock data; verify loop runs and writes results.
+**Core vs optional:** Implement **Core** tasks first for a minimal PMS; add **(Optional)** tasks when needed. See **docs/pms/PMS_ARCHITECTURE.md** §2.
+
+- [ ] **12.3.1** **(Core)** **PMS PnL/margin calculation**: realized PnL (from fills or orders), unrealized PnL (mark price), margin (futures). **Unit test:** given positions/balances/fills, verify calculations.
+- [x] **12.3.1a** **(Core)** **Mark price provider**: define **interface** (e.g. get mark prices per symbol); **Phase 2:** implement by wrapping Binance (REST/WS). **(Optional)** Phase 4: add implementation reading from Redis/DB (Market Data). Switch via `PMS_MARK_PRICE_SOURCE`. See **docs/pms/PMS_ARCHITECTURE.md** §11.
+- [x] **12.3.1b** **(Optional)** **Pydantic in PMS**: Use Pydantic (same as OMS) for config, mark price, internal shapes, snapshot writes. See **docs/pms/PMS_ARCHITECTURE.md** §12.
+- [ ] **12.3.2** **(Core)** **PMS Postgres schema** (reads): orders, balances, accounts. **Orders are the primary data source** (no fills table). **(Optional):** **symbols** (reference), **book_allocations** or equivalent. Grain includes **book**. Document in **docs/pms/PMS_ARCHITECTURE.md** §8.
+- [x] **12.3.3** **(Core)** **PMS Postgres reads**: query orders (filter by status: **partially_filled**, **filled**), balances; **derive positions** at grain (account_id, book, symbol) with **signed open_qty** (net = sum(BUY) − sum(SELL)), **position_side** ('long' | 'short' | 'flat'). Quantity uses **executed_quantity** (from orders.executed_qty). **Entry average** = cost basis of **open** quantity only (FIFO); **unrealized PnL** when open_qty ≠ 0 (flattened positions: PnL already realized). **(Optional):** symbols, allocations. **Unit test:** verify queries and position derivation.
+- [x] **12.3.4** **(Core)** **PMS granular store** (writes): **positions** table at grain (account_id, book, symbol) with open_qty (signed), position_side; update after each calculation. Grouping on request. Document in **docs/pms/PMS_ARCHITECTURE.md** §6.
+- [ ] **12.3.5** **(Core)** **PMS Redis**: PMS writes PnL/margin keys only (does not read OMS Redis). **Unit test:** verify writes only.
+- [ ] **12.3.6** **(Core)** **PMS Postgres schema** (writes): **positions**. **(Optional):** pnl_snapshots, margin_snapshots; book_cash if using internal ledger. Document in **docs/pms/PMS_ARCHITECTURE.md** §6–8.
+- [ ] **12.3.7** **(Core)** **PMS Postgres/Redis writes**: write granular position table + Redis (pnl/margin keys). **(Optional):** pnl_snapshots, margin_snapshots. **Unit test:** test Postgres and mock Redis; verify writes.
+- [x] **12.3.8** **(Core)** **PMS integration** (loop): periodic read → derive → calculate → write (granular table; **Redis skipped**). **(Optional):** snapshots. **Integration test:** mock data; verify loop runs and writes results. Entrypoint: `python -m pms.main`; loop in `pms/loop.py`.
 
 ### 12.4 Test harness and deployment
 
 - [ ] **12.4.1** **Write test script** (`scripts/inject_test_order.py`): connect to Redis (`REDIS_URL`), XADD test order to `risk_approved` (broker, symbol, side, quantity, order_type, etc.). Use for manual E2E and automated tests. Optionally add assertions (poll `oms_fills` or Postgres). See §16 Testing.
 - [ ] **12.4.2** Implement **Risk (minimal)** or use test inject only: pass-through `strategy_orders` → `risk_approved`, or rely on test script.
-- [ ] **12.4.3** Add Docker services for OMS, Position Keeper (and optionally Risk) to `docker-compose.yml`; same network `multistrat`; env from `.env`. Note: Account management is integrated into OMS, no separate Booking service.
-- [ ] **12.4.4** **E2E:** run test script to inject one test order (broker `binance`) → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills`; OMS account listener receives account events → OMS syncs orders and accounts to Postgres → Position Keeper reads positions/balances and shows PnL/margin. Verify in pgAdmin and RedisInsight.
+- [ ] **12.4.3** Add Docker services for OMS, PMS (and optionally Risk) to `docker-compose.yml`; same network `multistrat`; env from `.env`. Note: Account management is integrated into OMS, no separate Booking service.
+- [ ] **12.4.4** **E2E:** run test script to inject one test order (broker `binance`) → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills`; OMS account listener receives account events → OMS syncs orders and accounts to Postgres → PMS reads orders/balances from Postgres, derives positions from orders, and shows PnL/margin. Verify in pgAdmin and RedisInsight.
 
 ---
 
 ## 13. Verification (acceptance)
 
-- [ ] `docker compose up -d` brings up infra + OMS, Position Keeper (and optionally Risk).
+- [ ] `docker compose up -d` brings up infra + OMS, PMS (and optionally Risk).
 - [ ] **Test script** runs successfully: connects to Redis, XADDs one test order to `risk_approved` with `broker: "binance"`.
 - [ ] One test order injected via script flows: OMS routes to Binance adapter → Binance testnet → fill (or reject) → OMS publishes to `oms_fills` (event_type fill/reject/cancelled/expired as applicable).
 - [ ] **OMS order sync** (trigger on terminal status and/or periodic `sync_terminal_orders`) populates Postgres `orders` from Redis; after sync, `orders` table has the test order row.
 - [ ] **OMS account sync** (periodic `sync_accounts_to_postgres`) populates Postgres `accounts`, `balances` from Redis account store (updated by account listener from broker stream events). No `positions` table (positions in Redis only). **Balance changes:** `balanceUpdate` events are written to `balance_changes` via main's `on_balance_change` callback; TTL on Redis account keys is set only when processing balance change events (not after periodic sync).
-- [ ] Position Keeper reads positions/balances from Postgres (or Redis) and writes PnL/margin to Postgres or Redis.
+- [ ] PMS reads orders (filter partially_filled, filled) and balances from Postgres (no fills table), derives positions at grain (account_id, book, symbol) with signed open_qty, position_side, entry_avg = cost basis of open qty only, writes granular position table (e.g. positions) and PnL/margin to Postgres or Redis (does not read OMS Redis positions — dummy).
 - [ ] In pgAdmin: `orders` (from OMS order sync), `accounts`, `balances` (from OMS account sync) reflect the test order and account state.
 - [ ] In RedisInsight: OMS order hashes (e.g. `orders:*`), account hashes (e.g. `account:binance:*`); `oms_fills` stream has the fill (and optionally reject/cancelled/expired) events.
 
@@ -469,7 +483,7 @@ BINANCE_API_SECRET=
 
 ```
 multistrat/
-├── docker-compose.yml      # add services: oms, position_keeper, risk
+├── docker-compose.yml      # add services: oms, pms, risk
 ├── .env.example
 ├── alembic/
 │   └── versions/
@@ -491,7 +505,7 @@ multistrat/
 │   │       ├── adapter.py      # Binance adapter (orders + accounts)
 │   │       ├── account_listener.py  # parse account events
 │   │       └── ...
-├── position_keeper/
+├── pms/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── main.py             # loop: read positions/balances → PnL/margin → Postgres/Redis
@@ -532,8 +546,8 @@ multistrat/
 - **OMS account store:** Mock Redis or fakeredis; test key formats (`account:*`, `...:balances`, `...:positions`), CRUD operations, pipeline atomicity.
 - **OMS account callback:** Mock account store and callback; verify event validation, store updates, idempotency (updated_at handling).
 - **OMS account sync:** Mock Redis and Postgres; verify mapping to Postgres rows, UPSERT logic, TTL setting.
-- **Position Keeper calculations:** Pure functions; test PnL/margin math given positions/balances/fills.
-- **Position Keeper reads/writes:** Mock Postgres/Redis or use test DB; test queries and writes.
+- **PMS calculations:** Pure functions; test PnL/margin math given positions/balances/fills.
+- **PMS reads/writes:** Mock Postgres/Redis or use test DB; test queries and writes.
 
 ### 16.2 Integration tests (wire pieces)
 
@@ -542,19 +556,19 @@ multistrat/
 - **OMS error path:** Adapter place_order raises → no XACK; optional reject to store/oms_fills (12.1.9d).
 - **OMS cancel from Redis:** XADD cancel_requested → process_one_cancel → store status cancelled, oms_fills event (12.1.9f).
 - **OMS account integration:** Mock broker adapter account listener; verify: account events → callback → Redis account store updates → periodic sync → Postgres writes (accounts, balances, positions).
-- **Position Keeper integration:** Mock Postgres/Redis data; verify: read → calculate → write loop.
+- **PMS integration:** Mock Postgres/Redis data; verify: read → calculate → write loop.
 
 ### 16.3 Test script (required for E2E)
 
 **You need to write a test script to test the flow.** Redis is not HTTP; services consume streams via a Redis client (XREAD/XADD). To drive the pipeline you either run a Risk process that forwards from `strategy_orders`, or (simpler for Phase 2) **a script that publishes a test order into `risk_approved`**. Use the same script for manual E2E and, if you add assertions (e.g. poll `oms_fills` or Postgres), for automated E2E.
 
-- **Purpose:** Inject one or more test orders into `risk_approved` so OMS (and then Position Keeper) can be tested end-to-end without running a live Strategy or Risk.
-- **Implementation:** Script (e.g. `scripts/inject_test_order.py`) that: connects to Redis using `REDIS_URL`; builds a JSON payload per stream schema (`broker`, `symbol`, `side`, `quantity`, `order_type`, etc.); calls XADD on stream `risk_approved`. Run after OMS and (optionally) Position Keeper are up.
+- **Purpose:** Inject one or more test orders into `risk_approved` so OMS (and then PMS) can be tested end-to-end without running a live Strategy or Risk.
+- **Implementation:** Script (e.g. `scripts/inject_test_order.py`) that: connects to Redis using `REDIS_URL`; builds a JSON payload per stream schema (`broker`, `symbol`, `side`, `quantity`, `order_type`, etc.); calls XADD on stream `risk_approved`. Run after OMS and (optionally) PMS are up.
 - **Optional:** After inject, poll Redis stream `oms_fills` or query Postgres (fills, positions) with a timeout and assert expected state for automated E2E.
 
 ### 16.4 E2E (real services, testnet)
 
-- **E2E:** Run the test script to inject one order with `broker: "binance"` → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills`; OMS account listener receives account events → OMS syncs orders and accounts to Postgres; Position Keeper reads and reflects state. Use testnet only; no real funds.
+- **E2E:** Run the test script to inject one order with `broker: "binance"` → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills`; OMS account listener receives account events → OMS syncs orders and accounts to Postgres; PMS reads and reflects state. Use testnet only; no real funds.
 
 ### 16.5 Test classification and file mapping
 
@@ -658,7 +672,7 @@ pytest oms/tests/test_oms_redis_testnet.py
 **Usage:**
 ```bash
 # Start services first
-docker compose up -d oms position_keeper
+docker compose up -d oms pms
 
 # Run script
 python scripts/full_pipeline_test.py --market  # MARKET order
@@ -690,3 +704,41 @@ python scripts/full_pipeline_test.py           # LIMIT order (default)
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md#testing-corresponding-to-each-phase) for the overall test matrix.
 
 **Comprehensive test documentation:** See [TESTING.md](TESTING.md) for complete test inventory, classification, and execution instructions.
+
+---
+
+## Remaining tasks (not yet implemented)
+
+Below are the Phase 2 tasks that are **not yet implemented**, for prioritization and tracking.
+
+### PMS (12.3)
+
+| Task | Description |
+|------|-------------|
+| **12.3.1** | **(Core)** PMS PnL/margin calculation: realized PnL (from orders), unrealized PnL (mark price), margin (futures). **Unit test:** given positions/balances/orders, verify calculations. |
+| **12.3.2** | **(Core)** PMS Postgres schema (reads): document orders, balances, accounts as primary data source (no fills table). **(Optional):** symbols, book_allocations. Document in **docs/pms/PMS_ARCHITECTURE.md** §8. |
+| **12.3.5** | **(Core)** PMS Redis: PMS writes PnL/margin keys only (e.g. `pnl:{account_id}`, `margin:{account_id}`); does not read OMS Redis. **Unit test:** verify writes only. |
+| **12.3.6** | **(Core)** PMS Postgres schema (writes): document **positions** table. **(Optional):** pnl_snapshots, margin_snapshots; book_cash. Document in **docs/pms/PMS_ARCHITECTURE.md** §6–8. |
+| **12.3.7** | **(Core)** PMS Postgres/Redis writes: wire loop to write granular position table **and** Redis (pnl/margin keys). **(Optional):** pnl_snapshots, margin_snapshots. **Unit test:** Postgres + mock Redis; verify both writes. |
+
+### Test harness and deployment (12.4)
+
+| Task | Description |
+|------|-------------|
+| **12.4.1** | Write test script **`scripts/inject_test_order.py`**: connect to Redis (`REDIS_URL`), XADD test order to `risk_approved` (broker, symbol, side, quantity, order_type, etc.). Use for manual E2E and automated tests. |
+| **12.4.2** | Implement **Risk (minimal)** or use test inject only: pass-through `strategy_orders` → `risk_approved`, or rely on test script. |
+| **12.4.3** | Add Docker services for OMS, PMS (and optionally Risk) to **`docker-compose.yml`**; same network `multistrat`; env from `.env`. |
+| **12.4.4** | **E2E:** run test script to inject one test order (broker `binance`) → OMS → Binance adapter → testnet → fill → OMS publishes `oms_fills`; account sync → Postgres; PMS reads orders, derives positions, writes positions table (and PnL/margin to Redis when 12.3.5/12.3.7 done). Verify in pgAdmin and RedisInsight. |
+
+### Verification (acceptance) §13
+
+| Item | Description |
+|------|-------------|
+| Docker compose | `docker compose up -d` brings up infra + OMS, PMS (and optionally Risk). |
+| Test script | Script runs successfully: connects to Redis, XADDs one test order to `risk_approved` with `broker: "binance"`. |
+| Order flow | One test order flows: OMS → Binance adapter → testnet → fill/reject → `oms_fills`. |
+| OMS order sync | Postgres `orders` populated from Redis (trigger and/or periodic `sync_terminal_orders`). |
+| OMS account sync | Postgres `accounts`, `balances` from Redis account store; balance_changes on `balanceUpdate`. |
+| PMS flow | PMS reads orders (partially_filled, filled), derives positions, writes positions table (+ Redis when implemented). |
+| pgAdmin | `orders`, `accounts`, `balances` reflect test order and account state. |
+| RedisInsight | OMS order hashes, account hashes; `oms_fills` stream has fill/reject events. |
