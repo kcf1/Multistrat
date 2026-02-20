@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code
 COPY oms/ oms/
+COPY pms/ pms/
 COPY alembic/ alembic/
 COPY alembic.ini .
 

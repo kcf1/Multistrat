@@ -27,7 +27,7 @@ class PmsSettings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", description="Redis connection URL")
     database_url: Optional[str] = Field(default=None, description="Postgres connection URL")
     pms_tick_interval_seconds: float = Field(
-        default=5.0,
+        default=10.0,
         ge=0.1,
         description="How often to run read → derive → calculate → write (seconds)",
     )

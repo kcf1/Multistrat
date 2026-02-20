@@ -16,7 +16,7 @@ class TestPmsSettings:
     def test_defaults(self):
         # Defaults when env not set (redis_url/database_url may come from .env)
         s = PmsSettings()
-        assert s.pms_tick_interval_seconds == 5.0
+        assert s.pms_tick_interval_seconds == 10.0
         assert s.pms_mark_price_source == "binance"
         assert s.pms_rebuild_from_orders_interval_seconds is None
         assert "redis" in s.redis_url

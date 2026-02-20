@@ -455,7 +455,7 @@ BINANCE_API_SECRET=
 - [ ] **12.3.5** **(Core)** **PMS Redis**: PMS writes PnL/margin keys only (does not read OMS Redis). **Unit test:** verify writes only.
 - [ ] **12.3.6** **(Core)** **PMS Postgres schema** (writes): **positions**. **(Optional):** pnl_snapshots, margin_snapshots; book_cash if using internal ledger. Document in **docs/pms/PMS_ARCHITECTURE.md** §6–8.
 - [ ] **12.3.7** **(Core)** **PMS Postgres/Redis writes**: write granular position table + Redis (pnl/margin keys). **(Optional):** pnl_snapshots, margin_snapshots. **Unit test:** test Postgres and mock Redis; verify writes.
-- [ ] **12.3.8** **(Core)** **PMS integration** (loop): periodic read → derive → calculate → write (granular table + Redis). **(Optional):** snapshots. **Integration test:** mock data; verify loop runs and writes results.
+- [x] **12.3.8** **(Core)** **PMS integration** (loop): periodic read → derive → calculate → write (granular table; **Redis skipped**). **(Optional):** snapshots. **Integration test:** mock data; verify loop runs and writes results. Entrypoint: `python -m pms.main`; loop in `pms/loop.py`.
 
 ### 12.4 Test harness and deployment
 
@@ -704,3 +704,41 @@ python scripts/full_pipeline_test.py           # LIMIT order (default)
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md#testing-corresponding-to-each-phase) for the overall test matrix.
 
 **Comprehensive test documentation:** See [TESTING.md](TESTING.md) for complete test inventory, classification, and execution instructions.
+
+---
+
+## Remaining tasks (not yet implemented)
+
+Below are the Phase 2 tasks that are **not yet implemented**, for prioritization and tracking.
+
+### PMS (12.3)
+
+| Task | Description |
+|------|-------------|
+| **12.3.1** | **(Core)** PMS PnL/margin calculation: realized PnL (from orders), unrealized PnL (mark price), margin (futures). **Unit test:** given positions/balances/orders, verify calculations. |
+| **12.3.2** | **(Core)** PMS Postgres schema (reads): document orders, balances, accounts as primary data source (no fills table). **(Optional):** symbols, book_allocations. Document in **docs/pms/PMS_ARCHITECTURE.md** §8. |
+| **12.3.5** | **(Core)** PMS Redis: PMS writes PnL/margin keys only (e.g. `pnl:{account_id}`, `margin:{account_id}`); does not read OMS Redis. **Unit test:** verify writes only. |
+| **12.3.6** | **(Core)** PMS Postgres schema (writes): document **positions** table. **(Optional):** pnl_snapshots, margin_snapshots; book_cash. Document in **docs/pms/PMS_ARCHITECTURE.md** §6–8. |
+| **12.3.7** | **(Core)** PMS Postgres/Redis writes: wire loop to write granular position table **and** Redis (pnl/margin keys). **(Optional):** pnl_snapshots, margin_snapshots. **Unit test:** Postgres + mock Redis; verify both writes. |
+
+### Test harness and deployment (12.4)
+
+| Task | Description |
+|------|-------------|
+| **12.4.1** | Write test script **`scripts/inject_test_order.py`**: connect to Redis (`REDIS_URL`), XADD test order to `risk_approved` (broker, symbol, side, quantity, order_type, etc.). Use for manual E2E and automated tests. |
+| **12.4.2** | Implement **Risk (minimal)** or use test inject only: pass-through `strategy_orders` → `risk_approved`, or rely on test script. |
+| **12.4.3** | Add Docker services for OMS, PMS (and optionally Risk) to **`docker-compose.yml`**; same network `multistrat`; env from `.env`. |
+| **12.4.4** | **E2E:** run test script to inject one test order (broker `binance`) → OMS → Binance adapter → testnet → fill → OMS publishes `oms_fills`; account sync → Postgres; PMS reads orders, derives positions, writes positions table (and PnL/margin to Redis when 12.3.5/12.3.7 done). Verify in pgAdmin and RedisInsight. |
+
+### Verification (acceptance) §13
+
+| Item | Description |
+|------|-------------|
+| Docker compose | `docker compose up -d` brings up infra + OMS, PMS (and optionally Risk). |
+| Test script | Script runs successfully: connects to Redis, XADDs one test order to `risk_approved` with `broker: "binance"`. |
+| Order flow | One test order flows: OMS → Binance adapter → testnet → fill/reject → `oms_fills`. |
+| OMS order sync | Postgres `orders` populated from Redis (trigger and/or periodic `sync_terminal_orders`). |
+| OMS account sync | Postgres `accounts`, `balances` from Redis account store; balance_changes on `balanceUpdate`. |
+| PMS flow | PMS reads orders (partially_filled, filled), derives positions, writes positions table (+ Redis when implemented). |
+| pgAdmin | `orders`, `accounts`, `balances` reflect test order and account state. |
+| RedisInsight | OMS order hashes, account hashes; `oms_fills` stream has fill/reject events. |
