@@ -459,10 +459,10 @@ BINANCE_API_SECRET=
 
 ### 12.4 Test harness and deployment
 
-- [ ] **12.4.1** **Write test script** (`scripts/inject_test_order.py`): connect to Redis (`REDIS_URL`), XADD test order to `risk_approved` (broker, symbol, side, quantity, order_type, etc.). Use for manual E2E and automated tests. Optionally add assertions (poll `oms_fills` or Postgres). See §16 Testing.
+- [x] **12.4.1** **Write test script** (`scripts/inject_test_order.py`): connect to Redis (`REDIS_URL`), XADD test order to `risk_approved` (broker, symbol, side, quantity, order_type, etc.). Use for manual E2E and automated tests. Optionally add assertions (poll `oms_fills` or Postgres). See §16 Testing.
 - [ ] **12.4.2** Implement **Risk (minimal)** or use test inject only: pass-through `strategy_orders` → `risk_approved`, or rely on test script.
-- [ ] **12.4.3** Add Docker services for OMS, PMS (and optionally Risk) to `docker-compose.yml`; same network `multistrat`; env from `.env`. Note: Account management is integrated into OMS, no separate Booking service.
-- [ ] **12.4.4** **E2E:** run test script to inject one test order (broker `binance`) → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills`; OMS account listener receives account events → OMS syncs orders and accounts to Postgres → PMS reads orders/balances from Postgres, derives positions from orders, and shows PnL/margin. Verify in pgAdmin and RedisInsight.
+- [x] **12.4.3** Add Docker services for OMS, PMS (and optionally Risk) to `docker-compose.yml`; same network `multistrat`; env from `.env`. Note: Account management is integrated into OMS, no separate Booking service.
+- [x] **12.4.4** **E2E:** run test script to inject one test order (broker `binance`) → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills`; OMS account listener receives account events → OMS syncs orders and accounts to Postgres → PMS reads orders/balances from Postgres, derives positions from orders, and shows PnL/margin. Verify in pgAdmin and RedisInsight. **Script:** `scripts/e2e_12_4_4.py` (inject MARKET order, poll oms_fills + Redis order store + Postgres orders + optional account flow + Postgres positions; then remind to verify in pgAdmin and RedisInsight).
 
 ---
 
@@ -529,6 +529,8 @@ multistrat/
 
 **Bottom-up unit-testing approach:** Each component is unit-tested in isolation before integration. Mock dependencies (HTTP, Redis, Postgres) so tests run fast and don't require external services. Then integration tests wire pieces together with mocks, and finally E2E uses real services (testnet).
 
+**OMS vs PMS — separate test suites:** OMS tests live under `oms/tests/` and `oms/brokers/*/tests/` (unit and integration for order flow, account flow, sync, cleanup, Binance adapter, etc.). PMS tests live under `pms/tests/` (config, reads, position derivation, loop, mark price, schemas, granular store). E2E and harness scripts (e.g. `scripts/inject_test_order.py`, `scripts/full_pipeline_test.py`) drive the full pipeline (risk_approved → OMS → broker → oms_fills → PMS) but are not part of either OMS-only or PMS-only suites; run OMS and PMS tests separately for component validation.
+
 ### 16.1 Unit tests (per component)
 
 - **Binance API client:** Mock HTTP (e.g. `responses` in Python, `nock` in Node); test signing, request format, error handling, response parsing.
@@ -592,6 +594,7 @@ Tests are classified into four categories based on scope and dependencies:
 - `oms/tests/test_cancel_consumer.py` — Cancel command parsing
 - `oms/brokers/binance/tests/test_adapter.py` — Binance adapter (mocked client)
 - `oms/brokers/binance/tests/test_fills_listener.py` — Fills listener parsing (mocked websocket)
+- **PMS (separate suite):** `pms/tests/test_config.py`, `pms/tests/test_reads.py`, `pms/tests/test_schemas_pydantic.py`, `pms/tests/test_mark_price.py`, `pms/tests/test_granular_store.py`, `pms/tests/test_loop.py` — config, Postgres reads, position derivation, mark price, loop (mocked deps).
 
 **Characteristics:**
 - Fast execution (no network I/O)
