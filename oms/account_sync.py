@@ -105,12 +105,13 @@ def sync_accounts_to_postgres(
     account_store: RedisAccountStore,
     pg_connect: Union[str, Callable[[], Any]],
     ttl_after_sync_seconds: Optional[int] = None,
+    sync_balances: bool = True,
 ) -> int:
     """
-    Read accounts and balances from Redis and UPSERT to Postgres (accounts, balances).
-    For each account, delete any balances in Postgres that are not in the current
-    Redis set (cleanup for flattened/removed assets). Optionally set TTL on
-    account Redis keys after sync.
+    Read accounts (and optionally balances) from Redis and UPSERT to Postgres (accounts, balances).
+    When sync_balances is True: for each account, UPSERT balances and delete any balances in
+    Postgres that are not in the current Redis set (cleanup for flattened/removed assets).
+    Optionally set TTL on account Redis keys after sync.
     Returns number of accounts synced.
     """
     brokers = _discover_brokers(redis)
@@ -142,34 +143,35 @@ def sync_accounts_to_postgres(
                 account_pk = cur.fetchone()[0]
                 updated_at = row.get("updated_at")
 
-                balances = account_store.get_balances(broker, account_id)
-                current_assets = set()
-                for bal in balances:
-                    asset = (bal.get("asset") or "").strip()
-                    if not asset:
-                        continue
-                    current_assets.add(asset)
-                    bal_row = _balance_to_row(bal, account_pk, updated_at)
-                    cur.execute(
-                        """
-                        INSERT INTO balances (account_id, asset, available, locked, updated_at)
-                        VALUES (%(account_id)s, %(asset)s, %(available)s, %(locked)s, %(updated_at)s)
-                        ON CONFLICT (account_id, asset) DO UPDATE SET
-                            available = EXCLUDED.available,
-                            locked = EXCLUDED.locked,
-                            updated_at = EXCLUDED.updated_at
-                        """,
-                        _pg_params(bal_row),
-                    )
+                if sync_balances:
+                    balances = account_store.get_balances(broker, account_id)
+                    current_assets = set()
+                    for bal in balances:
+                        asset = (bal.get("asset") or "").strip()
+                        if not asset:
+                            continue
+                        current_assets.add(asset)
+                        bal_row = _balance_to_row(bal, account_pk, updated_at)
+                        cur.execute(
+                            """
+                            INSERT INTO balances (account_id, asset, available, locked, updated_at)
+                            VALUES (%(account_id)s, %(asset)s, %(available)s, %(locked)s, %(updated_at)s)
+                            ON CONFLICT (account_id, asset) DO UPDATE SET
+                                available = EXCLUDED.available,
+                                locked = EXCLUDED.locked,
+                                updated_at = EXCLUDED.updated_at
+                            """,
+                            _pg_params(bal_row),
+                        )
 
-                # Delete balances for this account that are no longer in Redis (flattened)
-                if current_assets:
-                    cur.execute(
-                        "DELETE FROM balances WHERE account_id = %s AND asset != ALL(%s)",
-                        (account_pk, list(current_assets)),
-                    )
-                else:
-                    cur.execute("DELETE FROM balances WHERE account_id = %s", (account_pk,))
+                    # Delete balances for this account that are no longer in Redis (flattened)
+                    if current_assets:
+                        cur.execute(
+                            "DELETE FROM balances WHERE account_id = %s AND asset != ALL(%s)",
+                            (account_pk, list(current_assets)),
+                        )
+                    else:
+                        cur.execute("DELETE FROM balances WHERE account_id = %s", (account_pk,))
 
                 count += 1
 

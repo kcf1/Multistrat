@@ -376,6 +376,7 @@ def run_oms_loop(
                     account_store,
                     pg_connect,
                     ttl_after_sync_seconds=account_sync_ttl_seconds,
+                    sync_balances=False,  # OMS loop: sync accounts only; balance_changes via on_balance_change
                 )
                 logger.debug("OMS periodic account sync: synced {} account(s) to Postgres", count)
             except Exception as e:
