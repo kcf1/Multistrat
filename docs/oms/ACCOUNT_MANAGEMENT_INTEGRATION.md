@@ -51,8 +51,8 @@ Account data stored in Redis:
 Account sync writes to:
 
 - `accounts` - Account metadata (id, account_id, name, broker, created_at, config). No `env` column. `name` is derived as `broker:account_id` if not set.
-- `balances` - Balances per account/asset (UPSERT; then DELETE balances not in current Redis snapshot for that account).
-- `balance_changes` - Historical deposits/withdrawals (via main's `on_balance_change` callback: `write_balance_change` when processing `balanceUpdate` events; TTL on Redis account keys is set only for these events).
+- `balances` - Balances per account/asset (UPSERT; then DELETE balances not in current Redis snapshot for that account). **Optional:** In the **build-from-order** model, **balance sync to `balances` can be disabled**; then PMS builds cash from orders + balance_changes (see **docs/pms/PMS_DATA_MODEL.md**).
+- `balance_changes` - Historical deposits/withdrawals/transfers only (via main's `on_balance_change` callback: `write_balance_change` when processing **balanceUpdate** events; per Binance API, balanceUpdate is not triggered by trades). Includes **book** column; broker-fed rows use a default cash book. TTL on Redis account keys is set only for these events.
 
 **Note:** There is no `positions` table in OMS Postgres; positions are stored in Redis only (`account:{broker}:{account_id}:positions`). The name was reserved for PMS (Position Management System).
 

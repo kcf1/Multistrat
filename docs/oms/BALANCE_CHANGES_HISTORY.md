@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `balance_changes` table provides **historical tracking** of all balance modifications (deposits, withdrawals, transfers, adjustments) separate from the current state stored in the `balances` table.
+The `balance_changes` table provides **historical tracking** of balance modifications from **deposits, withdrawals, transfers, and adjustments** only. It is **not** populated from trade-related broker events: per Binance API (see **docs/BINANCE_API_RULES.md** §1.1), **balanceUpdate** is triggered by deposits, withdrawals, and transfers — **not** by trades (trades trigger `outboundAccountPosition`). So `balance_changes` contains only non-trade movements; PMS uses it together with **orders** to build cash (no double-counting). When balance sync is disabled, current **cash** is derived in **PMS** from orders + balance_changes; the `balances` table may be unused.
 
 ## Table Design
 
@@ -13,6 +13,7 @@ balance_changes
 ├── id (BIGSERIAL PK)
 ├── account_id (FK → accounts)
 ├── asset (TEXT)                    -- Asset symbol (e.g. USDT, BTC)
+├── book (TEXT)                     -- Book for this change; default cash book for broker-fed; book change records move cash to strategy books
 ├── change_type (TEXT)              -- deposit, withdrawal, transfer, adjustment, snapshot
 ├── delta (NUMERIC)                 -- Amount changed: positive for deposit, negative for withdrawal
 ├── balance_before (NUMERIC NULL)   -- Balance before change (optional, for audit)
@@ -127,15 +128,16 @@ ORDER BY event_time DESC
 LIMIT 100;
 ```
 
-## Relationship with `balances` Table
+## Relationship with `balances` Table and PMS Cash
 
 | Table | Purpose | Update Frequency | Data Type |
 |-------|---------|------------------|-----------|
-| `balances` | **Current state** | Every balance change | One row per (account_id, asset) |
-| `balance_changes` | **Historical record** | Every balance change | Append-only (INSERT only) |
+| `balances` | **Current state** (when sync enabled) | Every balance change | One row per (account_id, asset) |
+| `balance_changes` | **Historical record** (deposit/withdrawal/transfer only) | Every balanceUpdate event | Append-only (INSERT only); includes **book** |
 
-- `balances` table: Stores **current** balance per asset (UPSERT by `account_id`, `asset`)
-- `balance_changes` table: Stores **historical** changes (INSERT only, never updated)
+- When **balance sync is enabled**, `balances` stores current balance per asset (UPSERT by `account_id`, `asset`).
+- When **balance sync is disabled** (build-from-order model), PMS **builds cash** from **orders** + **balance_changes**; `balances` is not the source for PMS. See **docs/pms/PMS_DATA_MODEL.md**.
+- **Broker-fed** rows in `balance_changes` use a **default cash book** (e.g. `__default__`). **Book change records** (manual or recs) move cash from the default book to strategy books.
 
 ## Implementation Notes
 

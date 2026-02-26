@@ -1,6 +1,6 @@
 # PMS Consolidation: Conflicts Resolved and Source of Truth
 
-This document walks through the conflicts that were resolved when consolidating **position_keeper** into **PMS** and making **PMS the source of truth** for PnL and margin. It also summarizes what was removed and what was kept.
+This document walks through the conflicts that were resolved when consolidating **position_keeper** into **PMS** and making **PMS the source of truth** for PnL and margin. It also summarizes what was removed and what was kept. **§7** documents conflict resolutions for the **build-from-order cash** model (cash built in PMS from orders + balance_changes; balance sync disabled).
 
 ---
 
@@ -72,3 +72,25 @@ This document walks through the conflicts that were resolved when consolidating 
 - **Booking** is **removed** from the documented data flow; OMS syncs orders and accounts/balances to Postgres and keeps positions in Redis.
 - **Positions** for PMS are **derived from the orders table**; PMS does **not** read OMS Redis positions (dummy). Optional reconciliation with other stores.
 - All plan and architecture docs now reference **docs/pms/** and the **pms** service; no remaining references to `docs/position_keeper/` or the `position_keeper` service.
+
+---
+
+## 7. Build-from-Order Cash: Conflict Resolutions
+
+When adopting **build-from-order cash** (PMS builds cash from orders + balance_changes + symbol mapping; double-entry; OMS balance sync disabled), the following conflict resolutions apply.
+
+### 7.1 Reconciliation (recs)
+
+- **Recs are updated for the new model.** Reconcile (1) order-derived positions vs PMS position store; (2) PMS-built cash vs balance_changes + order impact (sum of balance_changes per account/book/asset + order-derived trade legs); (3) symbol mapping in sync with broker. Document which recs run where and how often. See **docs/pms/PMS_DATA_MODEL.md** (Reconciliation for the new model).
+
+### 7.2 Double-counting
+
+- **Not an issue.** OMS **balance sync to Postgres `balances` is disabled**. **balance_changes** is populated **only from balanceUpdate** events. Per Binance API (**docs/BINANCE_API_RULES.md** §1.1), **balanceUpdate** is triggered by deposits, withdrawals, and transfers — **not** by trades (trades trigger `outboundAccountPosition`). Observed in tests: balance_changes is only used for deposit/withdrawal operations. So trade-related cash is applied **only** from the orders table; no double-counting.
+
+### 7.3 Initial balance
+
+- When no **balance_changes** records have been received from the broker (e.g. account pre-dates recording or testnet with no deposits), **initial balance** is established by **manual booking** or **reconciliation (recs)** entries: e.g. insert balance_changes with change_type `adjustment` or `initial` and the chosen book. If no balance_change records exist from the broker, initial balance is set via recs/manual entry.
+
+### 7.4 Account vs book
+
+- **Broker-fed data** has no book. **balance_changes** has a **book** column. Broker-fed records (from balanceUpdate) use a **default cash book** (e.g. `__default__` or configurable). To move cash to strategy books, **book change records** are used: manual (or admin) entries that debit the default book and credit the target book for the same asset. So: (1) broker deposit → balance_change with book = default; (2) operator books a transfer from default to book A → balance_change (or equivalent) debiting default, crediting book A. See **docs/pms/PMS_DATA_MODEL.md** (Account vs book).
