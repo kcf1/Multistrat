@@ -112,7 +112,7 @@ Document exact value format in PMS code for PnL/margin keys.
 
 **One granular store, grouping on request:**
 
-- PMS maintains **one granular store** at a fixed grain: **(account_id, book, symbol)**. One row per (account, book, symbol) with **open_qty** (signed: positive = long, negative = short), **position_side** ('long' | 'short' | 'flat' — net long/short indicator), entry_avg, realized_pnl, unrealized_pnl, etc. This is **derived from orders** (which have `book`) and updated by PMS after each calculation cycle (or incrementally on fill).
+- PMS maintains **one granular store** at a fixed grain: **(account_id, book, symbol)**. One row per (account, book, symbol) with **open_qty** (signed: positive = long, negative = short), **position_side** ('long' | 'short' | 'flat' — net long/short indicator), entry_avg, mark_price, notional, unrealized_pnl. This is **derived from orders** (which have `book`) and updated by PMS after each calculation cycle.
 - **Different views** (by symbol, by book/symbol, by broker/symbol) are **computed on request** — either by SQL `GROUP BY` on the granular table(s), or by the PMS/API reading the granular table and returning grouped results. No need to pre-materialize each view unless one is very hot.
 - **PMS writes tables only** (no SQL VIEWs as the primary output). Full valuation needs mark price (external), so PMS must compute and write. Optional: define DB VIEWs **on top of** PMS-written tables for simple groupings (e.g. `valuation_by_symbol`).
 
@@ -121,10 +121,36 @@ Document exact value format in PMS code for PnL/margin keys.
 | | Orders table (OMS) | Granular store (PMS) |
 |--|--------------------|----------------------|
 | **Grain** | One row per order | One row per (account_id, book, symbol) |
-| **Content** | Order fields (qty, price, status, book, broker, …) | Aggregated state (open_qty signed, position_side, entry_avg, realized_pnl, unrealized_pnl) |
+| **Content** | Order fields (qty, price, status, book, broker, …) | Aggregated state (open_qty signed, position_side, entry_avg, mark_price, notional, unrealized_pnl) |
 | **Purpose** | Audit trail, source of truth for “what happened” | Current state for fast reads and on-demand grouping |
 
 Orders = ledger; granular store = materialized position/snapshot written by PMS after calculations.
+
+### 6.1 Positions table (PMS write schema)
+
+PMS **writes** the **positions** table. Grain: **(account_id, book, symbol)**. One row per (account, book, symbol); UPSERT by unique (account_id, book, symbol). Implemented in `pms/granular_store.py` (`write_pms_positions`).
+
+| Column | Type | Nullable | Description |
+|--------|------|----------|-------------|
+| **id** | BIGSERIAL | NOT NULL | Primary key (surrogate). |
+| **account_id** | TEXT | NOT NULL | Broker account id (same semantics as `orders.account_id`). |
+| **book** | TEXT | NOT NULL | Strategy/book identifier (default `''`). |
+| **symbol** | TEXT | NOT NULL | Trading symbol (e.g. BTCUSDT). |
+| **open_qty** | NUMERIC(36,18) | NOT NULL | Signed net quantity: positive = long, negative = short; default 0. |
+| **position_side** | TEXT | NOT NULL | `'long'` \| `'short'` \| `'flat'`; default `'flat'`. |
+| **entry_avg** | NUMERIC(36,18) | NULL | Cost basis of **open** quantity only (FIFO). |
+| **mark_price** | NUMERIC(36,18) | NULL | Mark price used to compute unrealized_pnl (from mark price provider). |
+| **notional** | NUMERIC(36,18) | NULL | Position notional value (e.g. open_qty × mark_price). |
+| **unrealized_pnl** | NUMERIC(36,18) | NOT NULL | Unrealized PnL when open_qty ≠ 0; default 0. |
+| **updated_at** | TIMESTAMPTZ | NULL | Last update timestamp. |
+
+**Indexes:**
+
+- **UNIQUE** `uq_positions_account_book_symbol` on `(account_id, book, symbol)` — used for UPSERT conflict target.
+- **INDEX** `ix_positions_account_id` on `(account_id)`.
+- **INDEX** `ix_positions_symbol` on `(symbol)`.
+
+**Note:** There is no `realized_pnl` column (dropped in migration i9j0k1l2m3n4). Realized PnL is not stored in this table in the current implementation.
 
 ---
 
@@ -150,21 +176,63 @@ Orders = ledger; granular store = materialized position/snapshot written by PMS 
 
 ## 8. Postgres Schema (Reads & Writes)
 
-**PMS reads** (no schema ownership; from OMS or reference):
+PMS does **not** own the read tables; they are populated by OMS (or reference data). PMS **owns** the **positions** table (see §6.1 for full write schema).
 
-- **accounts** — id, name, broker, config (for account list and config). **Core.**
-- **orders** — **Primary data source** for positions (no fills table). Filter by status **partially_filled**, **filled**; compute **signed net** per (account_id, book, symbol): open_qty = sum(BUY executed_qty) − sum(SELL executed_qty); **position_side** = 'long' | 'short' | 'flat'; **entry_avg** = cost basis of **open** quantity only (FIFO). PMS does not read OMS Redis positions. **Core.**
-- **balances** — Current balances per account/asset (synced by OMS). **Cash** stays here; not in positions table. **Core** (for margin).
-- **symbols** (reference) — **(Optional)** symbol, base_asset, quote_asset, tick_size, lot_size, etc. PMS reads for base/quote and validation.
-- **book_allocations** (or equivalent) — **(Optional)** (account_id, book, asset, amount_or_share). Provided via interface; managed outside; PMS reads only.
+### 8.1 Read schema (tables PMS reads)
 
-**PMS writes:**
+#### orders (OMS-owned; primary data source for positions)
 
-- **positions** — PMS granular store table (PMS-owned; not the old OMS positions table). account_id, book, symbol, **open_qty** (signed), **position_side** ('long' | 'short' | 'flat'), entry_avg, mark_price, notional, unrealized_pnl, updated_at. Grain = (account_id, book, symbol). Updated after each calculation cycle. **Core.**
-- **Redis** `pnl:{account_id}`, `margin:{account_id}` — **Core.**
-- **pnl_snapshots** — **(Optional)** account_id, book (optional), realized_pnl, unrealized_pnl, mark_price_used, timestamp.
-- **margin_snapshots** — **(Optional)** account_id, total_margin, available_balance, timestamp.
-- **book_cash** — **(Optional)** If using internal ledger for cash by book: (account_id, book, asset) → balance. Updated on fills.
+PMS derives positions **only** from this table (no fills table). Filter: `status IN ('partially_filled', 'filled')` and `COALESCE(executed_qty, 0) > 0`. Order by `created_at ASC` for FIFO. Implemented in `pms/reads.py` (`query_orders_for_positions`).
+
+| Column | Type | PMS usage |
+|--------|------|-----------|
+| **account_id** | TEXT | Broker account id; grain for position derivation. |
+| **book** | TEXT | Strategy/book; grain for position derivation. |
+| **symbol** | TEXT | Trading symbol; grain for position derivation. |
+| **side** | TEXT | BUY or SELL; sign of executed_qty for net. |
+| **executed_qty** | NUMERIC(36,18) | Used as executed quantity for position (exposed as `executed_quantity` in reads). |
+| **price** | NUMERIC(36,18) | Executed (average fill) price; used for FIFO entry_avg. |
+| **created_at** | TIMESTAMPTZ | Order time; used for FIFO ordering. |
+| **status** | TEXT | Filter: `partially_filled`, `filled` only. |
+
+Other columns (internal_id, broker, broker_order_id, order_type, quantity, limit_price, etc.) exist but are not used by PMS for position derivation. See **docs/oms/OMS_ORDERS_DB_FIELDS.md** for full OMS schema.
+
+#### accounts (OMS-owned)
+
+Used to know which accounts exist; optional for scoping. **Note:** `accounts.id` is BIGINT (PK); `accounts.account_id` is TEXT (broker account id). Balances table uses `account_id` as FK to `accounts.id` (bigint).
+
+| Column | Type | PMS usage |
+|--------|------|-----------|
+| **id** | BIGINT | Primary key; used when querying balances by account (balances.account_id → accounts.id). |
+| **account_id** | TEXT | Broker account id; matches `orders.account_id` and `positions.account_id`. |
+| **name** | TEXT | Display name. |
+| **broker** | TEXT | e.g. `binance`. |
+| **config** | JSONB | Optional config. |
+
+#### balances (OMS-owned)
+
+Current balance per account/asset. **Cash** stays here; not in positions table. PMS can read for margin or capital; current implementation derives positions from **orders only**. Implemented in `pms/reads.py` (`query_balances`). **Note:** `balances.account_id` is FK to `accounts.id` (BIGINT), not the broker account_id string.
+
+| Column | Type | PMS usage |
+|--------|------|-----------|
+| **account_id** | BIGINT | FK to accounts.id (use accounts.id when filtering by account). |
+| **asset** | TEXT | Asset symbol (e.g. USDT, BTC). |
+| **available** | NUMERIC(36,18) | Available balance. |
+| **locked** | NUMERIC(36,18) | Locked balance. |
+| **updated_at** | TIMESTAMPTZ | Last update. |
+
+#### Optional read tables
+
+- **symbols** (reference) — **(Optional)** symbol, base_asset, quote_asset, tick_size, lot_size, etc. PMS reads for base/quote and validation. Not implemented in current codebase.
+- **book_allocations** — **(Optional)** (account_id, book, asset, amount_or_share). Provided via interface; managed outside; PMS reads only. Not implemented.
+
+### 8.2 Write schema (tables PMS writes)
+
+- **positions** — Full column list and indexes in **§6.1**. Grain (account_id, book, symbol); UPSERT by unique (account_id, book, symbol). **Core.**
+- **Redis** `pnl:{account_id}`, `margin:{account_id}` — **(Optional / not yet implemented)** Intended for Admin/UI; current PMS does not write these keys.
+- **pnl_snapshots** — **(Optional)** account_id, book (optional), realized_pnl, unrealized_pnl, mark_price_used, timestamp. Not implemented.
+- **margin_snapshots** — **(Optional)** account_id, total_margin, available_balance, timestamp. Not implemented.
+- **book_cash** — **(Optional)** If using internal ledger for cash by book: (account_id, book, asset) → balance. Not implemented.
 
 ---
 

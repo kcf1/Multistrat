@@ -6,7 +6,7 @@ Plans and architecture for the **Portfolio Management System (PMS)**. PMS is the
 
 | Document | Purpose |
 |----------|--------|
-| **PMS_ARCHITECTURE.md** | Data flow, **granular store** (one table, grain account/book/symbol; signed open_qty, position_side), **views on request**, **reference data** (symbols, allocations), **capital by book**, mark price interface, Pydantic, account/session. |
+| **PMS_ARCHITECTURE.md** | Data flow, **granular store** (one table, grain account/book/symbol; signed open_qty, position_side), **views on request**, **reference data** (symbols, allocations), **capital by book**, mark price interface, Pydantic, account/session. **§6.1** = positions table (write schema); **§8** = Postgres read/write schema (orders, accounts, balances columns; positions pointer). |
 | **PMS_DATA_FLOWS.md** | Periodic rebuild from orders, event-driven options, and data fixes (position drift repairs). |
 | **PMS_DATA_MODEL.md** | Symbol vs asset, **symbols table**, building positions (with **book**), cash vs positions, **capital by book**, allocations (interface, managed outside), reconciliation. |
 | **POSITION_KEEPER_DESIGN.md** | How PMS uses the **orders** table to compute and reconcile positions; repairs; task checklist mapping. |
