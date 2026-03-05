@@ -215,7 +215,7 @@ Historical deltas per (account_id, asset, **book**). Used by PMS to **build cash
 |--------|------|-----------|
 | **account_id** | BIGINT | FK to accounts.id; grain for cash build. |
 | **asset** | TEXT | Asset symbol (e.g. USDT, BTC). |
-| **book** | TEXT | Book for this change; default cash book for broker-fed records. |
+| **book** | TEXT | Book for this change; constant `"default"` for broker-fed records. |
 | **change_type** | TEXT | deposit, withdrawal, transfer, adjustment, snapshot. |
 | **delta** | NUMERIC | Amount changed (signed). |
 | **event_time** | TIMESTAMPTZ | Ordering and reconciliation. |

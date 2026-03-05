@@ -202,6 +202,9 @@ def _normalize_event_time(event_time: Any):
     return datetime.now(timezone.utc)
 
 
+DEFAULT_CASH_BOOK = "default"
+
+
 def write_balance_change(
     pg_connect: Union[str, Callable[[], Any]],
     account_id_pk: int,
@@ -214,10 +217,12 @@ def write_balance_change(
     balance_after: Optional[Union[Decimal, float]] = None,
     broker_event_id: Optional[str] = None,
     payload: Optional[Dict[str, Any]] = None,
+    book: Optional[str] = None,
 ) -> None:
     """
     Insert one row into balance_changes. Call from account callback when
     processing balanceUpdate events (delta from payload.d or balance dict).
+    book: default cash book for broker-fed records; use constant DEFAULT_CASH_BOOK if None.
     """
     def _num(v: Any) -> Optional[Decimal]:
         if v is None:
@@ -233,14 +238,15 @@ def write_balance_change(
     conn, we_opened = _pg_conn(pg_connect)
     try:
         cur = conn.cursor()
+        book_val = (book or DEFAULT_CASH_BOOK)[:255] if (book or DEFAULT_CASH_BOOK) else DEFAULT_CASH_BOOK
         cur.execute(
             """
             INSERT INTO balance_changes (
-                account_id, asset, change_type, delta,
+                account_id, asset, book, change_type, delta,
                 balance_before, balance_after, event_type, broker_event_id,
                 event_time, created_at, payload
             ) VALUES (
-                %(account_id)s, %(asset)s, %(change_type)s, %(delta)s,
+                %(account_id)s, %(asset)s, %(book)s, %(change_type)s, %(delta)s,
                 %(balance_before)s, %(balance_after)s, %(event_type)s, %(broker_event_id)s,
                 %(event_time)s, NOW(), %(payload)s
             )
@@ -248,6 +254,7 @@ def write_balance_change(
             _pg_params({
                 "account_id": account_id_pk,
                 "asset": asset[:255] if asset else "",
+                "book": book_val,
                 "change_type": change_type[:64] if change_type else "adjustment",
                 "delta": _num(delta) or Decimal("0"),
                 "balance_before": _num(balance_before),

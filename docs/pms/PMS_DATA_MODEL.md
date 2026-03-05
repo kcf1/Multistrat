@@ -64,7 +64,7 @@ OMS does **not** expose a Postgres **positions** table in Phase 2. PMS **derives
 
 **Broker-fed data** (account events) has no notion of **book**. To support cash by book:
 
-- **balance_changes** has a **book** column. Records written from broker **balanceUpdate** events use a **default cash book** (e.g. `__default__` or configurable). So broker-fed deposit/withdrawal/transfer is attributed to that default book.
+- **balance_changes** has a **book** column. Records written from broker **balanceUpdate** events use the constant **default cash book** `"default"`. So broker-fed deposit/withdrawal/transfer is attributed to that default book.
 - **Strategy books:** Cash is moved from the default book to strategy books via **book change records**: manual (or admin) entries in balance_changes (or a dedicated book-transfer table) that debit the default book and credit the target book for the same asset. So: (1) broker deposit → balance_change with book = default; (2) operator books a “transfer” from default book to book A → balance_change (or equivalent) debiting default, crediting book A.
 
 This way, all cash is still built from orders + balance_changes with a consistent (account_id, book, asset) grain.
@@ -134,7 +134,7 @@ Document which reconciliations are implemented, where (PMS job, script, admin to
 | **Cash source** | Build in PMS from **orders** (trade impact) + **balance_changes** (deposit/withdrawal/transfer/adjustment). Double-entry; symbol→base/quote from symbols table. OMS balance sync disabled. |
 | **Double-counting** | Not an issue: balance_changes is only from balanceUpdate (deposit/withdrawal/transfer); trades are not in balance_changes. |
 | **Initial balance** | Manual booking or recs (balance_changes adjustments) when no balance_change records from broker. |
-| **Account vs book** | balance_changes has **book** column; default cash book for broker-fed records; book change records move cash from default to strategy books. |
+| **Account vs book** | balance_changes has **book** column; constant `"default"` for broker-fed records; book change records move cash from default to strategy books. |
 | **Symbol statics** | **OMS** (or reference sync) manages **symbols** table; **PMS** reads for base/quote. |
 | **Order symbol vs asset** | Derive base/quote from symbol (symbols table) before posting cash legs. |
 | **Building positions** | PMS derives positions from **orders only** (filter partial/fully filled; no fills table), by account, **book**, symbol. |

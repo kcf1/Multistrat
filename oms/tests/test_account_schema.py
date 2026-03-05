@@ -92,6 +92,20 @@ def _indexes_exist(conn, expected_index_names):
     return found >= set(expected_index_names)
 
 
+def _table_has_columns(conn, table_name, column_names):
+    """Return True if table has all of the given column names."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            """,
+            (table_name,),
+        )
+        found = {r[0] for r in cur.fetchall()}
+    return set(column_names) <= found
+
+
 ACCOUNT_TABLES = (
     "accounts",
     "balances",
@@ -127,6 +141,22 @@ class TestAccountSchemaCreation:
         db_conn.commit()
         assert _indexes_exist(db_conn, ACCOUNT_INDEXES), (
             "Expected account indexes missing. Run: alembic upgrade head"
+        )
+
+    def test_balance_changes_has_book_column(self, db_conn):
+        """After upgrading to head, balance_changes has book column (12.2.11)."""
+        _run_alembic("upgrade", "head")
+        db_conn.commit()
+        assert _table_has_columns(db_conn, "balance_changes", ["book"]), (
+            "balance_changes missing book column. Run: alembic upgrade head"
+        )
+
+    def test_symbols_table_exists_after_upgrade(self, db_conn):
+        """After upgrading to head, symbols table exists (12.2.14)."""
+        _run_alembic("upgrade", "head")
+        db_conn.commit()
+        assert _tables_exist(db_conn, ("symbols",)), (
+            "symbols table missing. Run: alembic upgrade head"
         )
 
     def test_upgrade_downgrade_account_revision(self, db_conn):

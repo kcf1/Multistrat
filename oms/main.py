@@ -18,6 +18,7 @@ from oms.log import logger
 from oms.account_flow import make_account_callback
 from oms.account_repair import run_all_account_repairs
 from oms.account_sync import get_account_pk_by_broker_and_id, sync_accounts_to_postgres, write_balance_change
+from oms.symbol_sync import sync_symbols_from_binance
 from oms.cleanup import set_account_key_ttl
 from oms.cancel_consumer import ensure_cancel_requested_consumer_group
 from oms.cleanup import trim_oms_streams
@@ -469,6 +470,7 @@ def main() -> int:
                 event_type or "balanceUpdate",
                 event_time,
                 payload=payload,
+                book="default",
             )
         except Exception as e:
             logger.exception("write_balance_change failed: {}", e)
@@ -486,6 +488,15 @@ def main() -> int:
     )
     logger.info("Account listeners started for brokers={}", registry.broker_names())
     wait_for_account_listeners_connected(registry)
+
+    # One-time symbol sync at startup (symbols are mostly static)
+    if database_url and "binance" in registry.broker_names():
+        binance_base_url = _env("BINANCE_BASE_URL") or "https://testnet.binance.vision"
+        try:
+            n = sync_symbols_from_binance(binance_base_url, database_url, broker="binance")
+            logger.info("Symbol sync from Binance: upserted %s symbol(s)", n)
+        except Exception as e:
+            logger.warning("Symbol sync at startup failed (continuing): %s", e)
 
     shutdown = [False]
 

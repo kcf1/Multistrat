@@ -57,7 +57,7 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
   - **Current state only:** Stores current balance per asset; historical changes tracked in `balance_changes` table.
 
 - **balance_changes** (historical tracking)  
-  - `id` (PK), `account_id` (FK), `asset`, **`book`** (TEXT; default cash book for broker-fed; book change records move cash to strategy books), `change_type` (deposit, withdrawal, transfer, adjustment, snapshot), `delta` (NUMERIC), `balance_before` (NUMERIC NULL), `balance_after` (NUMERIC NULL), `event_type`, `broker_event_id` (TEXT NULL), `event_time` (TIMESTAMPTZ), `created_at` (TIMESTAMPTZ), `payload` (JSONB NULL).  
+  - `id` (PK), `account_id` (FK), `asset`, **`book`** (TEXT; constant `"default"` for broker-fed; book change records move cash to strategy books), `change_type` (deposit, withdrawal, transfer, adjustment, snapshot), `delta` (NUMERIC), `balance_before` (NUMERIC NULL), `balance_after` (NUMERIC NULL), `event_type`, `broker_event_id` (TEXT NULL), `event_time` (TIMESTAMPTZ), `created_at` (TIMESTAMPTZ), `payload` (JSONB NULL).  
   - **Historical record:** Deposit/withdrawal/transfer only (from **balanceUpdate**; per Binance API, balanceUpdate is not triggered by trades). Populated via main's `on_balance_change` callback. Used by PMS with orders to **build cash** (build-from-order model; see **docs/pms/PMS_DATA_MODEL.md**).  
   - Indexes: `(account_id, asset, event_time)`, `(account_id, change_type)`, `event_time`.
 
@@ -113,7 +113,7 @@ Binance **cancel_order** returns same shape as query.
 | `id` | BIGSERIAL PK | internal | |
 | `account_id` | FK → accounts | account event | |
 | `asset` | TEXT | balanceUpdate / outboundAccountPosition | Asset symbol (e.g. USDT, BTC) |
-| **`book`** | TEXT | config / write_balance_change | Book for this change; **default cash book** for broker-fed records; book change records move cash to strategy books (see **docs/pms/PMS_DATA_MODEL.md**) |
+| **`book`** | TEXT | write_balance_change | Book for this change; broker-fed records use constant `"default"`; book change records move cash to strategy books (see **docs/pms/PMS_DATA_MODEL.md**) |
 | `change_type` | TEXT | derived | `deposit`, `withdrawal`, `transfer`, `adjustment`, `snapshot` |
 | `delta` | NUMERIC | balanceUpdate `d` field | Amount changed: positive for deposit, negative for withdrawal |
 | `balance_before` | NUMERIC NULL | calculated | Balance before change (optional, for audit) |
@@ -448,11 +448,11 @@ BINANCE_API_SECRET=
 
 **Build-from-order cash (balance_changes book, symbols, default cash book):**
 
-- [ ] **12.2.11** **balance_changes.book column** (Alembic): add migration that adds column `book` (TEXT, nullable or server_default=`'__default__'`) to `balance_changes`. Used so broker-fed rows use a default cash book; book change records move cash to strategy books. See **docs/pms/PMS_DATA_MODEL.md**. **Unit test:** schema test in `oms/tests/test_account_schema.py` includes `book` in balance_changes columns.
-- [ ] **12.2.12** **write_balance_change with book** (`oms/account_sync.py`): add parameter `book: Optional[str] = None` (default e.g. `"__default__"`) to `write_balance_change`; include `book` in INSERT into `balance_changes`. **Unit test:** `oms/tests/test_account_sync.py` — update `test_write_balance_change_executes_insert` to pass `book` and assert INSERT includes `book`.
-- [ ] **12.2.13** **Default cash book in on_balance_change** (`oms/main.py`): in `_on_balance_change`, resolve default cash book from env `OMS_DEFAULT_CASH_BOOK` (or constant `"__default__"`); pass it as `book` argument to `write_balance_change(...)`. Document in `.env.example` or config.
-- [ ] **12.2.14** **Symbols table** (Alembic): add migration that creates table `symbols` with columns e.g. `symbol` (TEXT PK or UNIQUE), `base_asset`, `quote_asset` (TEXT), optional `tick_size`, `lot_size`, `min_qty`, `product_type`, `broker`, `updated_at`. **Managed by OMS** (or reference sync); PMS reads for base/quote when building cash from orders. See **docs/pms/PMS_DATA_MODEL.md**.
-- [ ] **12.2.15** **Symbol sync from broker** (`oms/symbol_sync.py` or similar): implement function that calls Binance `GET /api/v3/exchangeInfo` (or futures equivalent), parses symbols, and UPSERTs into `symbols` (base_asset, quote_asset, etc.). Optional: seed from config for symbols not from broker. Invoked from OMS job or one-off/periodic script. **Unit test:** mock HTTP; verify UPSERT to Postgres.
+- [x] **12.2.11** **balance_changes.book column** (Alembic): add migration that adds column `book` (TEXT, nullable or server_default=`'default'`) to `balance_changes`. Used so broker-fed rows use the default cash book; book change records move cash to strategy books. See **docs/pms/PMS_DATA_MODEL.md**. **Unit test:** schema test in `oms/tests/test_account_schema.py` includes `book` in balance_changes columns.
+- [x] **12.2.12** **write_balance_change with book** (`oms/account_sync.py`): add parameter `book: Optional[str] = None` (default constant `"default"`) to `write_balance_change`; include `book` in INSERT into `balance_changes`. **Unit test:** `oms/tests/test_account_sync.py` — update `test_write_balance_change_executes_insert` to pass `book` and assert INSERT includes `book`.
+- [x] **12.2.13** **Default cash book in on_balance_change** (`oms/main.py`): in `_on_balance_change`, pass constant `"default"` as `book` argument to `write_balance_change(...)` (no env var).
+- [x] **12.2.14** **Symbols table** (Alembic): add migration that creates table `symbols` with columns e.g. `symbol` (TEXT PK or UNIQUE), `base_asset`, `quote_asset` (TEXT), optional `tick_size`, `lot_size`, `min_qty`, `product_type`, `broker`, `updated_at`. **Managed by OMS** (or reference sync); PMS reads for base/quote when building cash from orders. See **docs/pms/PMS_DATA_MODEL.md**.
+- [x] **12.2.15** **Symbol sync from broker** (`oms/symbol_sync.py` or similar): implement function that calls Binance `GET /api/v3/exchangeInfo` (or futures equivalent), parses symbols, and UPSERTs into `symbols` (base_asset, quote_asset, etc.). Optional: seed from config for symbols not from broker. Invoked from OMS job or one-off/periodic script. **Unit test:** mock HTTP; verify UPSERT to Postgres.
 
 ### 12.3 PMS (build backwards: calculations → reads → writes → loop)
 

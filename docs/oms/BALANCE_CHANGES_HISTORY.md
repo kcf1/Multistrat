@@ -13,7 +13,7 @@ balance_changes
 ├── id (BIGSERIAL PK)
 ├── account_id (FK → accounts)
 ├── asset (TEXT)                    -- Asset symbol (e.g. USDT, BTC)
-├── book (TEXT)                     -- Book for this change; default cash book for broker-fed; book change records move cash to strategy books
+├── book (TEXT)                     -- Book for this change; constant "default" for broker-fed; book change records move cash to strategy books
 ├── change_type (TEXT)              -- deposit, withdrawal, transfer, adjustment, snapshot
 ├── delta (NUMERIC)                 -- Amount changed: positive for deposit, negative for withdrawal
 ├── balance_before (NUMERIC NULL)   -- Balance before change (optional, for audit)
@@ -137,7 +137,7 @@ LIMIT 100;
 
 - When **balance sync is enabled**, `balances` stores current balance per asset (UPSERT by `account_id`, `asset`).
 - When **balance sync is disabled** (build-from-order model), PMS **builds cash** from **orders** + **balance_changes**; `balances` is not the source for PMS. See **docs/pms/PMS_DATA_MODEL.md**.
-- **Broker-fed** rows in `balance_changes` use a **default cash book** (e.g. `__default__`). **Book change records** (manual or recs) move cash from the default book to strategy books.
+- **Broker-fed** rows in `balance_changes` use the constant **default cash book** `"default"`. **Book change records** (manual or recs) move cash from the default book to strategy books.
 
 ## Implementation Notes
 
