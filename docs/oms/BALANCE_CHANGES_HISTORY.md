@@ -4,6 +4,8 @@
 
 The `balance_changes` table provides **historical tracking** of balance modifications from **deposits, withdrawals, transfers, and adjustments** only. It is **not** populated from trade-related broker events: per Binance API (see **docs/BINANCE_API_RULES.md** §1.1), **balanceUpdate** is triggered by deposits, withdrawals, and transfers — **not** by trades (trades trigger `outboundAccountPosition`). So `balance_changes` contains only non-trade movements; PMS uses it together with **orders** to build cash (no double-counting). When balance sync is disabled, current **cash** is derived in **PMS** from orders + balance_changes; the `balances` table may be unused.
 
+**Cash is multi-asset.** Neither `balance_changes` nor PMS cash (e.g. `book_cash`) assume a single “cash” asset (e.g. USDT). Each row has an **asset** (BTC, USDT, ETH, BNB, etc.); Binance `balanceUpdate` events carry one asset per event. PMS builds cash at grain (account_id, book, **asset**) across all assets.
+
 ## Table Design
 
 ### Schema
@@ -157,6 +159,20 @@ LIMIT 100;
 - Periodic REST snapshots (`outboundAccountPosition` or `get_account_snapshot`) can be written to `balance_changes` with `change_type='snapshot'`
 - Helps identify gaps or discrepancies in event stream
 - Can calculate expected balance: `SUM(delta) FROM balance_changes WHERE account_id=X AND asset=Y`
+
+## Implementation history (git)
+
+Relevant commits for `balance_changes` and the build-from-order cash model:
+
+| Commit | Date | Change |
+|--------|------|--------|
+| **5d6166b** | (earlier) | Phase 2 plan: historical balance tracking in `balance_changes`; Binance account listener unified events. |
+| **91e6050** | 2026-02-19 | Migration `c3d4e5f6a7b8`: created `balance_changes` table (account_id, asset, change_type, delta, …); balance update callbacks. |
+| **550c0b6** | (after) | Optional `on_balance_change` callback; write to `balance_changes`; margin_snapshots removal. |
+| **462a49c** | 2026-02-27 | Build-from-order cash tasks in plan: balance_changes.book, symbols, **optional** symbol fallback (e.g. *USDT). |
+| **ead6c5d** | 2026-03-06 | `book` column on balance_changes; default cash book `"default"`; `write_balance_change(..., book=...)`. |
+
+The **schema has always been multi-asset** (`balance_changes.asset`). The only USDT-specific wording was the optional symbol fallback in task 12.3.10 (*USDT → base + USDT); that fallback should be generalized (e.g. parse quote from symbol suffix) so cash is not assumed to be USDT-only.
 
 ## References
 
