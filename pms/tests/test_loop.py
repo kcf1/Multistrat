@@ -28,44 +28,38 @@ class TestEnrichPositionsWithMarkPrices:
                 return type('R', (), {'prices': {}})()
         assert enrich_positions_with_mark_prices([], Noop()) == []
 
-    def test_sets_mark_notional_unrealized(self):
+    def test_sets_usd_value_from_provider(self):
         positions = [
             DerivedPosition(
                 broker="",
                 account_id="a", book="", asset="BTCUSDT",
-                open_qty=1.0, position_side="long", entry_avg=50000.0,
-                mark_price=None, notional=None, unrealized_pnl=0.0,
+                open_qty=1.0, position_side="long", usd_value=None,
             ),
         ]
         provider = FakeMarkPriceProvider({"BTCUSDT": 51000})
         out = enrich_positions_with_mark_prices(positions, provider)
         assert len(out) == 1
-        assert out[0].mark_price == 51000.0
-        assert out[0].notional == 51000.0
-        assert out[0].unrealized_pnl == 1000.0  # (51000 - 50000) * 1
+        assert out[0].usd_value == 51000.0
 
-    def test_flat_position_keeps_zero_unrealized(self):
+    def test_flat_position_gets_usd_value(self):
         positions = [
             DerivedPosition(
                 broker="",
                 account_id="a", book="", asset="ETHUSDT",
-                open_qty=0.0, position_side="flat", entry_avg=None,
-                mark_price=None, notional=None, unrealized_pnl=0.0,
+                open_qty=0.0, position_side="flat", usd_value=None,
             ),
         ]
         provider = FakeMarkPriceProvider({"ETHUSDT": 3000})
         out = enrich_positions_with_mark_prices(positions, provider)
         assert len(out) == 1
-        assert out[0].mark_price == 3000.0
-        assert out[0].notional is None
-        assert out[0].unrealized_pnl == 0.0
+        assert out[0].usd_value == 3000.0
 
 
 class TestEnrichPositionsWithUsdFromAssets:
-    """Stables-first USD enrichment: assets with usd_price get notional; others stay None."""
+    """Stables-first USD enrichment: assets with usd_price get usd_value; others stay None."""
 
     @patch("pms.loop.query_assets_usd_config")
-    def test_sets_notional_for_stables_only(self, mock_assets_config):
+    def test_sets_usd_value_for_stables_only(self, mock_assets_config):
         from decimal import Decimal
         mock_assets_config.return_value = {
             "USDT": {"usd_price": Decimal("1"), "usd_symbol": None},
@@ -75,23 +69,19 @@ class TestEnrichPositionsWithUsdFromAssets:
             DerivedPosition(
                 broker="",
                 account_id="a", book="", asset="USDT",
-                open_qty=10000.0, position_side="long", mark_price=None, notional=None, unrealized_pnl=0.0,
+                open_qty=10000.0, position_side="long", usd_value=None,
             ),
             DerivedPosition(
                 broker="",
                 account_id="a", book="", asset="BTC",
-                open_qty=0.5, position_side="long", mark_price=None, notional=None, unrealized_pnl=0.0,
+                open_qty=0.5, position_side="long", usd_value=None,
             ),
         ]
         out = enrich_positions_with_usd_from_assets(lambda: None, positions)
         assert len(out) == 2
         by_asset = {p.asset: p for p in out}
-        assert by_asset["USDT"].mark_price == 1.0
-        assert by_asset["USDT"].notional == 10000.0
-        assert by_asset["USDT"].unrealized_pnl == 0.0
-        assert by_asset["BTC"].mark_price is None
-        assert by_asset["BTC"].notional is None
-        assert by_asset["BTC"].unrealized_pnl == 0.0
+        assert by_asset["USDT"].usd_value == 1.0
+        assert by_asset["BTC"].usd_value is None
 
     @patch("pms.loop.query_assets_usd_config")
     def test_empty_positions_returns_empty(self, mock_assets_config):
@@ -117,10 +107,6 @@ class TestRunOneTick:
                 asset="USDT",
                 open_qty=50000.0,
                 position_side="long",
-                entry_avg=None,
-                mark_price=None,
-                notional=None,
-                unrealized_pnl=0.0,
             ),
         ]
         mock_assets_config.return_value = {
@@ -145,9 +131,7 @@ class TestRunOneTick:
         assert p.asset == "USDT"
         assert p.open_qty == 50000.0
         assert p.position_side == "long"
-        assert p.mark_price == 1.0
-        assert p.notional == 50000.0
-        assert p.unrealized_pnl == 0.0
+        assert p.usd_value == 1.0
 
     @patch("pms.loop.write_pms_positions")
     @patch("pms.loop.derive_positions_from_orders_and_balance_changes")

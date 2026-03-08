@@ -22,8 +22,8 @@ def enrich_positions_with_usd_from_assets(
     positions: List[DerivedPosition],
 ) -> List[DerivedPosition]:
     """
-    Set mark_price, notional, unrealized_pnl for positions whose asset has usd_price in assets table (stables-first).
-    Assets with only usd_symbol (non-stables) are left with mark_price/notional None; follow-up can use mark provider.
+    Set usd_value for positions whose asset has usd_price in assets table (stables-first).
+    Assets with only usd_symbol (non-stables) are left with usd_value None; E.3 can fill later.
     """
     if not positions:
         return []
@@ -33,22 +33,15 @@ def enrich_positions_with_usd_from_assets(
         asset = (p.asset or "").strip()
         cfg = config.get(asset) if asset else None
         usd_price = cfg.get("usd_price") if cfg else None
-        mark_f: Optional[float] = None
-        notional: Optional[float] = None
-        unrealized: float = 0.0
+        usd_f: Optional[float] = None
         if usd_price is not None and abs(p.open_qty) > 1e-15:
             try:
-                mark_f = float(usd_price)
-                notional = p.open_qty * mark_f
+                usd_f = float(usd_price)
             except (TypeError, ValueError):
                 pass
         out.append(
             p.model_copy(
-                update={
-                    "mark_price": mark_f,
-                    "notional": notional,
-                    "unrealized_pnl": unrealized,
-                }
+                update={"usd_value": usd_f}
             )
         )
     return out
@@ -59,10 +52,8 @@ def enrich_positions_with_mark_prices(
     mark_provider: MarkPriceProvider,
 ) -> List[DerivedPosition]:
     """
-    Fetch mark prices for position symbols and set mark_price, notional, unrealized_pnl.
-
-    When open_qty != 0: notional = open_qty * mark_price, unrealized_pnl = (mark_price - entry_avg) * open_qty.
-    Flattened positions (open_qty == 0) keep unrealized_pnl 0.
+    Fetch mark prices (per symbol) and set usd_value for positions.
+    Assumes provider returns USD-denominated prices for *USDT pairs. Notional = open_qty * usd_value (derive when needed).
     """
     if not positions:
         return []
@@ -72,20 +63,10 @@ def enrich_positions_with_mark_prices(
     out: List[DerivedPosition] = []
     for p in positions:
         mark = prices.get(p.asset) if prices else None
-        mark_f = float(mark) if mark is not None else None
-        notional: Optional[float] = None
-        unrealized: float = 0.0
-        if mark_f is not None and abs(p.open_qty) > 1e-15:
-            notional = p.open_qty * mark_f
-            if p.entry_avg is not None:
-                unrealized = (mark_f - p.entry_avg) * p.open_qty
+        usd_f = float(mark) if mark is not None else None
         out.append(
             p.model_copy(
-                update={
-                    "mark_price": mark_f,
-                    "notional": notional,
-                    "unrealized_pnl": unrealized,
-                }
+                update={"usd_value": usd_f}
             )
         )
     return out

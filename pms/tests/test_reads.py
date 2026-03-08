@@ -38,7 +38,6 @@ class TestDerivePositionsFromOrders:
         assert pos[0].asset == "BTCUSDT"
         assert pos[0].open_qty == 1.0
         assert pos[0].position_side == "long"
-        assert pos[0].entry_avg == 50000.0
 
     def test_buy_then_sell_flat(self):
         rows = [
@@ -49,7 +48,6 @@ class TestDerivePositionsFromOrders:
         assert len(pos) == 1
         assert pos[0].open_qty == 0.0
         assert pos[0].position_side == "flat"
-        assert pos[0].entry_avg is None
 
     def test_partial_sell_leaves_long(self):
         rows = [
@@ -61,7 +59,6 @@ class TestDerivePositionsFromOrders:
         assert pos[0].open_qty == 2.0
         assert pos[0].position_side == "long"
         # FIFO: remaining 2 from first buy at 40000
-        assert pos[0].entry_avg == 40000.0
 
     def test_short_position(self):
         rows = [
@@ -71,7 +68,6 @@ class TestDerivePositionsFromOrders:
         assert len(pos) == 1
         assert pos[0].open_qty == -10.0
         assert pos[0].position_side == "short"
-        assert pos[0].entry_avg == 0.5
 
     def test_accepts_executed_qty_key(self):
         """When row has executed_qty (DB name), derivation uses it as executed_quantity."""
@@ -90,7 +86,6 @@ class TestDerivePositionsFromOrders:
         pos = derive_positions_from_orders([row])
         assert len(pos) == 1
         assert pos[0].open_qty == 1.25
-        assert pos[0].entry_avg == 55000.0
 
     def test_multiple_groups(self):
         rows = [
@@ -106,7 +101,7 @@ class TestDerivePositionsFromOrders:
         assert by_key[("a2", "BTCUSDT")].open_qty == 0.5
 
     def test_two_buys_at_one_then_one_sell_at_two(self):
-        """2 fake buys at $1, then 1 fake sell at $2 → net long 1, entry_avg $1 (FIFO)."""
+        """2 fake buys at $1, then 1 fake sell at $2 → net long 1 (FIFO)."""
         rows = [
             {"account_id": "acc", "book": "", "symbol": "BTCUSDT", "side": "BUY", "executed_quantity": 1.0, "price": 1.0},
             {"account_id": "acc", "book": "", "symbol": "BTCUSDT", "side": "BUY", "executed_quantity": 1.0, "price": 1.0},
@@ -119,10 +114,10 @@ class TestDerivePositionsFromOrders:
         assert p.asset == "BTCUSDT"
         assert p.open_qty == 1.0
         assert p.position_side == "long"
-        assert p.entry_avg == 1.0  # FIFO: remaining unit from first buy at $1
+        # FIFO: remaining unit from first buy at $1
 
     def test_two_buys_then_three_sells_including_two_at_half(self):
-        """2 buys at $1, 1 sell at $2, then 2 sells at $0.5 → net short 1 at entry_avg $0.5."""
+        """2 buys at $1, 1 sell at $2, then 2 sells at $0.5 → net short 1."""
         rows = [
             {"account_id": "acc", "book": "", "symbol": "BTCUSDT", "side": "BUY", "executed_quantity": 1.0, "price": 1.0},
             {"account_id": "acc", "book": "", "symbol": "BTCUSDT", "side": "BUY", "executed_quantity": 1.0, "price": 1.0},
@@ -137,7 +132,6 @@ class TestDerivePositionsFromOrders:
         assert p.asset == "BTCUSDT"
         assert p.open_qty == -1.0
         assert p.position_side == "short"
-        assert p.entry_avg == 0.5  # short opened at $0.5 (both sells at 0.5 → avg 0.5)
 
 
 class TestQuerySymbolMap:
@@ -388,10 +382,8 @@ class TestDerivePositionsFromOrdersAndBalanceChanges:
         assert by_asset["BTC"].broker == "binance"
         assert by_asset["BTC"].open_qty == 1.0
         assert by_asset["BTC"].position_side == "long"
-        assert by_asset["BTC"].entry_avg == 50000.0
         assert by_asset["USDT"].open_qty == -50000.0
         assert by_asset["USDT"].position_side == "short"
-        assert by_asset["USDT"].entry_avg == 1.0
 
     @patch("pms.reads.query_balance_changes_net_by_account_book_asset")
     @patch("pms.reads.query_symbol_map")
@@ -407,7 +399,6 @@ class TestDerivePositionsFromOrdersAndBalanceChanges:
         assert len(pos) == 2  # BTC and USDT
         by_asset = {p.asset: p for p in pos}
         assert by_asset["BTC"].open_qty == 1.0
-        assert by_asset["BTC"].entry_avg == 50000.0
         assert by_asset["USDT"].open_qty == -50000.0
         assert all(p.asset for p in pos)
         assert all(len(p.asset) > 0 for p in pos)
@@ -428,7 +419,6 @@ class TestDerivePositionsFromOrdersAndBalanceChanges:
         assert pos[0].asset == "USDT"
         assert pos[0].open_qty == 1000.0
         assert pos[0].position_side == "long"
-        assert pos[0].entry_avg is None
 
     @patch("pms.reads.query_balance_changes_net_by_account_book_asset")
     @patch("pms.reads.query_symbol_map")
@@ -446,7 +436,6 @@ class TestDerivePositionsFromOrdersAndBalanceChanges:
         # Order: BTC +0.5, USDT -20000. Deposit: USDT +10000. Net USDT = -20000 + 10000 = -10000
         assert by_asset["USDT"].open_qty == -10000.0
         assert by_asset["BTC"].open_qty == 0.5
-        assert by_asset["BTC"].entry_avg == 40000.0
 
     @patch("pms.reads.query_balance_changes_net_by_account_book_asset")
     @patch("pms.reads.query_symbol_map")

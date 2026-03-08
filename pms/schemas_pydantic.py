@@ -109,7 +109,4 @@ class DerivedPosition(BaseModel):
     asset: str = Field("", description="Asset (e.g. BTC, USDT); grain is (broker, account_id, book, asset)")
     open_qty: float = Field(0.0, description="Signed net quantity: positive = long, negative = short")
     position_side: str = Field("flat", description="'long' | 'short' | 'flat'")
-    entry_avg: Optional[float] = Field(None, ge=0, description="Cost basis of open quantity only (FIFO)")
-    mark_price: Optional[float] = Field(None, ge=0, description="Mark price used to compute unrealized_pnl")
-    notional: Optional[float] = Field(None, description="Position notional value (e.g. open_qty * mark_price)")
-    unrealized_pnl: float = Field(0.0, description="Unrealized PnL (when open_qty != 0)")
+    usd_value: Optional[float] = Field(None, ge=0, description="Price per unit of asset in USD (set by enrichment)")

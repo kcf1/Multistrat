@@ -4,8 +4,8 @@ Inject 2 fake buys at $1, 1 fake sell at $2, then 2 fake sells at $0.5 into the 
 wait 10s for PMS to build positions, then check that positions match expected.
 
 PMS derives positions at asset grain (base + quote legs). So one symbol BTCUSDT produces two
-position rows: BTC (base) and USDT (quote). Expected: 2 rows — BTC open_qty=-1, position_side=short,
-entry_avg=0.5 (FIFO); USDT open_qty=+1, position_side=long (quote legs: -1-1+2+0.5+0.5=+1).
+position rows: BTC (base) and USDT (quote). Expected: 2 rows — BTC open_qty=-1, position_side=short;
+USDT open_qty=+1, position_side=long (quote legs: -1-1+2+0.5+0.5=+1).
 
 Requires: DATABASE_URL; symbols table must contain BTCUSDT -> (BTC, USDT) for derivation to run.
 Run from repo root.
@@ -141,7 +141,7 @@ def main():
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT broker, account_id, book, asset, open_qty, position_side, entry_avg, mark_price, notional, unrealized_pnl
+                SELECT broker, account_id, book, asset, open_qty, position_side, usd_value
                 FROM positions
                 WHERE broker = %s AND account_id = %s AND book = %s AND asset IN ('BTC', 'USDT')
                 ORDER BY asset
@@ -166,7 +166,6 @@ def main():
     usdt = by_asset["USDT"]
     btc_open_qty = float(btc["open_qty"])
     btc_side = btc["position_side"]
-    btc_entry = float(btc["entry_avg"]) if btc["entry_avg"] is not None else None
     usdt_open_qty = float(usdt["open_qty"])
     usdt_side = usdt["position_side"]
 
@@ -176,9 +175,6 @@ def main():
     if btc_side != "short":
         print(f"FAIL: BTC position_side={btc_side!r}, expected 'short'")
         sys.exit(1)
-    if btc_entry is None or abs(btc_entry - 0.5) > 1e-6:
-        print(f"FAIL: BTC entry_avg={btc_entry}, expected 0.5 (FIFO)")
-        sys.exit(1)
     if abs(usdt_open_qty - 1.0) > 1e-6:
         print(f"FAIL: USDT open_qty={usdt_open_qty}, expected +1.0 (quote legs)")
         sys.exit(1)
@@ -186,8 +182,8 @@ def main():
         print(f"FAIL: USDT position_side={usdt_side!r}, expected 'long'")
         sys.exit(1)
 
-    print("PASS: positions match expected (asset grain: BTC -1 short entry_avg=0.5, USDT +1 long).")
-    print(f"  BTC:  open_qty={btc_open_qty}, position_side={btc_side!r}, entry_avg={btc_entry}")
+    print("PASS: positions match expected (asset grain: BTC -1 short, USDT +1 long).")
+    print(f"  BTC:  open_qty={btc_open_qty}, position_side={btc_side!r}")
     print(f"  USDT: open_qty={usdt_open_qty}, position_side={usdt_side!r}")
 
 

@@ -37,18 +37,14 @@
 - `notional`
 - `unrealized_pnl`
 
-**Optional (recommended for reporting):**
+**Optional (deferred — ignore for now):**
 
-- **`cost_basis_usd`** — NUMERIC(36,18) NULL. Average **USD cost per unit** of the open position (FIFO in USD). Enables:  
-  **unrealized_pnl_usd** = `open_qty * (usd_value - cost_basis_usd)` (derive in API or VIEW, not stored).  
-  If omitted, we do not store cost basis; unrealized PnL in USD would require a separate service that converts historical fills to USD (e.g. E.3 or analytics).
-
-**When to snap cost_basis_usd:** Yes — we need a **USD price at fill time** for each fill that affects the position. Either: **(A)** when an order is filled, capture and store the USD price for that asset at that time (e.g. `usd_price_at_fill` on the order row or in a fills table), then derivation does FIFO in USD using that; or **(B)** maintain a time-series of USD prices (e.g. E.3 or market data) and at derivation time look up the USD price at each fill’s timestamp. We **recompute** cost_basis_usd every tick when we re-derive positions from orders; the “snap” is either at write-time (per fill) or at read-time (lookup by timestamp). Without one of these, cost_basis_usd cannot be computed correctly.
+- **`cost_basis_usd`** — NUMERIC(36,18) NULL. *(Deferred.)* Average USD cost per unit of the open position (FIFO in USD). Would enable **unrealized_pnl_usd** = `open_qty * (usd_value - cost_basis_usd)`. Not in scope for initial implementation; see §6.
+- **unrealized_pnl_usd** — *(Deferred.)* Derive only when cost_basis_usd is implemented. Ignore for now.
 
 **Derived (never stored):**
 
-- **notional_usd** = `open_qty * usd_value`
-- **unrealized_pnl_usd** = `open_qty * (usd_value - cost_basis_usd)` when `cost_basis_usd` is present
+- **notional_usd** = `open_qty * usd_value` (compute in API/display when needed).
 
 ---
 
@@ -61,7 +57,7 @@
 | **Remove** | notional | Derive as open_qty * usd_value |
 | **Remove** | unrealized_pnl | Derive in USD from usd_value and cost_basis_usd when needed |
 | **Add** | usd_value | Per-unit price in USD (required for valuation) |
-| **Add (optional)** | cost_basis_usd | Per-unit open cost in USD for unrealized_pnl_usd |
+| **Add (optional)** | cost_basis_usd | *(Deferred.)* Per-unit open cost in USD for unrealized_pnl_usd — ignore for now. |
 
 Nothing else removed; no other redundancies identified. Grain and open_qty/position_side stay.
 
@@ -73,13 +69,13 @@ Nothing else removed; no other redundancies identified. Grain and open_qty/posit
 
 - One revision after current head:
   - Add `usd_value` NUMERIC(36,18) NULL.
-  - Optionally add `cost_basis_usd` NUMERIC(36,18) NULL.
   - Drop `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`.
-- No data backfill required for new columns (NULL ok); existing rows lose dropped columns.
+  - *(Deferred)* Do **not** add `cost_basis_usd` in this phase.
+- No data backfill required; existing rows lose dropped columns.
 
 ### 4.2 Pydantic / derivation
 
-- **DerivedPosition:** Remove `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`. Add `usd_value: Optional[float]`. Optionally add `cost_basis_usd: Optional[float]`.
+- **DerivedPosition:** Remove `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`. Add `usd_value: Optional[float]`. Do **not** add `cost_basis_usd` (deferred).
 - **Derivation (reads.py):** Keep FIFO for `open_qty` and (if we keep it) for cost in **USD** when we have a way to get USD price per fill (e.g. from `assets` or E.3). Until then, derivation can leave `cost_basis_usd` None and only set `usd_value` in the enrichment step.
 - **Enrichment (loop.py):** Replace “mark price + notional + unrealized” with:
   - Set **usd_value** from `assets.usd_price` or (E.3) from refreshed asset prices.
@@ -88,7 +84,7 @@ Nothing else removed; no other redundancies identified. Grain and open_qty/posit
 
 ### 4.3 Granular store
 
-- **write_pms_positions:** INSERT/UPDATE only grain columns + `open_qty`, `position_side`, `usd_value`, and optionally `cost_basis_usd`. Remove any reference to `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`.
+- **write_pms_positions:** INSERT/UPDATE grain columns + `open_qty`, `position_side`, `usd_value` only. Remove `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`.
 
 ### 4.4 Mark price / E.3
 
@@ -100,13 +96,12 @@ Nothing else removed; no other redundancies identified. Grain and open_qty/posit
 
 ### 4.5 API / display
 
-- Expose **notional_usd** = `open_qty * usd_value` (computed).
-- Expose **unrealized_pnl_usd** = `open_qty * (usd_value - cost_basis_usd)` when `cost_basis_usd` is not null; otherwise null or 0 by policy.
+- Expose **notional_usd** = `open_qty * usd_value` (computed). *(Deferred)* unrealized_pnl_usd when cost_basis_usd is added later.
 
 ### 4.6 Tests and scripts
 
-- **Unit tests:** Update all construction and assertions to use `usd_value` (and optional `cost_basis_usd`); remove `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`. Add tests for derived notional_usd and unrealized_pnl_usd where relevant.
-- **E2E / inject scripts:** Select and assert `usd_value` (and optional `cost_basis_usd`); drop checks on removed columns. Use derived notional where needed.
+- **Unit tests:** Use `usd_value`; remove `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`. Derive notional_usd where needed.
+- **E2E / inject scripts:** Select and assert `usd_value`; drop checks on removed columns.
 
 ### 4.7 Docs
 
@@ -116,16 +111,20 @@ Nothing else removed; no other redundancies identified. Grain and open_qty/posit
 
 ## 5. Checklist
 
-- [ ] Migration: add `usd_value` (and optionally `cost_basis_usd`); drop `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`.
-- [ ] DerivedPosition: new shape (usd_value; optional cost_basis_usd); remove old fields.
-- [ ] Derivation (reads): output usd_value/cost_basis_usd instead of entry_avg/mark/notional/unrealized (cost_basis_usd only if FIFO in USD is implemented).
-- [ ] Enrichment (loop): set usd_value from assets (and E.3); optionally set cost_basis_usd; remove mark/notional/unrealized logic.
-- [ ] Granular store: write only new columns; remove dropped columns from INSERT/UPDATE.
-- [ ] Mark price / E.3: ensure USD valuation path feeds `usd_value` (no stored mark_price).
-- [ ] **If using cost_basis_usd:** Either snap USD price at fill time (e.g. `usd_price_at_fill` on orders or fills) or provide price time-series for lookup at derivation time.
-- [ ] API/display: derive notional_usd and unrealized_pnl_usd.
-- [ ] Tests and scripts: update to new schema and derived fields.
-- [ ] Docs: update refactoring plan and Phase 2.
+**Implemented in this phase (no cost_basis_usd):**
+
+- [x] Migration: add `usd_value`; drop `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`.
+- [x] DerivedPosition: add `usd_value`; remove `entry_avg`, `mark_price`, `notional`, `unrealized_pnl`.
+- [x] Derivation (reads): output positions with `usd_value=None`; no entry_avg/mark/notional/unrealized on model.
+- [x] Enrichment (loop): set `usd_value` from assets; remove mark/notional/unrealized logic.
+- [x] Granular store: write `usd_value` only; remove dropped columns from INSERT/UPDATE.
+- [x] Tests and scripts: update to new schema.
+
+**Deferred (ignore for now):**
+
+- [ ] cost_basis_usd column and snap-at-fill / lookup logic.
+- [ ] unrealized_pnl_usd (derive when cost_basis_usd exists).
+- [ ] API/display: derive notional_usd (can add when building APIs).
 
 ---
 

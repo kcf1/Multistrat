@@ -273,9 +273,6 @@ def derive_positions_from_orders(
             asset=symbol,
             open_qty=open_qty,
             position_side=position_side,
-            entry_avg=entry_f,
-            notional=None,
-            unrealized_pnl=0.0,
         ))
     return out
 
@@ -382,9 +379,6 @@ def derive_positions_from_orders_and_balance_changes(
             asset=asset,
             open_qty=final_open_qty,
             position_side=position_side,
-            entry_avg=entry_f,
-            notional=None,
-            unrealized_pnl=0.0,
         ))
     return out
 
