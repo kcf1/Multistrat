@@ -1,0 +1,10 @@
+---
+description: Plan with tests, small tasks, and to-dos; mark done when implementing
+alwaysApply: true
+---
+
+# Planning and implementation
+
+- **Plans**: When making plans, include a plan for **tests** (what to test, how, and where).
+- **Tasks**: Dissect system changes into **small, concrete tasks** and list them as to-dos.
+- **Implementation**: When the user asks to implement, work through the to-dos and **mark each task done** when finished.

@@ -17,7 +17,7 @@ from oms.log import logger
 
 from oms.account_flow import make_account_callback
 from oms.account_repair import run_all_account_repairs
-from oms.account_sync import get_account_pk_by_broker_and_id, sync_accounts_to_postgres, write_balance_change
+from oms.account_sync import sync_accounts_to_postgres, write_balance_change
 from oms.symbol_sync import sync_symbols_from_binance
 from oms.cleanup import set_account_key_ttl
 from oms.cancel_consumer import ensure_cancel_requested_consumer_group
@@ -450,9 +450,6 @@ def main() -> int:
     ) -> None:
         if not database_url:
             return
-        account_pk = get_account_pk_by_broker_and_id(database_url, broker, account_id)
-        if account_pk is None:
-            return
         try:
             delta_val = float(delta) if delta is not None else 0.0
             if delta_val > 0:
@@ -463,7 +460,7 @@ def main() -> int:
                 change_type = "adjustment"
             write_balance_change(
                 database_url,
-                account_pk,
+                account_id,
                 asset,
                 change_type,
                 delta or 0,
@@ -471,6 +468,7 @@ def main() -> int:
                 event_time,
                 payload=payload,
                 book="default",
+                broker=broker,
             )
         except Exception as e:
             logger.exception("write_balance_change failed: {}", e)

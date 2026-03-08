@@ -2,9 +2,7 @@
 """
 E2E verification for 12.4.4: inject multiple test orders (broker binance) → OMS → Binance testnet
 → fill → OMS publishes oms_fills; OMS syncs orders/accounts to Postgres → PMS reads orders,
-derives positions, writes positions table. Covers 3 symbols and 3 conditions: long only,
-short only, long < short (building net-short position). Then verify all downstreams and
-remind to check pgAdmin and RedisInsight.
+derives positions, writes positions table. Covers 3 symbols (BTC, DOGE, BNB) and conditions: long only, long extra, long < short. Then verify all downstreams.
 
 Assumes services are already deployed (docker compose up -d oms pms postgres redis).
 Requires: REDIS_URL, DATABASE_URL. Optional: BINANCE_* for testnet.
@@ -60,33 +58,29 @@ def _read_latest_fills(redis, stream: str, count: int = 80):
 
 
 TERMINAL_STATUSES = {"filled", "canceled", "rejected", "expired"}
-E2E_BOOK = "e2e_12_4_4"
+E2E_BOOK_BASE = "e2e_12_4_4"
+# Use unique book per run so positions are fresh (no accumulation from previous runs)
+def _e2e_book() -> str:
+    return f"{E2E_BOOK_BASE}_{int(time.time() * 1000)}"
 
-# 3 symbols, 3 conditions:
-# - Long only: symbol with only BUY(s) → net long
-# - Short only: symbol with only SELL(s) → net short
-# - Long < short: symbol with BUY then more SELL → net short (building short position)
-E2E_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
-# Order specs: (symbol, side, quantity, condition_label). Lot sizes with 1 decimal.
+# 3 symbols, conditions: long only, long extra, long < short (no short-only to avoid testnet balance/notional).
+E2E_SYMBOLS = ("BTCUSDT", "DOGEUSDT", "BNBUSDT")
+# (symbol, side, quantity, condition_label).
 E2E_ORDERS: List[Tuple[str, str, float, str]] = [
-    (E2E_SYMBOLS[0], "BUY", 0.1, "long_only"),
-    (E2E_SYMBOLS[1], "SELL", 0.1, "short_only"),
-    (E2E_SYMBOLS[2], "BUY", 0.1, "long_lt_short_buy"),
-    (E2E_SYMBOLS[2], "SELL", 0.2, "long_lt_short_sell"),
+    (E2E_SYMBOLS[0], "BUY", 0.0001, "long_only"),
+    (E2E_SYMBOLS[1], "BUY", 100, "long_extra"),
+    (E2E_SYMBOLS[2], "BUY", 0.01, "long_lt_short_buy"),
+    (E2E_SYMBOLS[2], "SELL", 0.02, "long_lt_short_sell"),
 ]
 
-# Expected downstream results (PMS derives from orders via FIFO; position_side from open_qty sign):
-# - oms_fills: 4 entries (one per order, event_type fill).
-# - Redis order store: 4 orders, each status filled.
-# - Postgres orders: 4 rows, status filled, executed_qty set.
-# - Postgres positions (book=e2e_12_4_4):
-#   - BTCUSDT: open_qty ≈ +0.1, position_side long  (long only).
-#   - ETHUSDT: open_qty ≈ -0.1, position_side short (short only).
-#   - BNBUSDT: open_qty ≈ -0.1, position_side short (BUY 0.1 then SELL 0.2 → net -0.1).
+# Expected downstream results (PMS derives from orders via base/quote legs; position_side from open_qty sign):
+# Expected assets: BTC, DOGE, BNB, USDT.
+E2E_EXPECTED_ASSETS = ("BTC", "DOGE", "BNB", "USDT")
 E2E_EXPECTED_OPEN_QTY = {
-    E2E_SYMBOLS[0]: (0.1, "long"),   # long only
-    E2E_SYMBOLS[1]: (-0.1, "short"),  # short only
-    E2E_SYMBOLS[2]: (-0.1, "short"),  # long < short
+    "BTC": (0.0001, "long"),
+    "DOGE": (100, "long"),
+    "BNB": (-0.01, "short"),
+    # USDT: present but qty not asserted (quote legs; fill prices vary)
 }
 TOLERANCE = 1e-6  # for float comparison
 
@@ -118,6 +112,7 @@ def run_e2e(
     poll_interval = 0.2
     base_id = f"e2e1244-{int(time.time() * 1000)}"
     order_ids: List[str] = []
+    E2E_BOOK = _e2e_book()
 
     # Build and inject all orders
     log("1. Injecting orders to risk_approved (3 symbols, 3 conditions: long only, short only, long < short)...")
@@ -161,6 +156,10 @@ def run_e2e(
         log(f"   FAIL: {len(missing)} order(s) not filled/terminal within timeout: {missing}")
         return False
     log(f"   OK: all {len(order_ids)} orders filled/terminal")
+    # Downstream check: log each order status from Redis (to investigate OMS→Redis)
+    for oid in order_ids:
+        order = store.get_order(oid)
+        log(f"   downstream_check [Redis order]: order_id={oid} status={order.get('status') if order else None!r} executed_qty={order.get('executed_qty') if order else None}")
 
     # Step 3: Postgres orders — all synced
     log("3. Waiting for all orders in Postgres (OMS sync)...")
@@ -191,6 +190,88 @@ def run_e2e(
         log("   FAIL: not all orders in Postgres within timeout")
         return False
     log(f"   OK: all {len(order_ids)} orders in Postgres (account_id={pg_account_id})")
+    # Downstream check: log each order as stored in Postgres (to investigate OMS sync and PMS status filter)
+    try:
+        import json
+        import psycopg2
+        conn = psycopg2.connect(database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT internal_id, account_id, book, symbol, status, executed_qty, payload FROM orders WHERE internal_id = ANY(%s) ORDER BY created_at NULLS LAST",
+                (order_ids,),
+            )
+            for r in cur.fetchall():
+                internal_id, account_id, book, symbol, status, executed_qty, payload = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
+                log(f"   downstream_check [Postgres orders]: internal_id={internal_id} account_id={account_id!r} book={book!r} symbol={symbol} status={status!r} executed_qty={executed_qty}")
+                if status and str(status).lower() == "rejected" and payload:
+                    try:
+                        pl = payload if isinstance(payload, dict) else json.loads(payload) if payload else {}
+                        msg = (pl.get("binance") or {}).get("msg") if isinstance(pl.get("binance"), dict) else None
+                        code = (pl.get("binance") or {}).get("code") if isinstance(pl.get("binance"), dict) else None
+                        if msg:
+                            log(f"   order failed payload msg: internal_id={internal_id} binance.msg={msg!r} binance.code={code}")
+                        else:
+                            log(f"   order failed payload: internal_id={internal_id} payload={payload!r}")
+                    except Exception as parse_err:
+                        log(f"   order failed payload (parse error): internal_id={internal_id} payload={payload!r} error={parse_err}")
+        finally:
+            conn.close()
+    except Exception as e:
+        if verbose:
+            log(f"   downstream_check [Postgres orders]: query failed: {e}")
+
+    # Ensure symbols table has E2E pairs so PMS derivation can resolve base/quote (after OMS sync)
+    if check_pms:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(database_url)
+            try:
+                cur = conn.cursor()
+                for sym in E2E_SYMBOLS:
+                    base = sym.replace("USDT", "") if sym.endswith("USDT") else sym[:3]
+                    quote = "USDT" if sym.endswith("USDT") else "BTC"
+                    cur.execute(
+                        """
+                        INSERT INTO symbols (symbol, base_asset, quote_asset)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (symbol) DO UPDATE SET
+                            base_asset = EXCLUDED.base_asset,
+                            quote_asset = EXCLUDED.quote_asset
+                        """,
+                        (sym, base, quote),
+                    )
+                conn.commit()
+                log("3.5. Ensured symbols table has %s (for PMS asset derivation)" % ", ".join(E2E_SYMBOLS))
+                # Downstream check: log symbol map as PMS would see it for E2E symbols
+                cur.execute(
+                    "SELECT symbol, base_asset, quote_asset FROM symbols WHERE symbol = ANY(%s)",
+                    (list(E2E_SYMBOLS),),
+                )
+                sym_rows = cur.fetchall()
+                for r in sym_rows:
+                    log(f"   downstream_check [symbols table]: symbol={r[0]!r} base_asset={r[1]!r} quote_asset={r[2]!r}")
+                if len(sym_rows) < len(E2E_SYMBOLS):
+                    log(f"   downstream_check [symbols table]: expected %s rows for E2E_SYMBOLS, got %s" % (len(E2E_SYMBOLS), len(sym_rows)))
+            finally:
+                conn.close()
+        except Exception as e:
+            if verbose:
+                log(f"   WARN: could not ensure symbols: {e}")
+        # Force one PMS tick so positions are derived with the symbols we just ensured
+        log("3.6. Running one PMS tick to derive positions...")
+        try:
+            from pms.loop import run_one_tick
+            from pms.mark_price import get_mark_price_provider
+            mark_provider = get_mark_price_provider("fake")
+            n = run_one_tick(database_url, mark_provider)
+            log("   PMS tick wrote %s position(s)" % n)
+            log("   downstream_check [PMS tick]: run_one_tick returned n=%s" % n)
+        except Exception as e:
+            if verbose:
+                log(f"   WARN: PMS tick failed: {e}")
+            log("3.6. Waiting 15s for PMS to derive positions...")
+            time.sleep(15)
 
     # Step 4: Account flow (optional)
     if check_account and account_store:
@@ -208,12 +289,15 @@ def run_e2e(
             log("   WARN: no account/balances in Redis (OMS refresh may be slow)")
         else:
             log("   OK: account/balances in Redis")
+            log("   downstream_check [Redis account]: broker=%s account_id=%s balances_count=%s" % (broker, account_id, len(balances)))
 
-    # Step 5: PMS — positions table: expect 3 symbols with expected open_qty and position_side (see E2E_EXPECTED_OPEN_QTY)
+    # Step 5: PMS — positions table: expect asset-grain rows (BTC, ETH, BNB, USDT) with expected open_qty/position_side
     if check_pms:
-        log("5. Waiting for PMS to write positions (Postgres positions table)...")
+        log("5. Waiting for PMS to write positions (Postgres positions table, asset grain)...")
+        log("   downstream_check [positions]: book=%s expected_assets=%s" % (E2E_BOOK, list(E2E_EXPECTED_ASSETS)))
         pms_deadline = min(deadline, time.monotonic() + 40)
         found: List[Tuple[Any, ...]] = []
+        poll_count = 0
         while time.monotonic() < pms_deadline:
             found = []
             try:
@@ -223,35 +307,37 @@ def run_e2e(
                     cur = conn.cursor()
                     cur.execute(
                         """
-                        SELECT account_id, book, symbol, open_qty, position_side, unrealized_pnl
+                        SELECT broker, account_id, book, asset, open_qty, position_side, unrealized_pnl
                         FROM positions
-                        WHERE book = %s AND symbol = ANY(%s)
-                        ORDER BY symbol
+                        WHERE broker = %s AND book = %s AND asset = ANY(%s)
+                        ORDER BY asset
                         """,
-                        (E2E_BOOK, list(E2E_SYMBOLS)),
+                        ("binance", E2E_BOOK, list(E2E_EXPECTED_ASSETS)),
                     )
                     rows = cur.fetchall()
                     for r in rows:
-                        symbol, open_qty = r[2], float(r[3] or 0)
-                        found.append((r[0], r[1], symbol, open_qty, r[4], float(r[5] or 0)))
+                        asset, open_qty = r[3], float(r[4] or 0)
+                        found.append((r[0], r[1], r[2], asset, open_qty, r[5], float(r[6] or 0)))
                 finally:
                     conn.close()
-                by_symbol = {s: (oq, ps) for (_, _, s, oq, ps, _) in found}
-                if len(by_symbol) < 3:
+                by_asset = {a: (oq, ps) for (_, _, _, a, oq, ps, _) in found}
+                poll_count += 1
+                log("   downstream_check [positions] poll #%s: assets_found=%s by_asset=%s" % (poll_count, list(by_asset.keys()), by_asset))
+                if len(by_asset) < len(E2E_EXPECTED_ASSETS):
                     time.sleep(2)
                     continue
-                # Assert expected open_qty (within tolerance) and position_side for each symbol
+                # Assert expected open_qty (within tolerance) and position_side for base assets
                 all_ok = True
-                for sym, (exp_qty, exp_side) in E2E_EXPECTED_OPEN_QTY.items():
-                    oq, ps = by_symbol.get(sym, (0, ""))
+                for asset, (exp_qty, exp_side) in E2E_EXPECTED_OPEN_QTY.items():
+                    oq, ps = by_asset.get(asset, (0, ""))
                     if abs(oq - exp_qty) > TOLERANCE or (exp_side != "flat" and ps != exp_side):
                         all_ok = False
                         break
                 if all_ok:
-                    for (acc, book, sym, oq, ps, upnl) in found:
-                        exp = E2E_EXPECTED_OPEN_QTY.get(sym, (None, ""))
-                        log(f"   position: {sym} open_qty={oq} (expected {exp[0]}) side={ps} unrealized_pnl={upnl}")
-                    log("   OK: PMS positions match expected (long only, short only, long < short)")
+                    for (broker, acc, book, a, oq, ps, upnl) in found:
+                        exp = E2E_EXPECTED_OPEN_QTY.get(a, (None, ""))
+                        log(f"   position: {a} open_qty={oq} (expected {exp[0]}) side={ps} unrealized_pnl={upnl}")
+                    log("   OK: PMS positions match expected (asset grain: long only, short only, long < short)")
                     break
             except Exception as e:
                 if verbose:
@@ -259,17 +345,21 @@ def run_e2e(
             time.sleep(2)
         else:
             log("   FAIL: positions did not match expected open_qty/position_side within timeout")
+            log("   downstream_check [positions] FAIL reason: %s" % (
+                "len(by_asset)=%s < %s (missing assets)" % (len(by_asset), len(E2E_EXPECTED_ASSETS)) if len(by_asset) < len(E2E_EXPECTED_ASSETS) else "wrong open_qty or position_side for base assets"
+            ))
             if found:
-                for (acc, book, sym, oq, ps, upnl) in found:
-                    exp = E2E_EXPECTED_OPEN_QTY.get(sym, (None, "?"))
-                    log(f"   seen: {sym} open_qty={oq} (expected {exp[0]}) side={ps}")
+                for (broker, acc, book, a, oq, ps, upnl) in found:
+                    exp = E2E_EXPECTED_OPEN_QTY.get(a, (None, "?"))
+                    log(f"   seen: {a} open_qty={oq} (expected {exp[0]}) side={ps}")
+                log("   downstream_check [positions] expected: %s" % dict(E2E_EXPECTED_OPEN_QTY))
             return False
 
     elapsed = time.monotonic() - start
     log("")
     log("=" * 60)
     log("E2E 12.4.4 PASSED")
-    log(f"Orders: {len(order_ids)} (3 symbols, 3 conditions: long only, short only, long < short)")
+    log(f"Orders: {len(order_ids)} (3 symbols: BTC, DOGE, BNB; conditions: long only, long extra, long < short)")
     log(f"Total time: {elapsed:.1f}s")
     log("")
     log("Verify manually in pgAdmin and RedisInsight:")

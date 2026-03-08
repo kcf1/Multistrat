@@ -1,7 +1,7 @@
 """
 PMS granular store writes (12.3.4).
 
-UPSERT into positions table at grain (account_id, book, symbol).
+UPSERT into positions table at grain (broker, account_id, book, asset).
 """
 
 from datetime import datetime, timezone
@@ -15,7 +15,8 @@ def write_pms_positions(
     positions: List[DerivedPosition],
 ) -> int:
     """
-    UPSERT derived positions into positions table. Grain (account_id, book, symbol).
+    UPSERT derived positions into positions table. Grain (broker, account_id, book, asset).
+    Uses position.broker and position.asset.
     Returns number of rows upserted.
     """
     if not positions:
@@ -32,16 +33,18 @@ def write_pms_positions(
         now = datetime.now(timezone.utc)
         count = 0
         for p in positions:
+            broker_val = (p.broker or "").strip()
+            asset_val = (p.asset or "").strip()
             cur.execute(
                 """
                 INSERT INTO positions (
-                    account_id, book, symbol, open_qty, position_side,
+                    broker, account_id, book, asset, open_qty, position_side,
                     entry_avg, mark_price, notional, unrealized_pnl, updated_at
                 ) VALUES (
-                    %(account_id)s, %(book)s, %(symbol)s, %(open_qty)s, %(position_side)s,
+                    %(broker)s, %(account_id)s, %(book)s, %(asset)s, %(open_qty)s, %(position_side)s,
                     %(entry_avg)s, %(mark_price)s, %(notional)s, %(unrealized_pnl)s, %(updated_at)s
                 )
-                ON CONFLICT (account_id, book, symbol) DO UPDATE SET
+                ON CONFLICT (broker, account_id, book, asset) DO UPDATE SET
                     open_qty = EXCLUDED.open_qty,
                     position_side = EXCLUDED.position_side,
                     entry_avg = EXCLUDED.entry_avg,
@@ -51,9 +54,10 @@ def write_pms_positions(
                     updated_at = EXCLUDED.updated_at
                 """,
                 {
+                    "broker": broker_val,
                     "account_id": p.account_id,
                     "book": p.book or "",
-                    "symbol": p.symbol,
+                    "asset": asset_val,
                     "open_qty": p.open_qty,
                     "position_side": p.position_side,
                     "entry_avg": p.entry_avg,

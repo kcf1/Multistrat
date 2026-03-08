@@ -145,8 +145,8 @@ class TestBinanceBrokerAdapterPlaceOrder:
         assert call_kw["symbol"] == "BTCUSDT"
         assert call_kw["side"] == "BUY"
         assert call_kw["order_type"] == "LIMIT"
-        assert call_kw["quantity"] == 0.01
-        assert call_kw["price"] == 50000.0
+        assert call_kw["quantity"] == "0.01"
+        assert call_kw["price"] == "50000"
         assert call_kw["time_in_force"] == "GTC"
         assert call_kw["client_order_id"] == "oms-order-1"
         assert result["broker_order_id"] == "42"

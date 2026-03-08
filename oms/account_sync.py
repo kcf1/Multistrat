@@ -207,7 +207,7 @@ DEFAULT_CASH_BOOK = "default"
 
 def write_balance_change(
     pg_connect: Union[str, Callable[[], Any]],
-    account_id_pk: int,
+    account_id: str,
     asset: str,
     change_type: str,
     delta: Union[Decimal, float, str],
@@ -218,11 +218,14 @@ def write_balance_change(
     broker_event_id: Optional[str] = None,
     payload: Optional[Dict[str, Any]] = None,
     book: Optional[str] = None,
+    broker: Optional[str] = None,
 ) -> None:
     """
     Insert one row into balance_changes. Call from account callback when
     processing balanceUpdate events (delta from payload.d or balance dict).
+    account_id: broker account id (TEXT, same as orders.account_id).
     book: default cash book for broker-fed records; use constant DEFAULT_CASH_BOOK if None.
+    broker: broker name (e.g. 'binance'); stored for grain (broker, account_id, book, asset). Default ''.
     """
     def _num(v: Any) -> Optional[Decimal]:
         if v is None:
@@ -242,19 +245,20 @@ def write_balance_change(
         cur.execute(
             """
             INSERT INTO balance_changes (
-                account_id, asset, book, change_type, delta,
+                account_id, asset, book, broker, change_type, delta,
                 balance_before, balance_after, event_type, broker_event_id,
                 event_time, created_at, payload
             ) VALUES (
-                %(account_id)s, %(asset)s, %(book)s, %(change_type)s, %(delta)s,
+                %(account_id)s, %(asset)s, %(book)s, %(broker)s, %(change_type)s, %(delta)s,
                 %(balance_before)s, %(balance_after)s, %(event_type)s, %(broker_event_id)s,
                 %(event_time)s, NOW(), %(payload)s
             )
             """,
             _pg_params({
-                "account_id": account_id_pk,
+                "account_id": (account_id or "")[:255],
                 "asset": asset[:255] if asset else "",
                 "book": book_val,
+                "broker": (broker or "")[:64],
                 "change_type": change_type[:64] if change_type else "adjustment",
                 "delta": _num(delta) or Decimal("0"),
                 "balance_before": _num(balance_before),
@@ -276,7 +280,7 @@ def get_account_pk_by_broker_and_id(
     broker: str,
     account_id: str,
 ) -> Optional[int]:
-    """Resolve Postgres accounts.id from (broker, account_id). For use by balance_changes writer."""
+    """Resolve Postgres accounts.id from (broker, account_id). For use when accounts.id is needed (e.g. balances table). Not required for balance_changes (balance_changes.account_id is broker account id, same as orders)."""
     conn, we_opened = _pg_conn(pg_connect)
     try:
         cur = conn.cursor()

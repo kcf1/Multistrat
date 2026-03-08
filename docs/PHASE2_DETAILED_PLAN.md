@@ -319,7 +319,7 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 - Periodically read **orders**, **balance_changes**, and **symbols** from **Postgres**; **derive positions** from orders (filter: partial/fully filled); **build cash** from orders (trade legs via symbol→base/quote) + balance_changes (deposit/withdrawal only; **book** column; default cash book for broker-fed). PMS does **not** read OMS Redis positions (dummy). In the **build-from-order** model, **balance sync is disabled**; PMS does not read `balances` for cash. Compute **realized PnL** (from executed order rows), **unrealized PnL** (mark × open qty when open_qty ≠ 0), and **margin** (for futures).
 - Write results to Postgres (e.g. a dedicated `pnl_snapshots` table) and/or to Redis (e.g. `pnl:{account_id}`, `margin:{account_id}`) for Admin/UI. *(OMS `margin_snapshots` table was dropped; unused.)*
 
-**Implemented (Phase 2):** PMS reads **orders only** (no balances used for position derivation). Derives positions at (account_id, book, symbol) with FIFO entry_avg; writes **positions** table with open_qty, position_side, mark_price, notional, unrealized_pnl. **No** Redis pnl/margin keys; **no** pnl_snapshots/margin_snapshots tables. Mark price from Binance (PMS_MARK_PRICE_SOURCE).
+**Implemented (Phase 2):** PMS reads **orders** and **balance_changes** (no balances used for position derivation). Derives positions at **(broker, account_id, book, asset)** from orders (base/quote legs via symbols) + balance_changes; writes **positions** table with open_qty, position_side, mark_price, notional, unrealized_pnl. **No** Redis pnl/margin keys; **no** pnl_snapshots/margin_snapshots tables. Mark price from Binance (PMS_MARK_PRICE_SOURCE). USD valuation: stables from `assets.usd_price`; optional E.3 job to refresh asset prices for non-stables. See **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md**.
 
 ### 8.2 Mark price (unrealized PnL)
 
@@ -329,7 +329,7 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 ### 8.3 Granular store, views, and reference data
 
-- **One granular store (core):** PMS writes a **position/snapshot table** at grain **(account_id, book, symbol)** (e.g. `positions`) with **open_qty** (signed), **position_side** ('long' | 'short' | 'flat'). One row per grain; updated after each calculation. **Grouping** (by symbol, by book/symbol, by broker/symbol) is **on request** (SQL GROUP BY or API); optional DB VIEWs on PMS-written tables. See **docs/pms/PMS_ARCHITECTURE.md** §6.
+- **One granular store (core):** PMS writes a **position/snapshot table** at grain **(broker, account_id, book, asset)** (e.g. `positions`) with **open_qty** (signed), **position_side** ('long' | 'short' | 'flat'). One row per grain; updated after each calculation. **Grouping** (by symbol, by book/symbol, by broker/symbol) is **on request** (SQL GROUP BY or API); optional DB VIEWs on PMS-written tables. See **docs/pms/PMS_ARCHITECTURE.md** §6 and **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md**.
 - **Reference data (optional for core):** **Symbols table** (symbol → base_asset, quote_asset, tick_size, etc.): populated by sync or config; PMS reads. **Allocations** (cash by book): **managed outside**; system **provided with** via interface (table, API, or file); PMS reads only.
 - **Cash vs positions:** In the **build-from-order** model, cash is **built in PMS** from orders + balance_changes (double-entry; **book** column on balance_changes; default cash book for broker-fed; book change records to move cash to strategy books). OMS **balance sync to `balances` is disabled**; do not put cash in positions table. **Capital by book** = asset_value(book) + cash(book); cash(book) from PMS **book_cash**.
 
@@ -458,6 +458,8 @@ BINANCE_API_SECRET=
 
 **Core vs optional:** Implement **Core** tasks first for a minimal PMS; add **(Optional)** tasks when needed. See **docs/pms/PMS_ARCHITECTURE.md** §2.
 
+**Positions-as-assets refactoring (done except E.3):** The refactor to asset-level positions, orders+balance_changes derivation, broker grain, and `assets` table for USD is **complete**. See **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md**. Grain is **(broker, account_id, book, asset)**; positions and balance_changes have `broker`; PMS derives from orders (base/quote legs) + balance_changes and writes `positions`. **Remaining follow-up:** **E.3** — asset price update (job or API to refresh `assets.usd_price` / backfill) so non-stables get mark/notional in USD; see task 12.3.17.
+
 - [ ] **12.3.1** **(Core)** **PMS PnL/margin calculation**: realized PnL (from fills or orders), unrealized PnL (mark price), margin (futures). **Unit test:** given positions/balances/fills, verify calculations.
 - [x] **12.3.1a** **(Core)** **Mark price provider**: define **interface** (e.g. get mark prices per symbol); **Phase 2:** implement by wrapping Binance (REST/WS). **(Optional)** Phase 4: add implementation reading from Redis/DB (Market Data). Switch via `PMS_MARK_PRICE_SOURCE`. See **docs/pms/PMS_ARCHITECTURE.md** §11.
 - [x] **12.3.1b** **(Optional)** **Pydantic in PMS**: Use Pydantic (same as OMS) for config, mark price, internal shapes, snapshot writes. See **docs/pms/PMS_ARCHITECTURE.md** §12.
@@ -479,6 +481,8 @@ BINANCE_API_SECRET=
 - [ ] **12.3.14** **(Core)** **PMS write_book_cash** (`pms/granular_store.py`): add `write_book_cash(pg_connect, book_cash_rows)` that UPSERTs into `book_cash` (account_id, book, asset, balance, updated_at) with ON CONFLICT (account_id, book, asset) DO UPDATE. Return count written. **Unit test:** mock Postgres; verify UPSERT.
 - [ ] **12.3.15** **(Core)** **PMS loop: build and write book_cash** (`pms/loop.py`): in `run_one_tick`, after deriving positions: call `query_balance_changes`, `query_symbols` (or get_symbol_map), orders for cash; call `build_book_cash_from_orders_and_balance_changes`; call `write_book_cash`. Optional: gate behind env `PMS_BUILD_CASH_FROM_ORDERS=true`. **Unit test:** mock reads and write; verify loop invokes build + write.
 - [ ] **12.3.16** **(Core)** **PMS cash source when build-from-order on**: when build-from-order is enabled, do not use `query_balances` for cash/margin; use built book_cash only. Document in **docs/pms/PMS_ARCHITECTURE.md** §8; update any callers that currently read balances for cash to use book_cash path when enabled.
+
+- [ ] **12.3.17** **(Follow-up)** **E.3 — Asset price update**: Job or API to refresh `assets.usd_price` (or backfill from a price feed). Once implemented, the PMS loop uses the `assets` table for all USD valuation (stables already use `usd_price=1`; non-stables get updated prices from this job). Supersedes the need for a runtime mark-provider fetch for assets with only `usd_symbol`. See **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md** §8 (E.3) and §5.1.
 
 ### 12.4 Test harness and deployment
 
@@ -518,6 +522,7 @@ BINANCE_API_SECRET=
 **Not implemented / gaps:**
 
 - **Risk service (optional):** No Risk container in `docker-compose.yml`; no pass-through `strategy_orders` → `risk_approved`. E2E uses inject script only (12.4.2 not done).
+- **E.3 — Asset price update (follow-up):** No job or API yet to refresh `assets.usd_price` for non-stables. Stables use fixed `usd_price=1`; non-stables get mark/notional when E.3 (task 12.3.17) is implemented. See **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md** §8.
 - **PMS build-from-order cash:** Tasks 12.2.11–12.2.15 (balance_changes.book, write_balance_change, default cash book, symbols table, symbol sync) and 12.3.9–12.3.16 (query_balance_changes, query_symbols, build_book_cash, book_cash table, write_book_cash, loop integration) implement cash built from orders + balance_changes. Until done, PMS does not read `balances` for cash when build-from-order is enabled; current code still has `query_balances` but it is not used for cash in the new model.
 - **PnL/margin beyond positions:** Unrealized PnL is in `positions` (per-row). No separate **margin snapshot** or aggregate PnL store (e.g. Redis key or dedicated table) is written by PMS.
 - **E2E step 5 (PMS positions) timing:** E2E can fail if PMS hasn’t run enough ticks to write all 3 symbols to `positions` within the wait window; increasing the PMS wait or tick frequency would make this more reliable.

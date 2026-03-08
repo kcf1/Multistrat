@@ -10,7 +10,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pms.loop import enrich_positions_with_mark_prices, run_one_tick, run_pms_loop
+from pms.loop import (
+    enrich_positions_with_mark_prices,
+    enrich_positions_with_usd_from_assets,
+    run_one_tick,
+    run_pms_loop,
+)
 from pms.mark_price import FakeMarkPriceProvider
 from pms.schemas_pydantic import DerivedPosition
 
@@ -26,7 +31,8 @@ class TestEnrichPositionsWithMarkPrices:
     def test_sets_mark_notional_unrealized(self):
         positions = [
             DerivedPosition(
-                account_id="a", book="", symbol="BTCUSDT",
+                broker="",
+                account_id="a", book="", asset="BTCUSDT",
                 open_qty=1.0, position_side="long", entry_avg=50000.0,
                 mark_price=None, notional=None, unrealized_pnl=0.0,
             ),
@@ -41,7 +47,8 @@ class TestEnrichPositionsWithMarkPrices:
     def test_flat_position_keeps_zero_unrealized(self):
         positions = [
             DerivedPosition(
-                account_id="a", book="", symbol="ETHUSDT",
+                broker="",
+                account_id="a", book="", asset="ETHUSDT",
                 open_qty=0.0, position_side="flat", entry_avg=None,
                 mark_price=None, notional=None, unrealized_pnl=0.0,
             ),
@@ -54,32 +61,80 @@ class TestEnrichPositionsWithMarkPrices:
         assert out[0].unrealized_pnl == 0.0
 
 
+class TestEnrichPositionsWithUsdFromAssets:
+    """Stables-first USD enrichment: assets with usd_price get notional; others stay None."""
+
+    @patch("pms.loop.query_assets_usd_config")
+    def test_sets_notional_for_stables_only(self, mock_assets_config):
+        from decimal import Decimal
+        mock_assets_config.return_value = {
+            "USDT": {"usd_price": Decimal("1"), "usd_symbol": None},
+            "BTC": {"usd_price": None, "usd_symbol": "BTCUSDT"},
+        }
+        positions = [
+            DerivedPosition(
+                broker="",
+                account_id="a", book="", asset="USDT",
+                open_qty=10000.0, position_side="long", mark_price=None, notional=None, unrealized_pnl=0.0,
+            ),
+            DerivedPosition(
+                broker="",
+                account_id="a", book="", asset="BTC",
+                open_qty=0.5, position_side="long", mark_price=None, notional=None, unrealized_pnl=0.0,
+            ),
+        ]
+        out = enrich_positions_with_usd_from_assets(lambda: None, positions)
+        assert len(out) == 2
+        by_asset = {p.asset: p for p in out}
+        assert by_asset["USDT"].mark_price == 1.0
+        assert by_asset["USDT"].notional == 10000.0
+        assert by_asset["USDT"].unrealized_pnl == 0.0
+        assert by_asset["BTC"].mark_price is None
+        assert by_asset["BTC"].notional is None
+        assert by_asset["BTC"].unrealized_pnl == 0.0
+
+    @patch("pms.loop.query_assets_usd_config")
+    def test_empty_positions_returns_empty(self, mock_assets_config):
+        mock_assets_config.return_value = {}
+        assert enrich_positions_with_usd_from_assets(lambda: None, []) == []
+
+
 class TestRunOneTick:
-    """Integration: one tick with mocked Postgres and real derivation + mark + write."""
+    """Integration: one tick with mocked Postgres and stables-first USD from assets."""
 
     @patch("pms.loop.write_pms_positions")
-    @patch("pms.loop.query_orders_for_positions")
+    @patch("pms.loop.query_assets_usd_config")
+    @patch("pms.loop.derive_positions_from_orders_and_balance_changes")
     def test_loop_runs_and_writes_enriched_positions(
-        self, mock_query, mock_write
+        self, mock_derive, mock_assets_config, mock_write
     ):
-        mock_query.return_value = [
-            {
-                "account_id": "acc",
-                "book": "",
-                "symbol": "BTCUSDT",
-                "side": "BUY",
-                "executed_quantity": 1.0,
-                "price": 50000.0,
-            },
+        from decimal import Decimal
+        mock_derive.return_value = [
+            DerivedPosition(
+                broker="",
+                account_id="acc",
+                book="",
+                asset="USDT",
+                open_qty=50000.0,
+                position_side="long",
+                entry_avg=None,
+                mark_price=None,
+                notional=None,
+                unrealized_pnl=0.0,
+            ),
         ]
+        mock_assets_config.return_value = {
+            "USDT": {"usd_price": Decimal("1"), "usd_symbol": None},
+        }
         mock_write.return_value = 1
 
         mock_conn = MagicMock()
-        mark_provider = FakeMarkPriceProvider({"BTCUSDT": 51000})
+        mark_provider = FakeMarkPriceProvider()
 
         n = run_one_tick(lambda: mock_conn, mark_provider)
 
-        assert mock_query.called
+        assert mock_derive.called
+        assert mock_assets_config.called
         assert mock_write.called
         assert n == 1
         (pg_connect_arg, positions_arg) = mock_write.call_args[0]
@@ -87,18 +142,17 @@ class TestRunOneTick:
         assert len(positions_arg) == 1
         p = positions_arg[0]
         assert p.account_id == "acc"
-        assert p.symbol == "BTCUSDT"
-        assert p.open_qty == 1.0
+        assert p.asset == "USDT"
+        assert p.open_qty == 50000.0
         assert p.position_side == "long"
-        assert p.entry_avg == 50000.0
-        assert p.mark_price == 51000.0
-        assert p.notional == 51000.0
-        assert p.unrealized_pnl == 1000.0
+        assert p.mark_price == 1.0
+        assert p.notional == 50000.0
+        assert p.unrealized_pnl == 0.0
 
     @patch("pms.loop.write_pms_positions")
-    @patch("pms.loop.query_orders_for_positions")
-    def test_run_pms_loop_stops_on_stop_event(self, mock_query, mock_write):
-        mock_query.return_value = []
+    @patch("pms.loop.derive_positions_from_orders_and_balance_changes")
+    def test_run_pms_loop_stops_on_stop_event(self, mock_derive, mock_write):
+        mock_derive.return_value = []
         mock_write.return_value = 0
         stop = threading.Event()
         stop.set()  # stop immediately after first tick
@@ -108,5 +162,5 @@ class TestRunOneTick:
             tick_interval_seconds=0.01,
             stop_event=stop,
         )
-        assert mock_query.call_count >= 1
+        assert mock_derive.call_count >= 1
         assert mock_write.call_count >= 1

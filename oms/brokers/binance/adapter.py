@@ -15,7 +15,7 @@ from .account_listener import (
     BinanceAccountListenerWsApi,
     create_account_listener,
 )
-from .api_client import BinanceAPIClient, BinanceAPIError
+from .api_client import BinanceAPIClient, BinanceAPIError, _decimal_str
 from .fills_listener import (
     BinanceFillsListener,
     BinanceFillsListenerWsApi,
@@ -190,16 +190,20 @@ class BinanceBrokerAdapter:
         symbol = order.get("symbol", "")
         side = order.get("side", "")
         order_type = order.get("order_type", "MARKET")
-        quantity = order.get("quantity", 0)
-        price = order.get("limit_price") or order.get("price")  # limit price for REST param
+        quantity_raw = order.get("quantity", 0)
+        price_raw = order.get("limit_price") or order.get("price")  # limit price for REST param
         time_in_force = order.get("time_in_force")
 
-        if not symbol or not side or quantity <= 0:
+        if not symbol or not side or quantity_raw <= 0:
             return {
                 "rejected": True,
                 "order_id": order_id,
                 "reject_reason": "Missing or invalid symbol, side, or quantity",
             }
+
+        # Format quantity/price as decimal strings for Binance (no scientific notation, no excess precision)
+        quantity = _decimal_str(quantity_raw)
+        price = _decimal_str(price_raw) if price_raw is not None else None
 
         try:
             resp = self._client.place_order(

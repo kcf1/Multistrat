@@ -13,7 +13,7 @@ The `balance_changes` table provides **historical tracking** of balance modifica
 ```sql
 balance_changes
 ├── id (BIGSERIAL PK)
-├── account_id (FK → accounts)
+├── account_id (TEXT)               -- Broker account id (same as orders.account_id); not FK to accounts
 ├── asset (TEXT)                    -- Asset symbol (e.g. USDT, BTC)
 ├── book (TEXT)                     -- Book for this change; constant "default" for broker-fed; book change records move cash to strategy books
 ├── change_type (TEXT)              -- deposit, withdrawal, transfer, adjustment, snapshot
@@ -171,6 +171,7 @@ Relevant commits for `balance_changes` and the build-from-order cash model:
 | **550c0b6** | (after) | Optional `on_balance_change` callback; write to `balance_changes`; margin_snapshots removal. |
 | **462a49c** | 2026-02-27 | Build-from-order cash tasks in plan: balance_changes.book, symbols, **optional** symbol fallback (e.g. *USDT). |
 | **ead6c5d** | 2026-03-06 | `book` column on balance_changes; default cash book `"default"`; `write_balance_change(..., book=...)`. |
+| **(o5p6q7r8s9t0)** | 2026-03-09 | **account_id** changed from BIGINT (FK → accounts.id) to **TEXT** (broker account id, same as orders.account_id). No join to accounts needed for PMS aggregation by (account_id, book, asset). |
 
 The **schema has always been multi-asset** (`balance_changes.asset`). The only USDT-specific wording was the optional symbol fallback in task 12.3.10 (*USDT → base + USDT); that fallback should be generalized (e.g. parse quote from symbol suffix) so cash is not assumed to be USDT-only.
 

@@ -3,9 +3,12 @@
 Inject 2 fake buys at $1, 1 fake sell at $2, then 2 fake sells at $0.5 into the orders table,
 wait 10s for PMS to build positions, then check that positions match expected.
 
-Expected: one row in positions with open_qty=-1, position_side='short', entry_avg=0.5 (FIFO).
+PMS derives positions at asset grain (base + quote legs). So one symbol BTCUSDT produces two
+position rows: BTC (base) and USDT (quote). Expected: 2 rows — BTC open_qty=-1, position_side=short,
+entry_avg=0.5 (FIFO); USDT open_qty=+1, position_side=long (quote legs: -1-1+2+0.5+0.5=+1).
 
-Run from repo root. Requires DATABASE_URL (e.g. from .env).
+Requires: DATABASE_URL; symbols table must contain BTCUSDT -> (BTC, USDT) for derivation to run.
+Run from repo root.
   python scripts/inject_orders_and_check_pms.py
 """
 
@@ -138,36 +141,54 @@ def main():
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT account_id, book, symbol, open_qty, position_side, entry_avg, mark_price, notional, unrealized_pnl
+                SELECT broker, account_id, book, asset, open_qty, position_side, entry_avg, mark_price, notional, unrealized_pnl
                 FROM positions
-                WHERE account_id = %s AND book = %s AND symbol = %s
+                WHERE broker = %s AND account_id = %s AND book = %s AND asset IN ('BTC', 'USDT')
+                ORDER BY asset
                 """,
-                (account_id, book, symbol),
+                ("binance", account_id, book),
             )
             rows = cur.fetchall()
     finally:
         conn.close()
 
-    if len(rows) != 1:
-        print(f"FAIL: expected 1 position row, got {len(rows)}: {rows}")
-        sys.exit(1)
-    row = rows[0]
-    open_qty = float(row["open_qty"])
-    position_side = row["position_side"]
-    entry_avg = float(row["entry_avg"]) if row["entry_avg"] is not None else None
-
-    if abs(open_qty - (-1.0)) > 1e-6:
-        print(f"FAIL: open_qty={open_qty}, expected -1.0")
-        sys.exit(1)
-    if position_side != "short":
-        print(f"FAIL: position_side={position_side!r}, expected 'short'")
-        sys.exit(1)
-    if entry_avg is None or abs(entry_avg - 0.5) > 1e-6:
-        print(f"FAIL: entry_avg={entry_avg}, expected 0.5 (FIFO)")
+    # Asset grain: one order symbol produces two legs (base + quote) → expect 2 rows
+    if len(rows) != 2:
+        print(f"FAIL: expected 2 position rows (BTC and USDT), got {len(rows)}: {rows}")
         sys.exit(1)
 
-    print("PASS: positions match expected (open_qty=-1, position_side=short, entry_avg=0.5).")
-    print(f"  Row: open_qty={open_qty}, position_side={position_side!r}, entry_avg={entry_avg}")
+    by_asset = {r["asset"]: r for r in rows}
+    if "BTC" not in by_asset or "USDT" not in by_asset:
+        print(f"FAIL: expected assets BTC and USDT, got {list(by_asset.keys())}")
+        sys.exit(1)
+
+    btc = by_asset["BTC"]
+    usdt = by_asset["USDT"]
+    btc_open_qty = float(btc["open_qty"])
+    btc_side = btc["position_side"]
+    btc_entry = float(btc["entry_avg"]) if btc["entry_avg"] is not None else None
+    usdt_open_qty = float(usdt["open_qty"])
+    usdt_side = usdt["position_side"]
+
+    if abs(btc_open_qty - (-1.0)) > 1e-6:
+        print(f"FAIL: BTC open_qty={btc_open_qty}, expected -1.0")
+        sys.exit(1)
+    if btc_side != "short":
+        print(f"FAIL: BTC position_side={btc_side!r}, expected 'short'")
+        sys.exit(1)
+    if btc_entry is None or abs(btc_entry - 0.5) > 1e-6:
+        print(f"FAIL: BTC entry_avg={btc_entry}, expected 0.5 (FIFO)")
+        sys.exit(1)
+    if abs(usdt_open_qty - 1.0) > 1e-6:
+        print(f"FAIL: USDT open_qty={usdt_open_qty}, expected +1.0 (quote legs)")
+        sys.exit(1)
+    if usdt_side != "long":
+        print(f"FAIL: USDT position_side={usdt_side!r}, expected 'long'")
+        sys.exit(1)
+
+    print("PASS: positions match expected (asset grain: BTC -1 short entry_avg=0.5, USDT +1 long).")
+    print(f"  BTC:  open_qty={btc_open_qty}, position_side={btc_side!r}, entry_avg={btc_entry}")
+    print(f"  USDT: open_qty={usdt_open_qty}, position_side={usdt_side!r}")
 
 
 if __name__ == "__main__":

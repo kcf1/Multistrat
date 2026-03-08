@@ -82,6 +82,7 @@ class OrderRow(BaseModel):
 
     account_id: str = Field(..., description="Broker account id (matches orders.account_id)")
     book: str = Field("", description="Strategy/book identifier")
+    broker: str = Field("", description="Broker name (e.g. binance)")
     symbol: str = Field(..., description="Trading symbol")
     side: str = Field(..., description="BUY or SELL")
     executed_quantity: float = Field(0.0, ge=0, description="Filled quantity (from orders.executed_qty)")
@@ -100,11 +101,12 @@ class OrderRow(BaseModel):
 
 
 class DerivedPosition(BaseModel):
-    """One derived position at grain (account_id, book, symbol). Written to positions table."""
+    """One derived position at grain (broker, account_id, book, asset). Written to positions table."""
 
+    broker: str = Field("", description="Broker name (e.g. binance); grain is (broker, account_id, book, asset)")
     account_id: str = Field(..., description="Broker account id")
     book: str = Field("", description="Book identifier")
-    symbol: str = Field(..., description="Trading symbol")
+    asset: str = Field("", description="Asset (e.g. BTC, USDT); grain is (broker, account_id, book, asset)")
     open_qty: float = Field(0.0, description="Signed net quantity: positive = long, negative = short")
     position_side: str = Field("flat", description="'long' | 'short' | 'flat'")
     entry_avg: Optional[float] = Field(None, ge=0, description="Cost basis of open quantity only (FIFO)")

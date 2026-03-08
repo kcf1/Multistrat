@@ -199,7 +199,7 @@ class TestWriteBalanceChange:
         connect, calls = _mock_pg_connect()
         write_balance_change(
             connect,
-            account_id_pk=1,
+            account_id="acc1",
             asset="USDT",
             change_type="deposit",
             delta=Decimal("100"),
@@ -211,8 +211,11 @@ class TestWriteBalanceChange:
         sql, params = calls[0]
         assert "INSERT INTO balance_changes" in sql
         assert "book" in sql
+        assert "broker" in sql
+        assert params.get("account_id") == "acc1"
         assert params.get("asset") == "USDT"
         assert params.get("book") == "default"
+        assert params.get("broker") == ""
         assert params.get("change_type") == "deposit"
         assert params.get("delta") == Decimal("100")
 
@@ -220,17 +223,19 @@ class TestWriteBalanceChange:
         connect, calls = _mock_pg_connect()
         write_balance_change(
             connect,
-            account_id_pk=1,
+            account_id="acc1",
             asset="BTC",
             change_type="withdrawal",
             delta=Decimal("-0.01"),
             event_type="balanceUpdate",
             event_time=1704067200000,
             book="strategy_a",
+            broker="binance",
         )
         assert len(calls) == 1
         _, params = calls[0]
         assert params.get("book") == "strategy_a"
+        assert params.get("broker") == "binance"
 
 
 class TestNormalizeEventTime:

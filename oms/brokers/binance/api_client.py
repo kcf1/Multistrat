@@ -9,7 +9,7 @@ Syncs request timestamp with Binance server time to avoid -1021 (timestamp ahead
 import hashlib
 import hmac
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 from urllib.parse import urlencode
 
 import requests
@@ -17,6 +17,16 @@ import requests
 
 # Refresh server-time offset after this many seconds
 TIME_OFFSET_REFRESH_INTERVAL = 300
+
+
+def _decimal_str(value, max_decimals: int = 8) -> str:
+    """Format number as decimal string for Binance (no scientific notation; no excess precision)."""
+    if isinstance(value, str):
+        return value
+    v = float(value)
+    v = round(v, max_decimals)
+    s = format(v, f'.{max_decimals}f').rstrip('0').rstrip('.')
+    return s if s else '0'
 
 
 class BinanceAPIError(Exception):
@@ -152,8 +162,8 @@ class BinanceAPIClient:
         symbol: str,
         side: str,
         order_type: str,
-        quantity: float,
-        price: Optional[float] = None,
+        quantity: Union[float, str],
+        price: Optional[Union[float, str]] = None,
         time_in_force: Optional[str] = None,
         client_order_id: Optional[str] = None
     ) -> Dict:
@@ -178,15 +188,15 @@ class BinanceAPIClient:
         endpoint = '/api/v3/order'
         url = f"{self.base_url}{endpoint}"
         
-        # Binance expects quantity/price as strings; use same format for signing and request
+        # Binance expects quantity/price as strings (decimal form, no scientific notation)
         params = {
             'symbol': symbol,
             'side': side,
             'type': order_type,
-            'quantity': str(quantity) if not isinstance(quantity, str) else quantity,
+            'quantity': _decimal_str(quantity),
         }
         if price is not None:
-            params['price'] = str(price) if not isinstance(price, str) else price
+            params['price'] = _decimal_str(price)
         if time_in_force:
             params['timeInForce'] = time_in_force
         if client_order_id:

@@ -10,6 +10,7 @@ Skips Redis; writes granular positions table only.
 import argparse
 import sys
 
+from pms.asset_init import init_assets_stables
 from pms.config import PmsSettings
 from pms.log import logger
 from pms.loop import run_one_tick, run_pms_loop
@@ -29,6 +30,15 @@ def main() -> None:
     if not settings.database_url:
         logger.error("DATABASE_URL is not set; cannot run PMS")
         sys.exit(1)
+
+    # One-time assets init at startup (fixed usd_price for major stables, like symbol sync in OMS)
+    try:
+        n = init_assets_stables(settings.database_url)
+        if n:
+            logger.info("Assets init: upserted %s stable(s) with usd_price=1", n)
+    except Exception as e:
+        logger.warning("Assets init at startup failed (continuing): %s", e)
+
     mark_provider = get_mark_price_provider(
         settings.pms_mark_price_source,
         binance_base_url=settings.binance_base_url,
