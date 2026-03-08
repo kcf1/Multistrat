@@ -22,8 +22,8 @@ def enrich_positions_with_usd_from_assets(
     positions: List[DerivedPosition],
 ) -> List[DerivedPosition]:
     """
-    Set usd_value for positions whose asset has usd_price in assets table (stables-first).
-    Assets with only usd_symbol (non-stables) are left with usd_value None; E.3 can fill later.
+    Set usd_price for positions whose asset has usd_price in assets table (stables-first).
+    Assets with only usd_symbol (non-stables) are left with usd_price None; E.3 can fill later.
     """
     if not positions:
         return []
@@ -41,7 +41,7 @@ def enrich_positions_with_usd_from_assets(
                 pass
         out.append(
             p.model_copy(
-                update={"usd_value": usd_f}
+                update={"usd_price": usd_f}
             )
         )
     return out
@@ -66,7 +66,7 @@ def enrich_positions_with_mark_prices(
         usd_f = float(mark) if mark is not None else None
         out.append(
             p.model_copy(
-                update={"usd_value": usd_f}
+                update={"usd_price": usd_f}
             )
         )
     return out

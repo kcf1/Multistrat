@@ -141,7 +141,7 @@ def main():
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT broker, account_id, book, asset, open_qty, position_side, usd_value
+                SELECT broker, account_id, book, asset, open_qty, position_side, usd_price
                 FROM positions
                 WHERE broker = %s AND account_id = %s AND book = %s AND asset IN ('BTC', 'USDT')
                 ORDER BY asset

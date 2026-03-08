@@ -39,15 +39,15 @@ def write_pms_positions(
                 """
                 INSERT INTO positions (
                     broker, account_id, book, asset, open_qty, position_side,
-                    usd_value, updated_at
+                    usd_price, updated_at
                 ) VALUES (
                     %(broker)s, %(account_id)s, %(book)s, %(asset)s, %(open_qty)s, %(position_side)s,
-                    %(usd_value)s, %(updated_at)s
+                    %(usd_price)s, %(updated_at)s
                 )
                 ON CONFLICT (broker, account_id, book, asset) DO UPDATE SET
                     open_qty = EXCLUDED.open_qty,
                     position_side = EXCLUDED.position_side,
-                    usd_value = EXCLUDED.usd_value,
+                    usd_price = EXCLUDED.usd_price,
                     updated_at = EXCLUDED.updated_at
                 """,
                 {
@@ -57,7 +57,7 @@ def write_pms_positions(
                     "asset": asset_val,
                     "open_qty": p.open_qty,
                     "position_side": p.position_side,
-                    "usd_value": p.usd_value,
+                    "usd_price": p.usd_price,
                     "updated_at": now,
                 },
             )

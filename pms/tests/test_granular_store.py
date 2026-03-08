@@ -24,7 +24,7 @@ class TestWritePmsPositions:
             DerivedPosition(
                 broker="",
                 account_id="acc1", book="b1", asset="BTCUSDT",
-                open_qty=1.0, position_side="long", usd_value=50000.0,
+                open_qty=1.0, position_side="long", usd_price=50000.0,
             ),
         ]
         n = write_pms_positions(lambda: mock_conn, positions)
@@ -39,10 +39,10 @@ class TestWritePmsPositions:
         assert call_args["asset"] == "BTCUSDT"
         assert float(call_args["open_qty"]) == 1.0
         assert call_args["position_side"] == "long"
-        assert call_args["usd_value"] == 50000.0
+        assert call_args["usd_price"] == 50000.0
         assert mock_conn.commit.called
 
-    def test_upserts_position_with_usd_value(self):
+    def test_upserts_position_with_usd_price(self):
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.cursor.return_value = mock_cur
@@ -52,13 +52,31 @@ class TestWritePmsPositions:
             DerivedPosition(
                 broker="",
                 account_id="a", book="b", asset="BTCUSDT",
-                open_qty=1.0, position_side="long", usd_value=51000.0,
+                open_qty=1.0, position_side="long", usd_price=51000.0,
             ),
         ]
         n = write_pms_positions(lambda: mock_conn, positions)
         assert n == 1
         call_args = mock_cur.execute.call_args[0][1]
-        assert call_args["usd_value"] == 51000.0
+        assert call_args["usd_price"] == 51000.0
+
+    def test_insert_does_not_write_usd_notional(self):
+        """usd_notional is a generated column in DB; we only write usd_price."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn.close = MagicMock()
+        positions = [
+            DerivedPosition(
+                broker="", account_id="a", book="b", asset="BTC",
+                open_qty=1.0, position_side="long", usd_price=50000.0,
+            ),
+        ]
+        write_pms_positions(lambda: mock_conn, positions)
+        sql = mock_cur.execute.call_args[0][0]
+        assert "usd_notional" not in sql.lower()
+        params = mock_cur.execute.call_args[0][1]
+        assert "usd_notional" not in params
 
     def test_upserts_multiple_and_commits_once(self):
         mock_conn = MagicMock()
@@ -67,8 +85,8 @@ class TestWritePmsPositions:
         mock_conn.close = MagicMock()
 
         positions = [
-            DerivedPosition(broker="", account_id="a", book="", asset="BTCUSDT", open_qty=1.0, position_side="long", usd_value=50000.0),
-            DerivedPosition(broker="", account_id="a", book="", asset="ETHUSDT", open_qty=-2.0, position_side="short", usd_value=3000.0),
+            DerivedPosition(broker="", account_id="a", book="", asset="BTCUSDT", open_qty=1.0, position_side="long", usd_price=50000.0),
+            DerivedPosition(broker="", account_id="a", book="", asset="ETHUSDT", open_qty=-2.0, position_side="short", usd_price=3000.0),
         ]
         n = write_pms_positions(lambda: mock_conn, positions)
         assert n == 2
@@ -92,12 +110,12 @@ class TestWritePmsPositionsAssetGrain:
             DerivedPosition(
                 broker="",
                 account_id="acc1", book="default", asset="BTC",
-                open_qty=0.5, position_side="long", usd_value=50000.0,
+                open_qty=0.5, position_side="long", usd_price=50000.0,
             ),
             DerivedPosition(
                 broker="",
                 account_id="acc1", book="default", asset="USDT",
-                open_qty=-25000.0, position_side="short", usd_value=1.0,
+                open_qty=-25000.0, position_side="short", usd_price=1.0,
             ),
         ]
         n = write_pms_positions(lambda: mock_conn, positions)

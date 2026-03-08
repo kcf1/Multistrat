@@ -8,7 +8,7 @@ See docs/pms/PMS_ARCHITECTURE.md §12. Config lives in pms/config.py.
 from decimal import Decimal
 from typing import Dict, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 
 class MarkPricesResult(BaseModel):
@@ -109,4 +109,12 @@ class DerivedPosition(BaseModel):
     asset: str = Field("", description="Asset (e.g. BTC, USDT); grain is (broker, account_id, book, asset)")
     open_qty: float = Field(0.0, description="Signed net quantity: positive = long, negative = short")
     position_side: str = Field("flat", description="'long' | 'short' | 'flat'")
-    usd_value: Optional[float] = Field(None, ge=0, description="Price per unit of asset in USD (set by enrichment)")
+    usd_price: Optional[float] = Field(None, ge=0, description="Price per unit of asset in USD (set by enrichment; aligns with assets.usd_price)")
+    
+    @computed_field
+    @property
+    def usd_notional(self) -> Optional[float]:
+        """Derived: open_qty * usd_price. None if usd_price is None."""
+        if self.usd_price is None:
+            return None
+        return self.open_qty * self.usd_price

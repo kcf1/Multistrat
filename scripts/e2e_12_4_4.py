@@ -307,7 +307,7 @@ def run_e2e(
                     cur = conn.cursor()
                     cur.execute(
                         """
-                        SELECT broker, account_id, book, asset, open_qty, position_side, usd_value
+                        SELECT broker, account_id, book, asset, open_qty, position_side, usd_price
                         FROM positions
                         WHERE broker = %s AND book = %s AND asset = ANY(%s)
                         ORDER BY asset
@@ -320,7 +320,7 @@ def run_e2e(
                         found.append((r[0], r[1], r[2], asset, open_qty, r[5], float(r[6] or 0) if r[6] is not None else None))
                 finally:
                     conn.close()
-                by_asset = {a: (oq, ps) for (_, _, _, a, oq, ps, _) in found}
+                by_asset = {a: (oq, ps) for (_, _, _, a, oq, ps, __) in found}
                 poll_count += 1
                 log("   downstream_check [positions] poll #%s: assets_found=%s by_asset=%s" % (poll_count, list(by_asset.keys()), by_asset))
                 if len(by_asset) < len(E2E_EXPECTED_ASSETS):
@@ -334,9 +334,9 @@ def run_e2e(
                         all_ok = False
                         break
                 if all_ok:
-                    for (broker, acc, book, a, oq, ps, usd_val) in found:
+                    for (broker, acc, book, a, oq, ps, usd_p) in found:
                         exp = E2E_EXPECTED_OPEN_QTY.get(a, (None, ""))
-                        log(f"   position: {a} open_qty={oq} (expected {exp[0]}) side={ps} usd_value={usd_val}")
+                        log(f"   position: {a} open_qty={oq} (expected {exp[0]}) side={ps} usd_price={usd_p} usd_notional={oq * usd_p if usd_p is not None else None}")
                     log("   OK: PMS positions match expected (asset grain: long only, short only, long < short)")
                     break
             except Exception as e:
@@ -349,7 +349,7 @@ def run_e2e(
                 "len(by_asset)=%s < %s (missing assets)" % (len(by_asset), len(E2E_EXPECTED_ASSETS)) if len(by_asset) < len(E2E_EXPECTED_ASSETS) else "wrong open_qty or position_side for base assets"
             ))
             if found:
-                for (broker, acc, book, a, oq, ps, usd_val) in found:
+                for (broker, acc, book, a, oq, ps, usd_p) in found:
                     exp = E2E_EXPECTED_OPEN_QTY.get(a, (None, "?"))
                     log(f"   seen: {a} open_qty={oq} (expected {exp[0]}) side={ps}")
                 log("   downstream_check [positions] expected: %s" % dict(E2E_EXPECTED_OPEN_QTY))

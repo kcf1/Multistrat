@@ -28,38 +28,53 @@ class TestEnrichPositionsWithMarkPrices:
                 return type('R', (), {'prices': {}})()
         assert enrich_positions_with_mark_prices([], Noop()) == []
 
-    def test_sets_usd_value_from_provider(self):
+    def test_sets_usd_price_from_provider(self):
         positions = [
             DerivedPosition(
                 broker="",
                 account_id="a", book="", asset="BTCUSDT",
-                open_qty=1.0, position_side="long", usd_value=None,
+                open_qty=1.0, position_side="long", usd_price=None,
             ),
         ]
         provider = FakeMarkPriceProvider({"BTCUSDT": 51000})
         out = enrich_positions_with_mark_prices(positions, provider)
         assert len(out) == 1
-        assert out[0].usd_value == 51000.0
+        assert out[0].usd_price == 51000.0
+        assert out[0].usd_notional == 51000.0
 
-    def test_flat_position_gets_usd_value(self):
+    def test_flat_position_gets_usd_price(self):
         positions = [
             DerivedPosition(
                 broker="",
                 account_id="a", book="", asset="ETHUSDT",
-                open_qty=0.0, position_side="flat", usd_value=None,
+                open_qty=0.0, position_side="flat", usd_price=None,
             ),
         ]
         provider = FakeMarkPriceProvider({"ETHUSDT": 3000})
         out = enrich_positions_with_mark_prices(positions, provider)
         assert len(out) == 1
-        assert out[0].usd_value == 3000.0
+        assert out[0].usd_price == 3000.0
+        assert out[0].usd_notional == 0.0
+
+    def test_short_position_gets_usd_price_and_negative_notional(self):
+        positions = [
+            DerivedPosition(
+                broker="", account_id="a", book="", asset="ETHUSDT",
+                open_qty=-2.0, position_side="short", usd_price=None,
+            ),
+        ]
+        provider = FakeMarkPriceProvider({"ETHUSDT": 3500})
+        out = enrich_positions_with_mark_prices(positions, provider)
+        assert len(out) == 1
+        assert out[0].usd_price == 3500.0
+        assert out[0].usd_notional == -7000.0
 
 
 class TestEnrichPositionsWithUsdFromAssets:
-    """Stables-first USD enrichment: assets with usd_price get usd_value; others stay None."""
+    """Stables-first USD enrichment: assets with usd_price get usd_price; others stay None."""
 
     @patch("pms.loop.query_assets_usd_config")
-    def test_sets_usd_value_for_stables_only(self, mock_assets_config):
+    def test_sets_usd_price_for_stables_only(self, mock_assets_config):
         from decimal import Decimal
         mock_assets_config.return_value = {
             "USDT": {"usd_price": Decimal("1"), "usd_symbol": None},
@@ -69,19 +84,21 @@ class TestEnrichPositionsWithUsdFromAssets:
             DerivedPosition(
                 broker="",
                 account_id="a", book="", asset="USDT",
-                open_qty=10000.0, position_side="long", usd_value=None,
+                open_qty=10000.0, position_side="long", usd_price=None,
             ),
             DerivedPosition(
                 broker="",
                 account_id="a", book="", asset="BTC",
-                open_qty=0.5, position_side="long", usd_value=None,
+                open_qty=0.5, position_side="long", usd_price=None,
             ),
         ]
         out = enrich_positions_with_usd_from_assets(lambda: None, positions)
         assert len(out) == 2
         by_asset = {p.asset: p for p in out}
-        assert by_asset["USDT"].usd_value == 1.0
-        assert by_asset["BTC"].usd_value is None
+        assert by_asset["USDT"].usd_price == 1.0
+        assert by_asset["USDT"].usd_notional == 10000.0
+        assert by_asset["BTC"].usd_price is None
+        assert by_asset["BTC"].usd_notional is None
 
     @patch("pms.loop.query_assets_usd_config")
     def test_empty_positions_returns_empty(self, mock_assets_config):
@@ -131,7 +148,8 @@ class TestRunOneTick:
         assert p.asset == "USDT"
         assert p.open_qty == 50000.0
         assert p.position_side == "long"
-        assert p.usd_value == 1.0
+        assert p.usd_price == 1.0
+        assert p.usd_notional == 50000.0
 
     @patch("pms.loop.write_pms_positions")
     @patch("pms.loop.derive_positions_from_orders_and_balance_changes")
