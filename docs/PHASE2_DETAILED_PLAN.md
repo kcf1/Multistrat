@@ -339,21 +339,39 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 ---
 
-## 9. Risk service (minimal for Phase 2)
+## 9. Risk service (Phase 2 scope)
 
 ### 9.1 Role
 
-- Consume from Redis stream `strategy_orders` (or skip and use **test inject** only).
-- **Pass-through:** For each message, optionally validate (e.g. symbol format); then publish the same (or enriched) payload to `risk_approved`. No position/margin checks yet.
-- Enables the pipeline Strategy → Risk → OMS for Phase 5; in Phase 2 you can **inject test orders** directly into `risk_approved` to drive OMS/PMS.
+- Keep the main focus of Phase 2 on **OMS/PMS and broker integration**.
+- Risk service can run in one of two modes:
+  - **Pass-through mode (default for Phase 2):** consume `strategy_orders`, perform schema validation only, and forward messages to `risk_approved` unchanged so OMS can be exercised end-to-end.
+  - **Minimal rules mode (optional in Phase 2):** enable a very small subset of hard checks (e.g. min/max quantity and allowed venues) while leaving all stateful exposure/PnL/margin checks for Phase 5.
+- Full, expandable rule design and recommended rule set are defined in `docs/risk/RISK_SERVICE_PLAN.md`.
 
-### 9.2 Test inject
+See: [docs/risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md) for architecture and full rules list (Phase 5 target).
 
-- Small script or Redis CLI: XADD into `risk_approved` with a JSON body including `broker: "binance"`, symbol, side, quantity, order_type, etc., so OMS routes to the Binance adapter and sends to testnet. No Strategy or Risk process required for E2E.
+### 9.2 Minimal rules for Phase 2 (optional)
 
-### 9.3 Deployment
+If you choose to enable “real” checks already in Phase 2, start with **simple, stateless constraints** that do not depend on PMS outputs:
 
-- Optional in Phase 2: run Risk as a loop process, or omit and use only test inject for E2E.
+- **ORDER_01_MIN_QTY**: reject orders with `quantity` below configured per-symbol minimum.
+- **ORDER_02_MAX_QTY**: reject orders with `quantity` above configured per-symbol/account maximum.
+- **VENUE_01_ALLOWED_VENUES**: reject orders whose `broker`/venue is not in the allowed list for the account/strategy.
+
+All other rules (position limits, margin/leverage, PnL/drawdown) are deferred to Phase 5 when PMS is the stable source of exposure and PnL.
+
+### 9.3 Test inject
+
+- Even with a running Risk service, retain a **test inject script** (see §12.4) that can write directly to `risk_approved` for OMS/PMS testing.
+- When Risk is disabled, you can bypass it entirely and push orders straight into `risk_approved` to drive OMS without strategies.
+
+### 9.4 Deployment
+
+- Optional in Phase 2: Docker service `risk`:
+  - Loop: `strategy_orders` → Risk (pass-through or minimal rules) → `risk_approved`.
+  - Env: `REDIS_URL` plus any simple static config (e.g. min/max qty per symbol via config file or DB).
+- Phase 5 will extend the same service to use PMS-derived account snapshots and the full rule set from `docs/risk/RISK_SERVICE_PLAN.md`.
 
 ---
 
