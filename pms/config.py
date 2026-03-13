@@ -6,6 +6,19 @@ Task 12.3.1b: Use Pydantic for config. See docs/pms/PMS_ARCHITECTURE.md §12.
 
 from typing import Optional
 
+# Asset price feed runs every tick; interval reserved for future use (seconds).
+ASSET_PRICE_FEED_INTERVAL_SECONDS: float = 60.0
+
+# Asset price feed source: "binance" or "" to disable. Not from env.
+ASSET_PRICE_FEED_SOURCE: str = "binance"
+
+# Assets to update from the price feed (same list as reset_and_seed_assets top coins). Not from env.
+ASSET_PRICE_FEED_ASSETS: tuple = (
+    "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "AVAX", "TRX", "DOT",
+    "LINK", "MATIC", "SHIB", "LTC", "BCH", "UNI", "ATOM", "XLM", "XMR", "ETC",
+    "FIL", "APT", "HBAR", "VET", "OP", "ARB", "INJ", "IMX", "SAND", "MANA",
+)
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -46,21 +59,8 @@ class PmsSettings(BaseSettings):
         description="Binance REST base URL (e.g. https://testnet.binance.vision); default testnet for spot",
     )
 
-    # Asset price feed (docs/pms/ASSET_PRICE_FEED_PLAN.md)
-    pms_asset_price_source: str = Field(
-        default="",
-        description="Asset price feed source: 'binance' or '' to disable",
-    )
-    pms_asset_price_interval_seconds: float = Field(
-        default=60.0,
-        ge=1.0,
-        description="How often to run asset price feed (seconds)",
-    )
+    # Asset price feed (docs/pms/ASSET_PRICE_FEED_PLAN.md); source is constant ASSET_PRICE_FEED_SOURCE
     binance_price_feed_base_url: Optional[str] = Field(
         default=None,
         description="Binance REST base URL for asset price feed; default testnet when use_testnet",
-    )
-    pms_asset_price_assets: Optional[str] = Field(
-        default=None,
-        description="Comma-separated assets to update from feed; if empty, use DB (usd_symbol set)",
     )

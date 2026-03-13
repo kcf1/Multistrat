@@ -90,22 +90,22 @@ Ordered tasks; each can be a PR or commit.
 
 | Step | Task | Details |
 |------|------|---------|
-| 9 | Add config fields | In `pms/config.py`: `pms_asset_price_source: str = ""` (e.g. `"binance"` or `""` to disable). `pms_asset_price_interval_seconds: float = 60.0`. `binance_price_feed_base_url: Optional[str] = None`. `pms_asset_price_assets: Optional[str] = None` (comma-separated; if empty, derive from DB). |
+| 9 | Add config fields | In `pms/config.py`: Constants `ASSET_PRICE_FEED_SOURCE` (`"binance"` or `""` to disable), `ASSET_PRICE_FEED_ASSETS`, `ASSET_PRICE_FEED_INTERVAL_SECONDS`. Env: `binance_price_feed_base_url: Optional[str] = None`. |
 | 10 | Provider factory / registry | New file `pms/asset_price_providers/registry.py`: `get_asset_price_provider(name: str, **kwargs) -> Optional[AssetPriceProvider]`. For `"binance"` return `BinanceAssetPriceProvider(...)` using config; for `""` or unknown return None. |
 
 ### 3.5 Wire into PMS process
 
 | Step | Task | Details |
 |------|------|---------|
-| 11 | Integrate feed into PMS loop | In `pms/main.py`: if `pms_asset_price_source` is set, before or after `run_one_tick`, call `run_asset_price_feed_step` with provider from registry and asset list (from config or `query_assets_for_price_source`). Use same `pg_connect`. Run feed once per tick for simplicity. |
+| 11 | Integrate feed into PMS loop | In `pms/main.py`: if `ASSET_PRICE_FEED_SOURCE` is set, before or after `run_one_tick`, call `run_asset_price_feed_step` with provider from registry and asset list from `ASSET_PRICE_FEED_ASSETS`. Use same `pg_connect`. Run feed once per tick for simplicity. |
 | 12 | Optional: ensure assets rows exist for feed | Document or add step: ensure `assets` has rows for symbols (from `init_assets_stables` for stables; from symbols table or seed for BTC, ETH, etc.). Can be one-time script or periodic. |
 
 ### 3.6 Documentation and tests
 
 | Step | Task | Details |
 |------|------|---------|
-| 13 | Update this plan | Mark checklist items as done; reference implementation plan. |
-| 14 | Integration test | Test: mocked provider + DB, run `run_asset_price_feed_step`, assert `assets.usd_price` and `price_source` updated. |
+| 13 | Update this plan | Mark checklist items as done; reference implementation plan. *Done: §9 checklist updated.* |
+| 14 | Integration test | Test: mocked provider + DB, run `run_asset_price_feed_step`, assert `assets.usd_price` and `price_source` updated. *Done: `test_integration_feed_step_writes_usd_price_and_price_source` in `pms/tests/test_asset_price_feed.py`.* |
 
 ### 3.7 File summary
 
@@ -117,7 +117,7 @@ Ordered tasks; each can be a PR or commit.
 | `pms/asset_price_providers/binance.py` | New; `BinanceAssetPriceProvider`. |
 | `pms/asset_price_providers/registry.py` | New; `get_asset_price_provider(name, **kwargs)`. |
 | `pms/asset_price_feed.py` | New; `query_assets_for_price_source`, `update_asset_prices`, `run_asset_price_feed_step`. |
-| `pms/config.py` | Add: `pms_asset_price_source`, `pms_asset_price_interval_seconds`, `binance_price_feed_base_url`, `pms_asset_price_assets`. |
+| `pms/config.py` | Constants: `ASSET_PRICE_FEED_SOURCE`, `ASSET_PRICE_FEED_INTERVAL_SECONDS`, `ASSET_PRICE_FEED_ASSETS`. Env: `binance_price_feed_base_url`. |
 | `pms/main.py` | Wire feed step when source configured. |
 | `pms/reads.py` | Optional: add `query_assets_for_price_source` if asset list from DB. |
 | `pms/tests/test_asset_price_providers.py` | New; unit tests. |
@@ -132,7 +132,7 @@ Ordered tasks; each can be a PR or commit.
 
 ### 3.9 Pydantic usage
 
-- **Config (step 9):** PMS already uses **pydantic-settings** in `pms/config.py`. New feed settings (`pms_asset_price_source`, `binance_price_feed_base_url`, etc.) are added there and get the same env-based validation and typing.
+- **Config (step 9):** PMS already uses **pydantic-settings** in `pms/config.py`. Feed source and asset list are constants (`ASSET_PRICE_FEED_SOURCE`, `ASSET_PRICE_FEED_ASSETS`); only `binance_price_feed_base_url` is from env.
 - **Provider interface:** The contract uses plain types (`get_prices(assets: List[str]) -> Dict[str, Optional[float]]`). No Pydantic model is required for the interface or the feed step.
 - **Optional:** For Binance response parsing you can reuse `BinanceTickerPriceItem` from `pms/schemas_pydantic.py` (as in `pms/mark_price.py`) to validate each ticker item; otherwise parse to float in the provider and return the dict. Using the existing schema keeps consistency with the rest of PMS.
 
@@ -192,7 +192,7 @@ Start simple: one source (Binance), one list of assets (from config or derived f
    - No change: `query_assets_usd_config()` and `enrich_positions_with_usd_from_assets()` already use `assets.usd_price`. After the feed runs, enrichment sees updated prices.
 
 5. **Config**
-   - E.g. `PMS_ASSET_PRICE_SOURCE=binance` (which provider to run).
+   - E.g. constant `ASSET_PRICE_FEED_SOURCE=binance` (which provider to run).
    - `BINANCE_PRICE_FEED_BASE_URL` (optional; default testnet/main).
    - `PMS_ASSET_PRICE_ASSETS` (optional; comma-separated; if empty, derive from assets table rows that have `usd_symbol` set).
 
@@ -201,7 +201,7 @@ Start simple: one source (Binance), one list of assets (from config or derived f
 ## 7. Extensibility (later sources)
 
 - Add a new provider class implementing `AssetPriceProvider` (e.g. CoinGecko).
-- Register it in config (e.g. `PMS_ASSET_PRICE_SOURCE=coingecko` or run two feeds with different source names).
+- Register it in config (e.g. constant `ASSET_PRICE_FEED_SOURCE=coingecko` or run two feeds with different source names).
 - If using Option A with disjoint asset lists: assign a set of assets to the new source. If using overlapping sources: add resolution (e.g. priority list) and a small job that writes the chosen price into `assets.usd_price`.
 - PMS and enrichment remain unchanged.
 
@@ -221,12 +221,12 @@ Recommendation: **Option 1** for Binance-first (run feed step inside PMS process
 
 Use **§3 Implementation plan** for the full task list. Summary:
 
-- [ ] **Schema:** Migration to add `price_source` to `assets` (step 1).
-- [ ] **Provider:** `AssetPriceProvider` interface + `BinanceAssetPriceProvider` + registry (steps 2–4, 10).
-- [ ] **Feed:** `query_assets_for_price_source`, `update_asset_prices`, `run_asset_price_feed_step` in `pms/asset_price_feed.py` (steps 6–8).
-- [ ] **Config:** `pms_asset_price_source`, interval, Binance URL, asset list (step 9).
-- [ ] **Wire:** Call feed step in PMS loop when source set (step 11).
-- [ ] **Tests:** Unit tests for provider; optional integration test for feed step (steps 5, 14).
+- [x] **Schema:** Migration to add `price_source` to `assets` (step 1).
+- [x] **Provider:** `AssetPriceProvider` interface + `BinanceAssetPriceProvider` + registry (steps 2–4, 10).
+- [x] **Feed:** `query_assets_for_price_source`, `update_asset_prices`, `run_asset_price_feed_step` in `pms/asset_price_feed.py` (steps 6–8).
+- [x] **Config:** `ASSET_PRICE_FEED_SOURCE`, interval, Binance URL, asset list (step 9).
+- [x] **Wire:** Call feed step in PMS loop when source set (step 11).
+- [x] **Tests:** Unit tests for provider; integration test for feed step (steps 5, 14).
 
 ---
 

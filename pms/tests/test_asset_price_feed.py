@@ -107,3 +107,38 @@ class TestRunAssetPriceFeedStep:
         assert mock_cur.execute.call_count == 1
         assert mock_cur.execute.call_args[0][1][3] == "BTC"
         assert mock_cur.execute.call_args[0][1][0] == 51000.0
+
+    def test_integration_feed_step_writes_usd_price_and_price_source(self):
+        """Integration (mocked DB): run_asset_price_feed_step updates assets.usd_price and price_source."""
+        class FakeProvider(AssetPriceProvider):
+            def get_prices(self, assets):
+                return {"BTC": 60000.0, "ETH": 3500.0}
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.rowcount = 1
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn.close = MagicMock()
+        n = run_asset_price_feed_step(
+            lambda: mock_conn,
+            FakeProvider(),
+            "binance",
+            ["BTC", "ETH"],
+        )
+        assert n == 2
+        assert mock_cur.execute.call_count == 2
+        sql = mock_cur.execute.call_args_list[0][0][0]
+        assert "UPDATE assets" in sql
+        assert "usd_price" in sql and "price_source" in sql
+        params_btc = next(
+            call[0][1] for call in mock_cur.execute.call_args_list
+            if call[0][1][3] == "BTC"
+        )
+        params_eth = next(
+            call[0][1] for call in mock_cur.execute.call_args_list
+            if call[0][1][3] == "ETH"
+        )
+        assert params_btc[0] == 60000.0
+        assert params_btc[2] == "binance"
+        assert params_eth[0] == 3500.0
+        assert params_eth[2] == "binance"
+        assert mock_conn.commit.called

@@ -23,7 +23,7 @@ def get_asset_price_provider(
     Return AssetPriceProvider for the given source name, or None if disabled/unknown.
 
     Args:
-        name: From pms_asset_price_source (e.g. 'binance' or '' to disable).
+        name: From ASSET_PRICE_FEED_SOURCE (e.g. 'binance' or '' to disable).
         base_url: Binance REST base URL (when name=binance); overrides use_testnet if set.
         timeout: Request timeout in seconds.
         use_testnet: Use testnet when base_url not set (binance only).

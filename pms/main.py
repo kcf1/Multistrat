@@ -5,14 +5,15 @@ Usage:
   python -m pms.main           # loop: refresh every PMS_TICK_INTERVAL_SECONDS (default 10s)
   python -m pms.main --once   # on-request refresh: run one tick and exit
 Skips Redis; writes granular positions table only.
-When PMS_ASSET_PRICE_SOURCE is set (e.g. binance), runs asset price feed before each tick.
+When ASSET_PRICE_FEED_SOURCE is set (e.g. binance), runs asset price feed before each tick.
 """
 
 import argparse
 import sys
 
 from pms.asset_init import init_assets_stables
-from pms.asset_price_feed import query_assets_for_price_source, run_asset_price_feed_step
+from pms.asset_price_feed import run_asset_price_feed_step
+from pms.config import ASSET_PRICE_FEED_ASSETS, ASSET_PRICE_FEED_SOURCE
 from pms.asset_price_providers import get_asset_price_provider
 from pms.config import PmsSettings
 from pms.log import logger
@@ -50,19 +51,13 @@ def main() -> None:
     # Asset price feed (optional): update assets.usd_price before each tick
     feed_provider = None
     feed_assets = []
-    if settings.pms_asset_price_source and settings.pms_asset_price_source.strip():
+    if ASSET_PRICE_FEED_SOURCE and ASSET_PRICE_FEED_SOURCE.strip():
         feed_provider = get_asset_price_provider(
-            settings.pms_asset_price_source.strip(),
+            ASSET_PRICE_FEED_SOURCE.strip(),
             base_url=settings.binance_price_feed_base_url,
         )
         if feed_provider is not None:
-            if settings.pms_asset_price_assets and settings.pms_asset_price_assets.strip():
-                feed_assets = [a.strip() for a in settings.pms_asset_price_assets.split(",") if a.strip()]
-            else:
-                try:
-                    feed_assets = query_assets_for_price_source(settings.database_url)
-                except Exception as e:
-                    logger.warning("Asset price feed: query_assets_for_price_source failed (continuing): %s", e)
+            feed_assets = list(ASSET_PRICE_FEED_ASSETS)
 
     def run_feed_step() -> None:
         if feed_provider is not None and feed_assets:
@@ -70,7 +65,7 @@ def main() -> None:
                 n = run_asset_price_feed_step(
                     settings.database_url,
                     feed_provider,
-                    settings.pms_asset_price_source.strip(),
+                    ASSET_PRICE_FEED_SOURCE.strip(),
                     feed_assets,
                 )
                 if n:

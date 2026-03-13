@@ -56,25 +56,11 @@ class TestPmsSettings:
                 PmsSettings()
 
     def test_asset_price_feed_defaults(self):
-        s = PmsSettings()
-        assert s.pms_asset_price_source == ""
-        assert s.pms_asset_price_interval_seconds == 60.0
-        assert s.binance_price_feed_base_url is None
-        assert s.pms_asset_price_assets is None
-
-    def test_asset_price_feed_from_env(self):
-        with patch.dict(
-            os.environ,
-            {
-                "PMS_ASSET_PRICE_SOURCE": "binance",
-                "PMS_ASSET_PRICE_INTERVAL_SECONDS": "30",
-                "BINANCE_PRICE_FEED_BASE_URL": "https://api.binance.com",
-                "PMS_ASSET_PRICE_ASSETS": "BTC,ETH,BNB",
-            },
-            clear=False,
-        ):
+        with patch.dict(os.environ, {"BINANCE_PRICE_FEED_BASE_URL": ""}, clear=False):
             s = PmsSettings()
-        assert s.pms_asset_price_source == "binance"
-        assert s.pms_asset_price_interval_seconds == 30.0
+        assert s.binance_price_feed_base_url in (None, "")
+
+    def test_asset_price_feed_base_url_from_env(self):
+        with patch.dict(os.environ, {"BINANCE_PRICE_FEED_BASE_URL": "https://api.binance.com"}, clear=False):
+            s = PmsSettings()
         assert s.binance_price_feed_base_url == "https://api.binance.com"
-        assert s.pms_asset_price_assets == "BTC,ETH,BNB"

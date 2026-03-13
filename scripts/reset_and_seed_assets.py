@@ -29,16 +29,10 @@ from pms.asset_init import (
     truncate_assets,
     upsert_asset,
 )
+from pms.config import ASSET_PRICE_FEED_ASSETS
 
 # Stables: fixed 1:1 USD, price_source='fixed'
 STABLES = ("USDT", "USDC", "BUSD", "DAI")
-
-# Top ~30 by market cap (Binance spot pairs as USDT); exclude stables already in STABLES
-TOP_COINS_BY_MARKET_CAP = (
-    "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "AVAX", "TRX", "DOT",
-    "LINK", "MATIC", "SHIB", "LTC", "BCH", "UNI", "ATOM", "XLM", "XMR", "ETC",
-    "FIL", "APT", "HBAR", "VET", "OP", "ARB", "INJ", "IMX", "SAND", "MANA",
-)
 
 
 def main() -> int:
@@ -59,10 +53,10 @@ def main() -> int:
     )
     print("reset_and_seed_assets: added %s stable(s) with usd_price=1, price_source=%r" % (n_stables, PRICE_SOURCE_FIXED))
 
-    # 3. Top 30 coins: usd_symbol only (feed will set usd_price)
+    # 3. Top coins from config: usd_symbol only (feed will set usd_price)
     quote = "USDT"
     count = 0
-    for asset in TOP_COINS_BY_MARKET_CAP:
+    for asset in ASSET_PRICE_FEED_ASSETS:
         if upsert_asset(database_url, asset, usd_symbol=f"{asset}{quote}"):
             count += 1
     print("reset_and_seed_assets: added %s top coins with usd_symbol (feed will set usd_price)" % count)
