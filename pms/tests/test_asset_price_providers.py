@@ -1,0 +1,154 @@
+"""
+Unit tests for asset price providers (AssetPriceProvider, BinanceAssetPriceProvider).
+
+See docs/pms/ASSET_PRICE_FEED_PLAN.md §3.2 step 5.
+"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from pms.asset_price_providers import (
+    AssetPriceProvider,
+    AssetPriceProviderError,
+    BinanceAssetPriceProvider,
+)
+
+
+class TestAssetPriceProvider:
+    """Interface contract: get_prices(assets) -> Dict[str, Optional[float]]."""
+
+    def test_interface_requires_get_prices(self):
+        class Concrete(AssetPriceProvider):
+            def get_prices(self, assets):
+                return {}
+
+        p = Concrete()
+        assert p.get_prices(["BTC"]) == {}
+
+    def test_empty_assets_returns_empty(self):
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200, json=MagicMock(return_value=[]))
+            out = provider.get_prices([])
+        assert out == {}
+
+
+class TestBinanceAssetPriceProvider:
+    """Binance provider: symbol = asset+USDT, parse ticker/price response."""
+
+    def test_empty_assets_returns_empty_dict(self):
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision")
+        out = provider.get_prices([])
+        assert out == {}
+
+    def test_whitespace_assets_normalized(self):
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = MagicMock(
+                status_code=200,
+                json=MagicMock(return_value=[
+                    {"symbol": "BTCUSDT", "price": "50000.5"},
+                ]),
+            )
+            out = provider.get_prices(["  btc  "])
+        assert out == {"BTC": 50000.5}
+
+    def test_returns_asset_to_price_for_requested_assets(self):
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = MagicMock(
+                status_code=200,
+                json=MagicMock(return_value=[
+                    {"symbol": "BTCUSDT", "price": "50000.25"},
+                    {"symbol": "ETHUSDT", "price": "3000.5"},
+                    {"symbol": "BNBUSDT", "price": "400"},
+                ]),
+            )
+            out = provider.get_prices(["BTC", "ETH", "BNB"])
+        assert out["BTC"] == 50000.25
+        assert out["ETH"] == 3000.5
+        assert out["BNB"] == 400
+        assert len(out) == 3
+
+    def test_filters_to_requested_assets_only(self):
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = MagicMock(
+                status_code=200,
+                json=MagicMock(return_value=[
+                    {"symbol": "BTCUSDT", "price": "50000"},
+                    {"symbol": "ETHUSDT", "price": "3000"},
+                    {"symbol": "DOGEUSDT", "price": "0.1"},
+                ]),
+            )
+            out = provider.get_prices(["BTC"])
+        assert out == {"BTC": 50000.0}
+
+    def test_skips_symbols_not_ending_with_quote(self):
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision", quote_asset="USDT")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = MagicMock(
+                status_code=200,
+                json=MagicMock(return_value=[
+                    {"symbol": "BTCBUSD", "price": "50000"},
+                    {"symbol": "BTCUSDT", "price": "50001"},
+                ]),
+            )
+            out = provider.get_prices(["BTC"])
+        assert out == {"BTC": 50001.0}
+
+    def test_custom_quote_asset(self):
+        provider = BinanceAssetPriceProvider(
+            base_url="https://testnet.binance.vision",
+            quote_asset="BUSD",
+        )
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = MagicMock(
+                status_code=200,
+                json=MagicMock(return_value=[
+                    {"symbol": "BTCBUSD", "price": "49900"},
+                ]),
+            )
+            out = provider.get_prices(["BTC"])
+        assert out == {"BTC": 49900.0}
+
+    def test_network_error_raises(self):
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision")
+        with patch("requests.get") as mock_get:
+            import requests
+            mock_get.side_effect = requests.exceptions.RequestException("timeout")
+            with pytest.raises(AssetPriceProviderError) as exc_info:
+                provider.get_prices(["BTC"])
+            assert "Binance ticker" in str(exc_info.value)
+
+    def test_invalid_json_raises(self):
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200, json=MagicMock(side_effect=ValueError("bad json")))
+            with pytest.raises(AssetPriceProviderError) as exc_info:
+                provider.get_prices(["BTC"])
+            assert "parse" in str(exc_info.value).lower()
+
+    def test_negative_price_skipped(self):
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = MagicMock(
+                status_code=200,
+                json=MagicMock(return_value=[
+                    {"symbol": "BTCUSDT", "price": "-1"},
+                ]),
+            )
+            out = provider.get_prices(["BTC"])
+        assert "BTC" not in out or out.get("BTC") is None
+
+    def test_single_dict_response_supported(self):
+        """Binance can return single dict when ?symbol=X is used."""
+        provider = BinanceAssetPriceProvider(base_url="https://testnet.binance.vision")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = MagicMock(
+                status_code=200,
+                json=MagicMock(return_value={"symbol": "ETHUSDT", "price": "3500"}),
+            )
+            out = provider.get_prices(["ETH"])
+        assert out == {"ETH": 3500.0}
