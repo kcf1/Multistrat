@@ -492,7 +492,7 @@ def main() -> int:
         binance_base_url = _env("BINANCE_BASE_URL") or "https://testnet.binance.vision"
         try:
             n = sync_symbols_from_binance(binance_base_url, database_url, broker="binance")
-            logger.info("Symbol sync from Binance: upserted %s symbol(s)", n)
+            logger.info("Symbol sync from Binance: upserted {} symbol(s)", n)
         except Exception as e:
             logger.warning("Symbol sync at startup failed (continuing): %s", e)
 

@@ -171,7 +171,7 @@ def sync_symbols_to_postgres(
             count += 1
         conn.commit()
         if count:
-            logger.info("sync_symbols_to_postgres: upserted %s symbol(s)", count)
+            logger.info("sync_symbols_to_postgres: upserted {} symbol(s)", count)
         return count
     finally:
         if we_opened:

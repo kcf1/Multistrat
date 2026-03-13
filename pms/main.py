@@ -39,9 +39,9 @@ def main() -> None:
     try:
         n = init_assets_stables(settings.database_url)
         if n:
-            logger.info("Assets init: upserted %s stable(s) with usd_price=1", n)
+            logger.info("Assets init: upserted {} stable(s) with usd_price=1", n)
     except Exception as e:
-        logger.warning("Assets init at startup failed (continuing): %s", e)
+        logger.warning("Assets init at startup failed (continuing): {}", e)
 
     mark_provider = get_mark_price_provider(
         settings.pms_mark_price_source,
@@ -69,9 +69,9 @@ def main() -> None:
                     feed_assets,
                 )
                 if n:
-                    logger.info("Asset price feed updated %s asset(s)", n)
+                    logger.info("Asset price feed updated {} asset(s)", n)
             except Exception as e:
-                logger.exception("Asset price feed failed: %s", e)
+                logger.exception("Asset price feed failed: {}", e)
 
     if args.once:
         logger.info("On-request refresh (one tick); mark source={}", settings.pms_mark_price_source)
