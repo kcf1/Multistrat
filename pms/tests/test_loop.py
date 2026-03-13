@@ -166,3 +166,23 @@ class TestRunOneTick:
         )
         assert mock_derive.call_count >= 1
         assert mock_write.call_count >= 1
+
+    @patch("pms.loop.write_pms_positions")
+    @patch("pms.loop.derive_positions_from_orders_and_balance_changes")
+    def test_run_pms_loop_calls_pre_tick_callback_before_tick(self, mock_derive, mock_write):
+        mock_derive.return_value = []
+        mock_write.return_value = 0
+        stop = threading.Event()
+        stop.set()
+        order = []
+        def pre_tick():
+            order.append("pre_tick")
+        run_pms_loop(
+            lambda: MagicMock(),
+            FakeMarkPriceProvider(),
+            tick_interval_seconds=0.01,
+            stop_event=stop,
+            pre_tick_callback=pre_tick,
+        )
+        assert order == ["pre_tick"]
+        assert mock_derive.call_count >= 1

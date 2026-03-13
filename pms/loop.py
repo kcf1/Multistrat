@@ -93,16 +93,20 @@ def run_pms_loop(
     tick_interval_seconds: float = 10.0,
     *,
     stop_event: Optional[Any] = None,
+    pre_tick_callback: Optional[Callable[[], None]] = None,
 ) -> None:
     """
     Run the PMS loop: every tick_interval_seconds, run_one_tick (read → derive → write).
 
     Skips Redis. Runs until stop_event is set (if provided) or forever.
     stop_event: optional object with .is_set() -> bool (e.g. threading.Event).
+    pre_tick_callback: optional callable run before each tick (e.g. asset price feed).
     """
     import time
     while True:
         try:
+            if pre_tick_callback is not None:
+                pre_tick_callback()
             n = run_one_tick(pg_connect, mark_provider)
             logger.info("PMS tick wrote {} positions", n)
         except Exception as e:
