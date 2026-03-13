@@ -130,6 +130,12 @@ Ordered tasks; each can be a PR or commit.
 - Steps 6–8 depend on 3; 7 depends on 1.
 - Steps 9–10 after 4; step 11 depends on 6–10.
 
+### 3.9 Pydantic usage
+
+- **Config (step 9):** PMS already uses **pydantic-settings** in `pms/config.py`. New feed settings (`pms_asset_price_source`, `binance_price_feed_base_url`, etc.) are added there and get the same env-based validation and typing.
+- **Provider interface:** The contract uses plain types (`get_prices(assets: List[str]) -> Dict[str, Optional[float]]`). No Pydantic model is required for the interface or the feed step.
+- **Optional:** For Binance response parsing you can reuse `BinanceTickerPriceItem` from `pms/schemas_pydantic.py` (as in `pms/mark_price.py`) to validate each ticker item; otherwise parse to float in the provider and return the dict. Using the existing schema keeps consistency with the rest of PMS.
+
 ---
 
 ## 4. Price source interface (provider)
