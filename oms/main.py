@@ -529,30 +529,6 @@ def main() -> int:
     except (TypeError, ValueError):
         pass
 
-    sync_interval_seconds = DEFAULT_SYNC_INTERVAL_SECONDS
-    try:
-        env_sync = os.environ.get("OMS_SYNC_INTERVAL_SECONDS")
-        if env_sync is not None:
-            sync_interval_seconds = int(env_sync)
-    except (TypeError, ValueError):
-        pass
-
-    account_refresh_interval = DEFAULT_ACCOUNT_REFRESH_INTERVAL_SECONDS
-    try:
-        env_refresh = os.environ.get("OMS_ACCOUNT_REFRESH_INTERVAL_SECONDS")
-        if env_refresh is not None:
-            account_refresh_interval = int(env_refresh)
-    except (TypeError, ValueError):
-        pass
-
-    account_sync_interval = DEFAULT_ACCOUNT_SYNC_INTERVAL_SECONDS
-    try:
-        env_acc_sync = os.environ.get("OMS_ACCOUNT_SYNC_INTERVAL_SECONDS")
-        if env_acc_sync is not None:
-            account_sync_interval = int(env_acc_sync)
-    except (TypeError, ValueError):
-        pass
-
     try:
         run_oms_loop(
             redis,
@@ -566,10 +542,10 @@ def main() -> int:
             run_until=lambda: shutdown[0],
             on_terminal_sync=on_terminal_sync if database_url else None,
             pg_connect=database_url if database_url else None,
-            sync_interval_seconds=sync_interval_seconds if database_url else 0,
+            sync_interval_seconds=DEFAULT_SYNC_INTERVAL_SECONDS if database_url else 0,
             sync_ttl_after_seconds=sync_ttl,
-            account_refresh_interval_seconds=account_refresh_interval,
-            account_sync_interval_seconds=account_sync_interval if database_url else 0,
+            account_refresh_interval_seconds=DEFAULT_ACCOUNT_REFRESH_INTERVAL_SECONDS,
+            account_sync_interval_seconds=DEFAULT_ACCOUNT_SYNC_INTERVAL_SECONDS if database_url else 0,
             account_sync_ttl_seconds=None,  # No default TTL for account keys; optional env override could be added
         )
     except KeyboardInterrupt:
