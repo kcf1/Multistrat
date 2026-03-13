@@ -8,7 +8,9 @@ Assumes services are already deployed (docker compose up -d oms pms postgres red
 Requires: REDIS_URL, DATABASE_URL. Optional: BINANCE_* for testnet.
 
 Usage:
-    python scripts/e2e_12_4_4.py [--no-account] [--no-pms] [--timeout 180]
+    python scripts/e2e_12_4_4.py [--no-account] [--no-pms] [--no-valuation] [--timeout 180]
+
+With --no-valuation: skips asset price feed and valuation checks (usd_price / usd_notional).
 """
 
 import argparse
@@ -90,6 +92,7 @@ def run_e2e(
     database_url: str,
     check_account: bool = True,
     check_pms: bool = True,
+    check_valuation: bool = True,
     timeout: float = 180,
     verbose: bool = True,
 ) -> bool:
@@ -258,8 +261,25 @@ def run_e2e(
         except Exception as e:
             if verbose:
                 log(f"   WARN: could not ensure symbols: {e}")
-        # Force one PMS tick so positions are derived with the symbols we just ensured
-        log("3.6. Running one PMS tick to derive positions...")
+        # Ensure assets table has E2E assets and (optionally) run price feed for valuation
+        if check_valuation:
+            log("3.6. Ensuring assets table and price feed for valuation...")
+            try:
+                from pms.asset_init import init_assets_stables, sync_assets_from_symbols
+                from pms.asset_price_feed import run_asset_price_feed_step
+                from pms.asset_price_providers.binance import BinanceAssetPriceProvider
+
+                init_assets_stables(database_url, assets=["USDT"])
+                sync_assets_from_symbols(database_url, quote_asset="USDT")
+                base_url = _env("BINANCE_BASE_URL") or "https://testnet.binance.vision"
+                provider = BinanceAssetPriceProvider(base_url=base_url, use_testnet="testnet" in base_url.lower())
+                updated = run_asset_price_feed_step(database_url, provider, "binance", ["BTC", "DOGE", "BNB"])
+                log("   asset price feed updated %s asset(s)" % updated)
+            except Exception as e:
+                if verbose:
+                    log(f"   WARN: assets/price feed failed (valuation check may be skipped): {e}")
+        # Force one PMS tick so positions are derived (and enriched with usd_price from assets)
+        log("3.7. Running one PMS tick to derive positions...")
         try:
             from pms.loop import run_one_tick
             from pms.mark_price import get_mark_price_provider
@@ -270,7 +290,7 @@ def run_e2e(
         except Exception as e:
             if verbose:
                 log(f"   WARN: PMS tick failed: {e}")
-            log("3.6. Waiting 15s for PMS to derive positions...")
+            log("3.7. Waiting 15s for PMS to derive positions...")
             time.sleep(15)
 
     # Step 4: Account flow (optional)
@@ -305,22 +325,35 @@ def run_e2e(
                 conn = psycopg2.connect(database_url)
                 try:
                     cur = conn.cursor()
-                    cur.execute(
-                        """
-                        SELECT broker, account_id, book, asset, open_qty, position_side, usd_price
-                        FROM positions
-                        WHERE broker = %s AND book = %s AND asset = ANY(%s)
-                        ORDER BY asset
-                        """,
-                        ("binance", E2E_BOOK, list(E2E_EXPECTED_ASSETS)),
-                    )
+                    try:
+                        cur.execute(
+                            """
+                            SELECT broker, account_id, book, asset, open_qty, position_side, usd_price, usd_notional
+                            FROM positions
+                            WHERE broker = %s AND book = %s AND asset = ANY(%s)
+                            ORDER BY asset
+                            """,
+                            ("binance", E2E_BOOK, list(E2E_EXPECTED_ASSETS)),
+                        )
+                    except Exception:
+                        cur.execute(
+                            """
+                            SELECT broker, account_id, book, asset, open_qty, position_side, usd_price
+                            FROM positions
+                            WHERE broker = %s AND book = %s AND asset = ANY(%s)
+                            ORDER BY asset
+                            """,
+                            ("binance", E2E_BOOK, list(E2E_EXPECTED_ASSETS)),
+                        )
                     rows = cur.fetchall()
                     for r in rows:
                         asset, open_qty = r[3], float(r[4] or 0)
-                        found.append((r[0], r[1], r[2], asset, open_qty, r[5], float(r[6] or 0) if r[6] is not None else None))
+                        usd_price = float(r[6] or 0) if r[6] is not None else None
+                        usd_notional = float(r[7]) if len(r) > 7 and r[7] is not None else None
+                        found.append((r[0], r[1], r[2], asset, open_qty, r[5], usd_price, usd_notional))
                 finally:
                     conn.close()
-                by_asset = {a: (oq, ps) for (_, _, _, a, oq, ps, __) in found}
+                by_asset = {a: (oq, ps) for (_, _, _, a, oq, ps, _, _) in found}
                 poll_count += 1
                 log("   downstream_check [positions] poll #%s: assets_found=%s by_asset=%s" % (poll_count, list(by_asset.keys()), by_asset))
                 if len(by_asset) < len(E2E_EXPECTED_ASSETS):
@@ -334,11 +367,35 @@ def run_e2e(
                         all_ok = False
                         break
                 if all_ok:
-                    for (broker, acc, book, a, oq, ps, usd_p) in found:
+                    valuation_ok = True
+                    if check_valuation:
+                        for (_b, _acc, _book, a, oq, ps, usd_p, usd_n) in found:
+                            if abs(oq) <= TOLERANCE:
+                                continue
+                            if usd_p is None or usd_p <= 0:
+                                log("   FAIL: valuation missing for %s (open_qty=%s, usd_price=%s)" % (a, oq, usd_p))
+                                valuation_ok = False
+                                break
+                            expected_notional = oq * usd_p
+                            if usd_n is not None:
+                                if abs(usd_n - expected_notional) > max(1e-2, abs(expected_notional) * 1e-6):
+                                    log("   FAIL: usd_notional mismatch %s: got %s expected ~%s" % (a, usd_n, expected_notional))
+                                    valuation_ok = False
+                                    break
+                        if valuation_ok:
+                            log("   OK: valuation consistent with price feed (usd_price set, usd_notional = open_qty * usd_price)")
+                        else:
+                            valuation_ok = False
+                    for (_b, _acc, _book, a, oq, ps, usd_p, usd_n) in found:
                         exp = E2E_EXPECTED_OPEN_QTY.get(a, (None, ""))
-                        log(f"   position: {a} open_qty={oq} (expected {exp[0]}) side={ps} usd_price={usd_p} usd_notional={oq * usd_p if usd_p is not None else None}")
-                    log("   OK: PMS positions match expected (asset grain: long only, short only, long < short)")
-                    break
+                        notional = usd_n if usd_n is not None else (oq * usd_p if usd_p is not None else None)
+                        log(f"   position: {a} open_qty={oq} (expected {exp[0]}) side={ps} usd_price={usd_p} usd_notional={notional}")
+                    if not check_valuation or valuation_ok:
+                        log("   OK: PMS positions match expected (asset grain: long only, short only, long < short)")
+                        break
+                    if check_valuation and not valuation_ok:
+                        time.sleep(2)
+                        continue
             except Exception as e:
                 if verbose:
                     log(f"   positions query: {e}")
@@ -349,7 +406,8 @@ def run_e2e(
                 "len(by_asset)=%s < %s (missing assets)" % (len(by_asset), len(E2E_EXPECTED_ASSETS)) if len(by_asset) < len(E2E_EXPECTED_ASSETS) else "wrong open_qty or position_side for base assets"
             ))
             if found:
-                for (broker, acc, book, a, oq, ps, usd_p) in found:
+                for row in found:
+                    a, oq, ps = row[3], row[4], row[5]
                     exp = E2E_EXPECTED_OPEN_QTY.get(a, (None, "?"))
                     log(f"   seen: {a} open_qty={oq} (expected {exp[0]}) side={ps}")
                 log("   downstream_check [positions] expected: %s" % dict(E2E_EXPECTED_OPEN_QTY))
@@ -373,6 +431,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="E2E 12.4.4: inject multiple orders (3 symbols, 3 conditions), verify OMS + PMS downstreams")
     parser.add_argument("--no-account", action="store_true", help="Skip account-flow check")
     parser.add_argument("--no-pms", action="store_true", help="Skip PMS positions table check")
+    parser.add_argument("--no-valuation", action="store_true", help="Skip asset price feed and valuation checks (usd_price / usd_notional)")
     parser.add_argument("--timeout", type=float, default=180, help="Total timeout seconds (default: 180)")
     parser.add_argument("--quiet", action="store_true", help="Less output")
     args = parser.parse_args()
@@ -391,6 +450,7 @@ def main() -> int:
         database_url=database_url,
         check_account=not args.no_account,
         check_pms=not args.no_pms,
+        check_valuation=not args.no_valuation,
         timeout=args.timeout,
         verbose=not args.quiet,
     )
