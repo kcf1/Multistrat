@@ -45,3 +45,22 @@ class PmsSettings(BaseSettings):
         default=None,
         description="Binance REST base URL (e.g. https://testnet.binance.vision); default testnet for spot",
     )
+
+    # Asset price feed (docs/pms/ASSET_PRICE_FEED_PLAN.md)
+    pms_asset_price_source: str = Field(
+        default="",
+        description="Asset price feed source: 'binance' or '' to disable",
+    )
+    pms_asset_price_interval_seconds: float = Field(
+        default=60.0,
+        ge=1.0,
+        description="How often to run asset price feed (seconds)",
+    )
+    binance_price_feed_base_url: Optional[str] = Field(
+        default=None,
+        description="Binance REST base URL for asset price feed; default testnet when use_testnet",
+    )
+    pms_asset_price_assets: Optional[str] = Field(
+        default=None,
+        description="Comma-separated assets to update from feed; if empty, use DB (usd_symbol set)",
+    )

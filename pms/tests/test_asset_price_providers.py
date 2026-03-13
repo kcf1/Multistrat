@@ -12,6 +12,7 @@ from pms.asset_price_providers import (
     AssetPriceProvider,
     AssetPriceProviderError,
     BinanceAssetPriceProvider,
+    get_asset_price_provider,
 )
 
 
@@ -152,3 +153,33 @@ class TestBinanceAssetPriceProvider:
             )
             out = provider.get_prices(["ETH"])
         assert out == {"ETH": 3500.0}
+
+
+class TestGetAssetPriceProvider:
+    """Registry: get_asset_price_provider(name, **kwargs)."""
+
+    def test_binance_returns_binance_provider(self):
+        p = get_asset_price_provider("binance")
+        assert p is not None
+        assert isinstance(p, BinanceAssetPriceProvider)
+
+    def test_binance_with_base_url(self):
+        p = get_asset_price_provider("binance", base_url="https://api.binance.com")
+        assert p is not None
+        assert p.base_url == "https://api.binance.com"
+
+    def test_empty_or_unknown_returns_none(self):
+        assert get_asset_price_provider("") is None
+        assert get_asset_price_provider("none") is None
+        assert get_asset_price_provider("  ") is None
+        assert get_asset_price_provider("coingecko") is None
+
+    def test_custom_timeout_and_quote(self):
+        p = get_asset_price_provider(
+            "binance",
+            timeout=5.0,
+            quote_asset="BUSD",
+        )
+        assert p is not None
+        assert p.timeout == 5.0
+        assert p.quote_asset == "BUSD"

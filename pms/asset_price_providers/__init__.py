@@ -12,6 +12,7 @@ from .binance import (
     BINANCE_SPOT_TESTNET_BASE_URL,
 )
 from .interface import AssetPriceProvider
+from .registry import get_asset_price_provider
 
 __all__ = [
     "AssetPriceProvider",
@@ -19,4 +20,5 @@ __all__ = [
     "BinanceAssetPriceProvider",
     "BINANCE_SPOT_BASE_URL",
     "BINANCE_SPOT_TESTNET_BASE_URL",
+    "get_asset_price_provider",
 ]
