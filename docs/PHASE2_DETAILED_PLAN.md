@@ -14,7 +14,7 @@
 | **Order path** | Redis `risk_approved` → OMS (router) → broker adapter (Binance) → broker API → fills back to OMS → Redis `oms_fills` stream (for downstream consumers); OMS syncs orders to Postgres `orders` table. |
 | **Account path** | Broker user data stream (`outboundAccountPosition`, `balanceUpdate`) → OMS account listener → Redis account store → sync to Postgres (`accounts`, `balances`); positions in Redis only. Periodic REST refresh for reconciliation. |
 | **OMS persistence** | **Redis** (staging: order hashes, account hashes, status indexes, broker_order_id lookup); **sync to Postgres** `orders` table (trigger on terminal status + periodic) via `oms/sync.py`; **sync to Postgres** `accounts`, `balances` (periodic) via `oms/account_sync.py`; positions in Redis only; optional repairs via `oms/repair.py` and `oms/account_repair.py`. |
-| **PMS** | Reads Postgres/Redis; **source of truth** for PnL and margin |
+| **PMS** | Reads Postgres (orders, balances when synced); **source of truth** for PnL and margin. **Positions** derived from orders; **cash** from broker-backed **balances** table (OMS syncs when `sync_balances=True`). No separate book_cash build. |
 | **Risk (Phase 2)** | Minimal: consume `strategy_orders`, pass through to `risk_approved` (or use test inject for E2E) |
 
 ---
@@ -57,8 +57,8 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
   - **Current state only:** Stores current balance per asset; historical changes tracked in `balance_changes` table.
 
 - **balance_changes** (historical tracking)  
-  - `id` (PK), `account_id` (FK), `asset`, **`book`** (TEXT; constant `"default"` for broker-fed; book change records move cash to strategy books), `change_type` (deposit, withdrawal, transfer, adjustment, snapshot), `delta` (NUMERIC), `balance_before` (NUMERIC NULL), `balance_after` (NUMERIC NULL), `event_type`, `broker_event_id` (TEXT NULL), `event_time` (TIMESTAMPTZ), `created_at` (TIMESTAMPTZ), `payload` (JSONB NULL).  
-  - **Historical record:** Deposit/withdrawal/transfer only (from **balanceUpdate**; per Binance API, balanceUpdate is not triggered by trades). Populated via main's `on_balance_change` callback. Used by PMS with orders to **build cash** (build-from-order model; see **docs/pms/PMS_DATA_MODEL.md**).  
+  - `id` (PK), `account_id` (FK), `asset`, **`book`** (TEXT; constant `"default"` for broker-fed), `change_type` (deposit, withdrawal, transfer, adjustment, snapshot), `delta` (NUMERIC), `balance_before` (NUMERIC NULL), `balance_after` (NUMERIC NULL), `event_type`, `broker_event_id` (TEXT NULL), `event_time` (TIMESTAMPTZ), `created_at` (TIMESTAMPTZ), `payload` (JSONB NULL).  
+  - **Historical record:** Deposit/withdrawal/transfer only (from **balanceUpdate**; per Binance API, balanceUpdate is not triggered by trades). Populated via main's `on_balance_change` callback. **Cash** for PMS comes from the **balances** table when OMS syncs; balance_changes is audit/history only.  
   - Indexes: `(account_id, asset, event_time)`, `(account_id, change_type)`, `event_time`.
 
 *(**margin_snapshots** table was dropped in revision f6a7b8c9d0e1; unused. PMS can use a dedicated `pnl_snapshots` or Redis keys if needed.)*
@@ -113,7 +113,7 @@ Binance **cancel_order** returns same shape as query.
 | `id` | BIGSERIAL PK | internal | |
 | `account_id` | FK → accounts | account event | |
 | `asset` | TEXT | balanceUpdate / outboundAccountPosition | Asset symbol (e.g. USDT, BTC) |
-| **`book`** | TEXT | write_balance_change | Book for this change; broker-fed records use constant `"default"`; book change records move cash to strategy books (see **docs/pms/PMS_DATA_MODEL.md**) |
+| **`book`** | TEXT | write_balance_change | Book for this change; broker-fed records use constant `"default"`. |
 | `change_type` | TEXT | derived | `deposit`, `withdrawal`, `transfer`, `adjustment`, `snapshot` |
 | `delta` | NUMERIC | balanceUpdate `d` field | Amount changed: positive for deposit, negative for withdrawal |
 | `balance_before` | NUMERIC NULL | calculated | Balance before change (optional, for audit) |
@@ -283,7 +283,7 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 **Note:** Booking service (separate consumer of `oms_fills`) is **discarded**. Account management (balances, positions) is **integrated into OMS** instead. This consolidates broker state management in one service and eliminates duplicate broker connections.
 
-**Context:** OMS extends broker adapters to receive account events from the same user data stream that provides fills. OMS owns syncing both **orders** and **accounts/balances/positions** to Postgres. See **docs/oms/OMS_ARCHITECTURE.md** and **docs/oms/ACCOUNT_MANAGEMENT_INTEGRATION.md** for architecture details.
+**Context:** OMS extends broker adapters to receive account events from the same user data stream that provides fills. OMS owns syncing both **orders** and **accounts/balances/positions** to Postgres. See **docs/oms/OMS_ARCHITECTURE.md** for architecture details.
 
 ### 7.1 Role (within OMS)
 
@@ -310,16 +310,16 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 ## 8. PMS service
 
-**Core vs optional:** See **docs/pms/PMS_ARCHITECTURE.md** §2. **Core** = derive positions from **orders only** (filter partial/fully filled) → compute PnL (realized + unrealized, one mark source) → one granular table (`positions`) + Redis (`pnl:{account_id}`, `margin:{account_id}`) → timer loop. **Optional** = symbols table, book_allocations, pnl_snapshots, margin_snapshots, book_cash, repairs, multiple mark price sources, Pydantic. **No fills table:** orders are the primary data source; PMS does not use a fills table. Implement **core** first; add optional as needed.
+**Core vs optional:** See **docs/pms/PMS_ARCHITECTURE.md** §2. **Core** = derive positions from **orders only** (filter partial/fully filled) → compute PnL (realized + unrealized, one mark source) → one granular table (`positions`) + optional Redis → timer loop. **Cash** = broker-backed **balances** table (OMS syncs when `sync_balances=True`); PMS reads via `query_balances`. **Optional** = symbols table, pnl_snapshots, margin_snapshots, repairs, multiple mark price sources, Pydantic. **No fills table:** orders are the primary data source. **book_cash** (build-from-order cash) was abandoned; coins are coins at the broker (asset = cash).
 
-**Data-model notes:** Order **symbol** (pair, e.g. BTCUSDT) vs balance **asset** (single asset, e.g. BTC, USDT) are not the same. In the **build-from-order** model, PMS **builds cash** from orders + balance_changes (double-entry; symbol→base/quote); **balance sync to Postgres `balances` is disabled**. Building positions from orders and reconciliation (order-derived vs store, balance_changes + order impact vs book_cash) are documented in **docs/pms/PMS_DATA_MODEL.md**.
+**Data-model notes:** Order **symbol** (pair, e.g. BTCUSDT); balance **asset** (e.g. USDT, BTC). **Positions** derived from orders; **cash** from **balances** when OMS syncs. balance_changes = deposit/withdrawal history only.
 
 ### 8.1 Role
 
-- Periodically read **orders**, **balance_changes**, and **symbols** from **Postgres**; **derive positions** from orders (filter: partial/fully filled); **build cash** from orders (trade legs via symbol→base/quote) + balance_changes (deposit/withdrawal only; **book** column; default cash book for broker-fed). PMS does **not** read OMS Redis positions (dummy). In the **build-from-order** model, **balance sync is disabled**; PMS does not read `balances` for cash. Compute **realized PnL** (from executed order rows), **unrealized PnL** (mark × open qty when open_qty ≠ 0), and **margin** (for futures).
-- Write results to Postgres (e.g. a dedicated `pnl_snapshots` table) and/or to Redis (e.g. `pnl:{account_id}`, `margin:{account_id}`) for Admin/UI. *(OMS `margin_snapshots` table was dropped; unused.)*
+- Periodically read **orders** (and **balances** when OMS syncs) from **Postgres**; **derive positions** from orders (filter: partial/fully filled). **Cash** = broker-backed **balances** (PMS reads via `query_balances` when OMS syncs balances). PMS does **not** read OMS Redis positions. Compute **realized PnL** (from executed order rows), **unrealized PnL** (mark × open qty when open_qty ≠ 0), and **margin** (for futures).
+- Write results to Postgres (**positions** table) and/or Redis for Admin/UI.
 
-**Implemented (Phase 2):** PMS reads **orders** and **balance_changes** (no balances used for position derivation). Derives positions at **(broker, account_id, book, asset)** from orders (base/quote legs via symbols) + balance_changes; writes **positions** table with open_qty, position_side, mark_price, notional, unrealized_pnl. **No** Redis pnl/margin keys; **no** pnl_snapshots/margin_snapshots tables. Mark price from Binance (PMS_MARK_PRICE_SOURCE). USD valuation: stables from `assets.usd_price`; optional E.3 job to refresh asset prices for non-stables. See **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md**.
+**Implemented (Phase 2):** PMS reads **orders**; derives positions at (account_id, book, symbol); writes **positions** table (open_qty, position_side, mark_price, notional, unrealized_pnl). **Cash** from **balances** when OMS uses `sync_balances=True`. balance_changes = history only. Mark price from Binance (PMS_MARK_PRICE_SOURCE).
 
 ### 8.2 Mark price (unrealized PnL)
 
@@ -329,9 +329,9 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 
 ### 8.3 Granular store, views, and reference data
 
-- **One granular store (core):** PMS writes a **position/snapshot table** at grain **(broker, account_id, book, asset)** (e.g. `positions`) with **open_qty** (signed), **position_side** ('long' | 'short' | 'flat'). One row per grain; updated after each calculation. **Grouping** (by symbol, by book/symbol, by broker/symbol) is **on request** (SQL GROUP BY or API); optional DB VIEWs on PMS-written tables. See **docs/pms/PMS_ARCHITECTURE.md** §6 and **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md**.
-- **Reference data (optional for core):** **Symbols table** (symbol → base_asset, quote_asset, tick_size, etc.): populated by sync or config; PMS reads. **Allocations** (cash by book): **managed outside**; system **provided with** via interface (table, API, or file); PMS reads only.
-- **Cash vs positions:** In the **build-from-order** model, cash is **built in PMS** from orders + balance_changes (double-entry; **book** column on balance_changes; default cash book for broker-fed; book change records to move cash to strategy books). OMS **balance sync to `balances` is disabled**; do not put cash in positions table. **Capital by book** = asset_value(book) + cash(book); cash(book) from PMS **book_cash**.
+- **One granular store (core):** PMS writes **positions** at grain (account_id, book, symbol) with open_qty (signed), position_side, entry_avg, mark_price, notional, unrealized_pnl. **Grouping** on request (SQL or API).
+- **Reference data (optional):** **Symbols** table (OMS-managed); PMS may read for display/validation. **Cash** = **balances** table (OMS syncs from broker); no separate book_cash or build-from-order cash.
+- **Cash vs positions:** **Positions** = open exposure per symbol (from orders). **Cash** = **balances** table per asset (broker-backed; OMS syncs when `sync_balances=True`). Do not put cash in the positions table.
 
 ### 8.4 Deployment
 
@@ -429,7 +429,7 @@ BINANCE_API_SECRET=
 
 ### 12.2 Account Management Integration into OMS (build backwards: adapter extension → Redis store → Postgres schema)
 
-**Integration approach:** Account management (balances, positions) is **integrated into OMS** rather than being a separate service. OMS extends broker adapters to handle account events from the same user data stream that provides fills. This consolidates broker state management (orders + accounts) in one service. See **docs/oms/ACCOUNT_MANAGEMENT_INTEGRATION.md** for rationale and architecture.
+**Integration approach:** Account management (balances, positions) is **integrated into OMS** rather than being a separate service. OMS extends broker adapters to handle account events from the same user data stream that provides fills. This consolidates broker state management (orders + accounts) in one service. See **docs/oms/OMS_ARCHITECTURE.md** §8.2 for account sync and rationale.
 
 **Alignment with OMS:** OMS owns `orders` table sync (`oms/sync.py`); OMS also owns `accounts`, `balances`, `positions` sync (`oms/account_sync.py`). Account state comes from broker user data stream events (`outboundAccountPosition`, `balanceUpdate`) and periodic REST refresh (`get_account_snapshot`). Same patterns as orders: event-driven + periodic refresh + sync to Postgres + repairs.
 
@@ -448,10 +448,10 @@ BINANCE_API_SECRET=
 
 **Build-from-order cash (balance_changes book, symbols, default cash book):**
 
-- [x] **12.2.11** **balance_changes.book column** (Alembic): add migration that adds column `book` (TEXT, nullable or server_default=`'default'`) to `balance_changes`. Used so broker-fed rows use the default cash book; book change records move cash to strategy books. See **docs/pms/PMS_DATA_MODEL.md**. **Unit test:** schema test in `oms/tests/test_account_schema.py` includes `book` in balance_changes columns.
+- [x] **12.2.11** **balance_changes.book column** (Alembic): add migration that adds column `book` (TEXT, nullable or server_default=`'default'`) to `balance_changes`. Used so broker-fed rows use the default cash book; book change records move cash to strategy books. **Unit test:** schema test in `oms/tests/test_account_schema.py` includes `book` in balance_changes columns.
 - [x] **12.2.12** **write_balance_change with book** (`oms/account_sync.py`): add parameter `book: Optional[str] = None` (default constant `"default"`) to `write_balance_change`; include `book` in INSERT into `balance_changes`. **Unit test:** `oms/tests/test_account_sync.py` — update `test_write_balance_change_executes_insert` to pass `book` and assert INSERT includes `book`.
 - [x] **12.2.13** **Default cash book in on_balance_change** (`oms/main.py`): in `_on_balance_change`, pass constant `"default"` as `book` argument to `write_balance_change(...)` (no env var).
-- [x] **12.2.14** **Symbols table** (Alembic): add migration that creates table `symbols` with columns e.g. `symbol` (TEXT PK or UNIQUE), `base_asset`, `quote_asset` (TEXT), optional `tick_size`, `lot_size`, `min_qty`, `product_type`, `broker`, `updated_at`. **Managed by OMS** (or reference sync); PMS reads for base/quote when building cash from orders. See **docs/pms/PMS_DATA_MODEL.md**.
+- [x] **12.2.14** **Symbols table** (Alembic): add migration that creates table `symbols` with columns e.g. `symbol` (TEXT PK or UNIQUE), `base_asset`, `quote_asset` (TEXT), optional `tick_size`, `lot_size`, `min_qty`, `product_type`, `broker`, `updated_at`. **Managed by OMS** (or reference sync); PMS may read for display/validation. OMS populates at startup from exchangeInfo.
 - [x] **12.2.15** **Symbol sync from broker** (`oms/symbol_sync.py` or similar): implement function that calls Binance `GET /api/v3/exchangeInfo` (or futures equivalent), parses symbols, and UPSERTs into `symbols` (base_asset, quote_asset, etc.). Optional: seed from config for symbols not from broker. Invoked from OMS job or one-off/periodic script. **Unit test:** mock HTTP; verify UPSERT to Postgres.
 
 ### 12.3 PMS (build backwards: calculations → reads → writes → loop)
@@ -467,20 +467,11 @@ BINANCE_API_SECRET=
 - [x] **12.3.3** **(Core)** **PMS Postgres reads**: query orders (filter by status: **partially_filled**, **filled**), balances; **derive positions** at grain (account_id, book, symbol) with **signed open_qty** (net = sum(BUY) − sum(SELL)), **position_side** ('long' | 'short' | 'flat'). Quantity uses **executed_quantity** (from orders.executed_qty). **Entry average** = cost basis of **open** quantity only (FIFO); **unrealized PnL** when open_qty ≠ 0 (flattened positions: PnL already realized). **(Optional):** symbols, allocations. **Unit test:** verify queries and position derivation.
 - [x] **12.3.4** **(Core)** **PMS granular store** (writes): **positions** table at grain (account_id, book, symbol) with open_qty (signed), position_side; update after each calculation. Grouping on request. Document in **docs/pms/PMS_ARCHITECTURE.md** §6.
 - [ ] **12.3.5** **(Core)** **PMS Redis**: PMS writes PnL/margin keys only (does not read OMS Redis). **Unit test:** verify writes only.
-- [ ] **12.3.6** **(Core)** **PMS Postgres schema** (writes): **positions**; **book_cash** (grain account_id, book, asset) for build-from-order cash — see task 12.3.13. **(Optional):** pnl_snapshots, margin_snapshots. Document in **docs/pms/PMS_ARCHITECTURE.md** §6–8.
+- [ ] **12.3.6** **(Core)** **PMS Postgres schema** (writes): **positions** only (grain account_id, book, symbol). **(Optional):** pnl_snapshots, margin_snapshots. Document in **docs/pms/PMS_ARCHITECTURE.md** §6–8.
 - [ ] **12.3.7** **(Core)** **PMS Postgres/Redis writes**: write granular position table + Redis (pnl/margin keys). **(Optional):** pnl_snapshots, margin_snapshots. **Unit test:** test Postgres and mock Redis; verify writes.
 - [x] **12.3.8** **(Core)** **PMS integration** (loop): periodic read → derive → calculate → write (granular table; **Redis skipped**). **(Optional):** snapshots. **Integration test:** mock data; verify loop runs and writes results. Entrypoint: `python -m pms.main`; loop in `pms/loop.py`.
 
-**Build-from-order cash (PMS reads balance_changes + symbols, build book_cash, write book_cash):**
-
-- [ ] **12.3.9** **(Core)** **PMS query_balance_changes** (`pms/reads.py`): add `query_balance_changes(pg_connect, account_ids=None, book=None)` that SELECTs from `balance_changes` (account_id, asset, book, change_type, delta, event_time). Return list of dicts. **Unit test:** mock Postgres; verify SQL and returned columns.
-- [ ] **12.3.10** **(Core)** **PMS query_symbols / symbol map** (`pms/reads.py`): add `query_symbols(pg_connect)` or `get_symbol_map(pg_connect)` that SELECTs from `symbols` and returns mapping symbol → {base_asset, quote_asset}. Used by cash builder. Optional: convention fallback when symbol not in table (e.g. parse symbol suffix for quote: *USDT→USDT, *BUSD→BUSD, *EUR→EUR); **do not assume quote is always USDT** — cash and balance_changes are per-asset. **Unit test:** mock Postgres; verify returned map.
-- [ ] **12.3.11** **(Core)** **PMS orders for cash** (`pms/reads.py`): extend `query_orders_for_positions` to also return `binance_cumulative_quote_qty`, or add `query_orders_for_cash` with same status filter (partially_filled, filled) and columns account_id, book, symbol, side, executed_qty, price, binance_cumulative_quote_qty, created_at. **Unit test:** verify query shape and filter.
-- [ ] **12.3.12** **(Core)** **PMS build_book_cash_from_orders_and_balance_changes** (`pms/cash.py` or `pms/reads.py`): implement function that (a) from each order row, resolve base_asset/quote_asset via symbol_map; (b) compute base/quote legs (BUY: +base, −quote; SELL: −base, +quote) using executed_qty and price or binance_cumulative_quote_qty; (c) aggregate by (account_id, book, asset); (d) add balance_changes deltas by (account_id, book, asset); (e) return structure for write_book_cash (e.g. list of (account_id, book, asset, balance)). **Unit test:** mock orders + balance_changes + symbol_map; assert aggregated balances.
-- [ ] **12.3.13** **(Core)** **book_cash table** (Alembic): add migration that creates table `book_cash` with (account_id, book, asset, balance NUMERIC, updated_at TIMESTAMPTZ), UNIQUE(account_id, book, asset). account_id type per PMS grain (TEXT broker account_id or BIGINT FK to accounts.id as documented). See **docs/pms/PMS_ARCHITECTURE.md** §8.2.
-- [ ] **12.3.14** **(Core)** **PMS write_book_cash** (`pms/granular_store.py`): add `write_book_cash(pg_connect, book_cash_rows)` that UPSERTs into `book_cash` (account_id, book, asset, balance, updated_at) with ON CONFLICT (account_id, book, asset) DO UPDATE. Return count written. **Unit test:** mock Postgres; verify UPSERT.
-- [ ] **12.3.15** **(Core)** **PMS loop: build and write book_cash** (`pms/loop.py`): in `run_one_tick`, after deriving positions: call `query_balance_changes`, `query_symbols` (or get_symbol_map), orders for cash; call `build_book_cash_from_orders_and_balance_changes`; call `write_book_cash`. Optional: gate behind env `PMS_BUILD_CASH_FROM_ORDERS=true`. **Unit test:** mock reads and write; verify loop invokes build + write.
-- [ ] **12.3.16** **(Core)** **PMS cash source when build-from-order on**: when build-from-order is enabled, do not use `query_balances` for cash/margin; use built book_cash only. Document in **docs/pms/PMS_ARCHITECTURE.md** §8; update any callers that currently read balances for cash to use book_cash path when enabled.
+**Abandoned (book_cash / build-from-order cash):** Tasks 12.3.9–12.3.16 (query_balance_changes, get_symbol_map, build_book_cash, book_cash table, write_book_cash, loop integration) are **not implemented**. Cash is broker-backed: OMS syncs to **balances** when `sync_balances=True`; PMS reads via `query_balances`. Coins are coins at the broker (asset = cash).
 
 - [ ] **12.3.17** **(Follow-up)** **E.3 — Asset price update**: Job or API to refresh `assets.usd_price` (or backfill from a price feed). Once implemented, the PMS loop uses the `assets` table for all USD valuation (stables already use `usd_price=1`; non-stables get updated prices from this job). Supersedes the need for a runtime mark-provider fetch for assets with only `usd_symbol`. See **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md** §8 (E.3) and §5.1.
 
@@ -500,7 +491,7 @@ BINANCE_API_SECRET=
 - [x] One test order injected via script flows: OMS routes to Binance adapter → Binance testnet → fill (or reject) → OMS publishes to `oms_fills` (event_type fill/reject/cancelled/expired as applicable).
 - [x] **OMS order sync** (trigger on terminal status and/or periodic `sync_terminal_orders`) populates Postgres `orders` from Redis; after sync, `orders` table has the test order row.
 - [x] **OMS account sync** (periodic `sync_accounts_to_postgres`) populates Postgres `accounts`, `balances` from Redis account store (updated by account listener from broker stream events). No `positions` table (positions in Redis only). **Balance changes:** `balanceUpdate` events are written to `balance_changes` via main's `on_balance_change` callback; TTL on Redis account keys is set only when processing balance change events (not after periodic sync).
-- [x] PMS reads orders (filter partially_filled, filled), balance_changes, and symbols from Postgres (no fills table); derives positions at grain (account_id, book, symbol); builds cash from orders + balance_changes (build-from-order model; balance sync disabled); writes positions and book_cash; optional PnL/margin to Postgres or Redis (does not read OMS Redis positions — dummy).
+- [x] PMS reads orders (filter partially_filled, filled) from Postgres; derives positions at grain (account_id, book, symbol); writes positions. Cash from **balances** when OMS syncs (`sync_balances=True`). Does not read OMS Redis positions.
 - [x] In pgAdmin: `orders` (from OMS order sync), `accounts`, `balances` (from OMS account sync) reflect the test order and account state.
 - [x] In RedisInsight: OMS order hashes (e.g. `orders:*`), account hashes (e.g. `account:binance:*`); `oms_fills` stream has the fill (and optionally reject/cancelled/expired) events.
 
@@ -523,7 +514,7 @@ BINANCE_API_SECRET=
 
 - **Risk service (optional):** No Risk container in `docker-compose.yml`; no pass-through `strategy_orders` → `risk_approved`. E2E uses inject script only (12.4.2 not done).
 - **E.3 — Asset price update (follow-up):** No job or API yet to refresh `assets.usd_price` for non-stables. Stables use fixed `usd_price=1`; non-stables get mark/notional when E.3 (task 12.3.17) is implemented. See **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md** §8.
-- **PMS build-from-order cash:** Tasks 12.2.11–12.2.15 (balance_changes.book, write_balance_change, default cash book, symbols table, symbol sync) and 12.3.9–12.3.16 (query_balance_changes, query_symbols, build_book_cash, book_cash table, write_book_cash, loop integration) implement cash built from orders + balance_changes. Until done, PMS does not read `balances` for cash when build-from-order is enabled; current code still has `query_balances` but it is not used for cash in the new model.
+- **Cash:** Cash is broker-backed: OMS syncs to **balances** when `sync_balances=True`; PMS reads via `query_balances`. Build-from-order book_cash (12.3.9–12.3.16) was abandoned.
 - **PnL/margin beyond positions:** Unrealized PnL is in `positions` (per-row). No separate **margin snapshot** or aggregate PnL store (e.g. Redis key or dedicated table) is written by PMS.
 - **E2E step 5 (PMS positions) timing:** E2E can fail if PMS hasn’t run enough ticks to write all 3 symbols to `positions` within the wait window; increasing the PMS wait or tick frequency would make this more reliable.
 

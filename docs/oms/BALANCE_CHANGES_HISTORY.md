@@ -138,7 +138,7 @@ LIMIT 100;
 | `balance_changes` | **Historical record** (deposit/withdrawal/transfer only) | Every balanceUpdate event | Append-only (INSERT only); includes **book** |
 
 - When **balance sync is enabled**, `balances` stores current balance per asset (UPSERT by `account_id`, `asset`).
-- When **balance sync is disabled** (build-from-order model), PMS **builds cash** from **orders** + **balance_changes**; `balances` is not the source for PMS. See **docs/pms/PMS_DATA_MODEL.md**.
+- **Cash:** PMS uses the **balances** table when OMS syncs (`sync_balances=True`). balance_changes is deposit/withdrawal history only.
 - **Broker-fed** rows in `balance_changes` use the constant **default cash book** `"default"`. **Book change records** (manual or recs) move cash from the default book to strategy books.
 
 ## Implementation Notes

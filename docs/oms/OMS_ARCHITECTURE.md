@@ -44,7 +44,7 @@ Single reference for the Order Management System (OMS) codebase: data flow, Redi
 
 - **Inbound (orders):** `risk_approved` (orders to execute), `cancel_requested` (cancel by order_id or broker_order_id+symbol).
 - **Inbound (account):** Broker user data stream events (`outboundAccountPosition`, `balanceUpdate`) + periodic REST (`get_account`, `get_futures_account`).
-- **Outbound:** `oms_fills` (fill/reject/cancelled/expired events for PMS and downstream), Postgres `orders`, `accounts`, `balances` (sync); **positions** in Redis only (no Postgres positions table in Phase 2). See **docs/pms/PMS_ARCHITECTURE.md**.
+- **Outbound:** `oms_fills` (fill/reject/cancelled/expired), Postgres `orders`, `accounts`, `balances` (when `sync_balances=True`), `balance_changes` (from balanceUpdate); **positions** in Redis only. PMS reads orders and balances; derives positions from orders. See **docs/pms/PMS_ARCHITECTURE.md**.
 - **Broker:** Binance REST (place/cancel, account snapshots) + user data stream (execution reports + account updates). Other brokers plug in via the same adapter interface.
 
 ---
@@ -179,11 +179,11 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 
 **Module:** `oms/account_sync.py`.
 
-- **Trigger:** Optional: on account update from stream (`on_account_updated`); plus **periodic** `sync_accounts_to_postgres` every `sync_interval_seconds` (e.g. 60s).
-- **Logic:** For each account in Redis (or each account updated since last sync): read account hash, balances hash, positions hash; map to Postgres rows (`_account_to_row`, `_balance_to_row`, `_position_to_row`); UPSERT into `accounts` by (broker, account_id or id), then `balances` (by account_id, asset), then `positions` (by account_id, symbol, side). Set TTL on Redis keys after sync if configured.
-- **DB columns / sources:** See `docs/ams/AMS_DB_FIELDS.md` (broker stream vs REST, payload → columns).
+- **Trigger:** Periodic `sync_accounts_to_postgres` every `account_sync_interval_seconds` (e.g. 60s). Balance changes from stream → `write_balance_change` (main's `on_balance_change`).
+- **Logic:** For each account in Redis: UPSERT `accounts`; optionally **balances** when `sync_balances=True` (main loop currently uses `sync_balances=False`). **No Postgres positions table** in OMS (positions in Redis only). **Symbol sync:** At startup, `sync_symbols_from_binance` runs once to populate **symbols** from broker exchangeInfo.
+- **DB columns:** See **docs/oms/OMS_ACCOUNT_DB_FIELDS.md** (accounts, balances). **balance_changes:** deposit/withdrawal/transfer only; see **docs/oms/BALANCE_CHANGES_HISTORY.md**.
 
-**Account repairs (post-sync):** `oms/account_repair.py` — `run_all_account_repairs(pg_connect)` runs periodically after sync. Fixes flawed Postgres account/balance/position fields (e.g. numeric/empty) by recovering from `payload` or raw broker data for the relevant broker (e.g. `broker = 'binance'`).
+**Account repairs:** `oms/account_repair.py` — `run_all_account_repairs(pg_connect)` after sync; fixes flawed fields from payload.
 
 ---
 
@@ -256,4 +256,4 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 - **Event-driven + batch:** Blocking read on risk_approved for low latency; batch size and trim interval tune throughput and stream growth.
 - **Fill listener before orders:** Main loop waits for fill listeners to report connected before processing, so user data stream is active before orders are placed.
 
-This document focuses on data flow, interfaces, and architecture; for blocking behavior and tuning see `docs/OMS_BLOCKING_EXPLAINED.md`, and for DB column sources see `docs/OMS_ORDERS_DB_FIELDS.md`.
+For DB column sources see **docs/oms/OMS_ORDERS_DB_FIELDS.md**. Blocking: `process_many` uses XREADGROUP BLOCK when `block_ms > 0` for event-driven wake-up; cancel is non-blocking.
