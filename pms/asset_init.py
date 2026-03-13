@@ -33,11 +33,28 @@ def _pg_conn(pg_connect: Union[str, Callable[[], Any]]):
     return psycopg2.connect(pg_connect), True
 
 
+# Price source for fixed stables (1:1 USD); feed uses e.g. 'binance'
+PRICE_SOURCE_FIXED = "fixed"
+
+
+def truncate_assets(pg_connect: Union[str, Callable[[], Any]]) -> None:
+    """Delete all rows from the assets table. Use for reset before reseed."""
+    conn, we_opened = _pg_conn(pg_connect)
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM assets")
+        conn.commit()
+    finally:
+        if we_opened:
+            conn.close()
+
+
 def upsert_asset(
     pg_connect: Union[str, Callable[[], Any]],
     asset: str,
     usd_symbol: Optional[str] = None,
     usd_price: Optional[Union[Decimal, float, int, str]] = None,
+    price_source: Optional[str] = None,
 ) -> bool:
     """
     Insert or update a single asset row. For use in scripts; no sync from symbols.
@@ -47,6 +64,7 @@ def upsert_asset(
         asset: Asset code (e.g. BTC, USDT).
         usd_symbol: Optional trading symbol for price fetch (e.g. BTCUSDT).
         usd_price: Optional fixed USD price (e.g. 1 for stables).
+        price_source: Optional source label (e.g. 'fixed' for stables, 'binance' from feed).
 
     Returns:
         True if a row was inserted or updated.
@@ -61,20 +79,22 @@ def upsert_asset(
             usd_pr = Decimal(str(usd_price))
         except (TypeError, ValueError):
             pass
+    src = (price_source or "").strip() or None
     conn, we_opened = _pg_conn(pg_connect)
     try:
         cur = conn.cursor()
         now = datetime.now(timezone.utc)
         cur.execute(
             """
-            INSERT INTO assets (asset, usd_symbol, usd_price, updated_at)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO assets (asset, usd_symbol, usd_price, updated_at, price_source)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (asset) DO UPDATE SET
                 usd_symbol = COALESCE(EXCLUDED.usd_symbol, assets.usd_symbol),
                 usd_price = COALESCE(EXCLUDED.usd_price, assets.usd_price),
-                updated_at = EXCLUDED.updated_at
+                updated_at = EXCLUDED.updated_at,
+                price_source = COALESCE(EXCLUDED.price_source, assets.price_source)
             """,
-            (asset, usd_sym, usd_pr, now),
+            (asset, usd_sym, usd_pr, now, src),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -87,9 +107,11 @@ def init_assets_stables(
     pg_connect: Union[str, Callable[[], Any]],
     assets: Sequence[str] = STABLE_ASSETS_WITH_USD_PRICE_ONE,
     usd_price: Decimal = Decimal("1"),
+    price_source: str = PRICE_SOURCE_FIXED,
 ) -> int:
     """
     UPSERT assets table with fixed usd_price for the given stable assets.
+    Uses price_source='fixed' (or given) so stables are distinguished from feed-filled prices.
     ON CONFLICT (asset) DO UPDATE so re-running sets usd_price for stables.
     Returns number of rows upserted.
     """
@@ -99,6 +121,7 @@ def init_assets_stables(
     try:
         cur = conn.cursor()
         now = datetime.now(timezone.utc)
+        src = (price_source or PRICE_SOURCE_FIXED).strip()
         count = 0
         for asset in assets:
             asset = (asset or "").strip()
@@ -106,13 +129,14 @@ def init_assets_stables(
                 continue
             cur.execute(
                 """
-                INSERT INTO assets (asset, usd_price, updated_at)
-                VALUES (%s, %s, %s)
+                INSERT INTO assets (asset, usd_price, updated_at, price_source)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (asset) DO UPDATE SET
                     usd_price = EXCLUDED.usd_price,
-                    updated_at = EXCLUDED.updated_at
+                    updated_at = EXCLUDED.updated_at,
+                    price_source = EXCLUDED.price_source
                 """,
-                (asset, usd_price, now),
+                (asset, usd_price, now, src),
             )
             count += 1
         conn.commit()

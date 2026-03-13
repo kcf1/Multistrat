@@ -7,7 +7,24 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pms.asset_init import init_assets_stables, sync_assets_from_symbols, upsert_asset
+from pms.asset_init import (
+    PRICE_SOURCE_FIXED,
+    init_assets_stables,
+    sync_assets_from_symbols,
+    truncate_assets,
+    upsert_asset,
+)
+
+
+class TestTruncateAssets:
+    def test_deletes_all_rows(self):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        truncate_assets(lambda: mock_conn)
+        mock_cur.execute.assert_called_once()
+        assert "DELETE FROM assets" in mock_cur.execute.call_args[0][0]
+        assert mock_conn.commit.called
 
 
 class TestUpsertAsset:
@@ -38,6 +55,17 @@ class TestUpsertAsset:
         assert ok is True
         call = mock_cur.execute.call_args[0]
         assert call[1][2] == Decimal("1")
+
+    def test_upserts_with_price_source_fixed(self):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.rowcount = 1
+        mock_conn.cursor.return_value = mock_cur
+        ok = upsert_asset(lambda: mock_conn, "USDT", usd_price=1, price_source=PRICE_SOURCE_FIXED)
+        assert ok is True
+        call = mock_cur.execute.call_args[0]
+        assert call[1][4] == "fixed"
+        assert "price_source" in call[0]
 
 
 class TestSyncAssetsFromSymbols:

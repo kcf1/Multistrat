@@ -34,6 +34,7 @@ def main() -> int:
     parser.add_argument("asset", help="Asset code (e.g. BTC, USDT)")
     parser.add_argument("--usd-symbol", default=None, help="Trading symbol for price fetch (e.g. BTCUSDT)")
     parser.add_argument("--usd-price", default=None, help="Fixed USD price (e.g. 1 for stables)")
+    parser.add_argument("--price-source", default=None, help="Source label (e.g. 'fixed' for stables)")
     args = parser.parse_args()
 
     database_url = (os.environ.get("DATABASE_URL") or "").strip()
@@ -46,6 +47,7 @@ def main() -> int:
         args.asset.strip(),
         usd_symbol=args.usd_symbol.strip() if args.usd_symbol else None,
         usd_price=args.usd_price,
+        price_source=args.price_source.strip() if args.price_source else None,
     )
     if ok:
         print("upsert_asset:", args.asset)
