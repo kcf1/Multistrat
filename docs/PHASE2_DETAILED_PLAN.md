@@ -2,6 +2,8 @@
 
 **Goal:** End-to-end order flow: approved orders → **generic OMS** (routes to broker adapters) → first broker **Binance** → fills → Postgres orders; OMS also manages account state (balances, positions) from broker streams → Postgres accounts/balances, positions in Redis; **PMS** as source of truth for PnL/margin. The OMS is broker-agnostic and handles all broker state (orders + accounts); Binance is the first broker adapter. Minimal Risk pass-through for testing.
 
+**Current architecture (codebase and schema):** See [docs/ARCHITECTURE.md](ARCHITECTURE.md) for module layout, Postgres tables (including **symbols**, **assets**, **positions**), and Redis streams/keys.
+
 ---
 
 ## 1. Overview
@@ -49,7 +51,15 @@ All schema changes are **Alembic revisions** (same as Phase 1). Add one or more 
   - `id` (PK), `order_id` (FK to orders or internal reference), `account_id` (FK), `symbol`, `side`, `quantity`, `price`, `fee`, `fee_asset`, `broker_fill_id`, `executed_at`, `created_at`.  
   - Source of truth for what was executed; populated by downstream consumers of `oms_fills` stream (e.g. PMS or future services). OMS does not write to `fills` table.
 
-- **positions** *(OMS: no Postgres table.)* Positions are stored in Redis only (`account:{broker}:{account_id}:positions`). The name `positions` was dropped from OMS Postgres schema for use by PMS (Position Management System). See revision d4e5f6a7b8c9.
+- **positions** *(OMS: no Postgres table.)* Broker positions are stored in Redis only (`account:{broker}:{account_id}:positions`). The Postgres table **positions** is owned by **PMS**: grain `(broker, account_id, book, asset)` with `open_qty`, `position_side`, `usd_price`, `usd_notional` (generated). See revision d4e5f6a7b8c9 and [docs/ARCHITECTURE.md](ARCHITECTURE.md) §3.3.
+
+- **symbols** (reference)  
+  - `symbol` (PK), `base_asset`, `quote_asset`, `tick_size`, `lot_size`, `min_qty`, `product_type`, `broker`, `updated_at`.  
+  - Used by PMS for order→legs (symbol → base/quote) in position derivation. Populated by OMS symbol sync (e.g. from broker exchange info) or reference job. See task 12.2.14.
+
+- **assets** (valuation)  
+  - `asset` (PK), `usd_symbol`, `usd_price`, `price_source`, `updated_at`.  
+  - Per-asset USD price for position valuation. Populated by PMS (asset init + asset price feed, e.g. Binance, manual, CoinGecko). See [docs/pms/ASSET_PRICE_FEED_PLAN.md](pms/ASSET_PRICE_FEED_PLAN.md).
 
 - **balances**  
   - `id` (PK), `account_id` (FK), `asset`, `available`, `locked`, `updated_at`.  

@@ -2,6 +2,8 @@
 
 Phased rollout for the multistrategy trading system. Each phase is designed to deliver a working slice that can be tested and extended.
 
+**Current architecture:** Module layout, Postgres schema (orders, accounts, balances, balance_changes, symbols, assets, positions), and Redis streams/keys are documented in [docs/ARCHITECTURE.md](ARCHITECTURE.md).
+
 ---
 
 ## Phase 1: Docker, Postgres, Redis
@@ -104,9 +106,11 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 **Goal:** Admin interface (GUI or CLI) to send commands and view state; commands target Redis streams and/or services.
 
+**Detailed plan:** [docs/PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md) — command model, streams, read-only views, CLI tasks, and acceptance.
+
 ### Dependencies
 
-- Phase 1 and 2 (streams exist; Booking/Position Keeper maintain state)
+- Phase 1 and 2 (streams exist; OMS, Risk, PMS maintain state)
 
 ### Deliverables
 
