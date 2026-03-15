@@ -80,8 +80,9 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
   - **Optional:** fills table, symbols table, book_allocations, pnl_snapshots, margin_snapshots, book_cash, Pydantic, repairs, second mark price source (Phase 4 Redis/DB)
   - **Mark price:** Interface first; Phase 2 wrap Binance; Phase 4 read from Redis/DB (Market Data). Config: `PMS_MARK_PRICE_SOURCE`
   - Expose via simple API (optional) or just write to Postgres/Redis for Admin/UI later
-- [ ] **Risk service (minimal for Phase 2)**
-  - Consume `strategy_orders`, pass through to `risk_approved` (no hard checks yet), or inject test orders so OMS/Booking can be tested without strategies
+- [ ] **Risk service (Phase 2: no-rule interface first, then add rules on demand)**
+  - **Interface first:** Consume `strategy_orders`, validate schema, forward to `risk_approved` in the same (or richer) schema OMS expects. No rules required for E2E.
+  - **Add rules on demand:** Rule engine runs an ordered list of checks; empty list = pass-through. Add rules (e.g. min/max qty, allowed venues) when needed; see **docs/risk/RISK_SERVICE_PLAN.md**. Test inject to `risk_approved` remains available when Risk is omitted.
 - [ ] **E2E test path**
   - Manually or script: push a test order to `risk_approved` → OMS picks up → Binance testnet execution → fill → Booking updates Postgres/Redis → Position Keeper shows updated PnL/margin
 
@@ -177,7 +178,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
   - For each strategy: read from Postgres/Redis (candles, ticker, positions from Redis cache); compute signals; produce order intents (symbol, side, qty, type, etc.) to `strategy_orders`
   - Config: which strategies enabled; params per strategy
 - [ ] **Risk service (full)**
-  - Consume `strategy_orders`; apply checks: position limits, max order size, margin/balance checks using Redis cache from Booking
+  - Same interface as Phase 2 (no-rule first); **add rules on demand**: position limits, max order size, margin/balance checks using Redis/Postgres from OMS/PMS
   - Publish approved to `risk_approved`; optionally publish rejections to a stream or log for debugging
 - [ ] **At least one strategy**
   - Example: simple MA cross or fixed-size test strategy that emits one order type (e.g. market) to Binance

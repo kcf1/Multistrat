@@ -348,8 +348,9 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
   - **Pass-through mode (default for Phase 2):** consume `strategy_orders`, perform schema validation only, and forward messages to `risk_approved` unchanged so OMS can be exercised end-to-end.
   - **Minimal rules mode (optional in Phase 2):** enable a very small subset of hard checks (e.g. min/max quantity and allowed venues) while leaving all stateful exposure/PnL/margin checks for Phase 5.
 - Full, expandable rule design and recommended rule set are defined in `docs/risk/RISK_SERVICE_PLAN.md`.
+- **Implementation approach:** **No-rule interface first**, then **add rules on demand**. Risk input schema is the same or more than risk output to OMS; with zero rules the service is a pass-through.
 
-See: [docs/risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md) for architecture and full rules list (Phase 5 target).
+See: [docs/risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md) for architecture, §2.3 implementation approach, and full rules list (Phase 5 target).
 
 ### 9.2 Minimal rules for Phase 2 (optional)
 
@@ -496,9 +497,18 @@ BINANCE_API_SECRET=
 ### 12.4 Test harness and deployment
 
 - [x] **12.4.1** **Write test script** (`scripts/inject_test_order.py`): connect to Redis (`REDIS_URL`), XADD test order to `risk_approved` (broker, symbol, side, quantity, order_type, etc.). Use for manual E2E and automated tests. Optionally add assertions (poll `oms_fills` or Postgres). See §16 Testing.
-- [ ] **12.4.2** Implement **Risk (minimal)** or use test inject only: pass-through `strategy_orders` → `risk_approved`, or rely on test script.
+- [ ] **12.4.2** Implement **Risk** per §12.5 (no-rule interface first, then add rules on demand); or use test inject only for E2E.
 - [x] **12.4.3** Add Docker services for OMS, PMS (and optionally Risk) to `docker-compose.yml`; same network `multistrat`; env from `.env`. Note: Account management is integrated into OMS, no separate Booking service.
 - [x] **12.4.4** **E2E:** run test script to inject test orders (broker `binance`) → OMS → Binance adapter → Binance testnet → fill → OMS publishes `oms_fills`; OMS syncs orders and accounts to Postgres → PMS derives positions and writes positions table. Verify in pgAdmin and RedisInsight. **Script:** `scripts/e2e_12_4_4.py` — injects **multiple** MARKET orders (4 orders, 3 symbols: long only, short only, long < short); polls oms_fills, Redis order store, Postgres orders, account flow, Postgres positions; then reminds to verify in pgAdmin and RedisInsight.
+
+### 12.5 Risk service (no-rule interface first, then add rules on demand)
+
+**Approach:** Build the risk layer so it works with **zero rules** (pass-through); then add rules incrementally via config. Risk input schema ≥ risk output to OMS. See **docs/risk/RISK_SERVICE_PLAN.md** §2.3.
+
+- [ ] **12.5.1** **No-rule interface:** Risk service loop: consume from `strategy_orders` (XREAD block), parse message to order intent (same fields as OMS expects: broker, account_id, symbol, side, quantity, order_type, limit_price, time_in_force, book, comment, etc.). Optional schema validation only. Publish to `risk_approved` with the **same** payload (or enriched, never fewer fields). No rule engine invocation when no rules are configured. **Unit test:** parse strategy_orders message; **integration test:** message flows strategy_orders → risk → risk_approved with unchanged/valid OMS payload.
+- [ ] **12.5.2** **Rule engine shell:** Rule interface (e.g. `evaluate(order, account, limits) -> RuleResult`); registry of rules by `rule_id`; pipeline that runs an ordered list of rules for each order and aggregates results into `RiskDecision`. When the pipeline is **empty**, always ACCEPT and forward. Config to enable/disable rules and set params (file or DB). **Unit test:** engine with empty pipeline passes all orders; engine with one always-fail rule rejects with correct reason_code.
+- [ ] **12.5.3** **Add rules on demand:** Implement and register individual rules (e.g. ORDER_01_MIN_QTY, ORDER_02_MAX_QTY, VENUE_01_ALLOWED_VENUES) per **docs/risk/RISK_SERVICE_PLAN.md** §4. Enable via config. **Unit test:** per-rule tests (pass/fail/edge); engine test with 1–2 rules enabled.
+- [ ] **12.5.4** **Risk deployment (optional Phase 2):** Docker service `risk`; env `REDIS_URL` and rule config; loop strategy_orders → risk → risk_approved. E2E with Risk in path (optional; test inject can still target `risk_approved` when Risk is disabled).
 
 ---
 

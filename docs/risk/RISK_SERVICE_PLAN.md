@@ -64,6 +64,11 @@
   - `reason_codes`: list of rule_ids that failed.
   - `messages`: list of human-readable messages.
 
+### 2.3 Implementation approach
+
+- **No-rule interface first:** Implement the risk layer as a **pass-through** with no checks (or schema validation only). Risk consumes from `strategy_orders` and publishes to `risk_approved` in the **same** schema OMS expects (risk input has at least the same parameters as risk output to OMS). This gives a working pipeline and a clear contract before any rules exist.
+- **Add rules on demand:** Once the interface is in place, add rules incrementally. The rule engine runs an ordered list of checks; an **empty list** means pass-through. Each new rule is implemented, registered, and enabled via config (per account/strategy). No change to the interface when adding rules.
+
 ---
 
 ## 3. Rule engine design (expandable)
@@ -284,10 +289,9 @@ The list below is intentionally broad; you can enable only the rules you want fo
 
 ## 7. Next steps
 
-1. Decide the **minimal subset of rules** to enable for Phase 2 (likely just order-level sanity and venue checks).
-2. Define concrete schemas in `risk` service code:
-   - Pydantic models for `OrderIntent` (from `strategy_orders`) and `RiskApprovedOrder` (to `risk_approved`).
-3. Implement the rule engine and 2–3 initial rules with full unit coverage.
-4. Wire the `risk` service into Docker (optional in Phase 2; mandatory in Phase 5).
-5. Expand configuration and rule coverage as PMS outputs mature.
+1. **No-rule interface first:** Implement consume from `strategy_orders` and publish to `risk_approved` with the same (or richer) schema OMS expects; schema validation only. See **PHASE2_DETAILED_PLAN.md** §12.5.1.
+2. **Rule engine shell:** Add registry + pipeline; empty pipeline = pass-through. See §12.5.2.
+3. Define concrete schemas in `risk` service code: Pydantic models for `OrderIntent` (from `strategy_orders`) and output to `risk_approved` (align with OMS `RiskApprovedOrder`).
+4. **Add rules on demand:** Enable a minimal subset for Phase 2 (e.g. ORDER_01_MIN_QTY, ORDER_02_MAX_QTY, VENUE_01_ALLOWED_VENUES); add further rules as needed in Phase 5. See §12.5.3.
+5. Wire the `risk` service into Docker (optional in Phase 2; mandatory in Phase 5). See §12.5.4.
 
