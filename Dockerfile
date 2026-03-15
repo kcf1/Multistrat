@@ -1,4 +1,5 @@
-# Multistrat app image: OMS and other Python services
+# Single app image for oms, pms, and risk (same Dockerfile; docker-compose overrides CMD per service).
+# Build once: "docker compose build oms" — pms and risk use the same image.
 FROM python:3.12-slim
 
 WORKDIR /app
