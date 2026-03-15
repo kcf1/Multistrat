@@ -1,0 +1,7 @@
+# Risk service (12.5.1–12.5.2)
+redis>=5.0.0
+pydantic>=2.0.0
+
+# Tests
+pytest>=7.4.0
+fakeredis>=2.20.0

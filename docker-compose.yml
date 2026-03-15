@@ -87,6 +87,21 @@ services:
       postgres:
         condition: service_healthy
 
+  risk:
+    build: .
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      # Optional: comma-separated rule_ids (empty = pass-through)
+      # RISK_RULE_PIPELINE: ORDER_01_MIN_QTY,ORDER_02_MAX_QTY
+    command: ["python", "-m", "risk.main"]
+    restart: unless-stopped
+    networks:
+      - multistrat
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redisinsight_data:
