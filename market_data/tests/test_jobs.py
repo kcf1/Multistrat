@@ -174,7 +174,7 @@ def test_detect_ohlcv_time_gaps_interior() -> None:
 
 def test_log_drifts_warns_on_mismatch() -> None:
     ot = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    bar = _bar(int(ot.timestamp() * 1000), close=Decimal("99"))
+    bar = _bar(int(ot.timestamp() * 1000), close=Decimal("2"))
     existing = {ot: (Decimal("1"), Decimal("2"), Decimal("0.5"), Decimal("1"))}
     with patch("market_data.jobs.correct_window.logger.warning") as w:
         n = _log_drifts(existing, [bar])

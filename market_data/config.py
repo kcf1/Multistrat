@@ -34,6 +34,20 @@ OHLCV_KLINES_CHUNK_LIMIT: int = 1000
 # ``correct_window`` re-fetches this many recent bars per series for vendor drift checks.
 OHLCV_CORRECT_WINDOW_BARS: int = 48
 
+# Binance klines: retries when HTTP fails or payload fails validation (incomplete rows).
+OHLCV_KLINES_FETCH_MAX_ATTEMPTS: int = 5
+OHLCV_KLINES_FETCH_RETRY_BASE_SLEEP_SEC: float = 0.75
+
+# Interior ``open_time`` step must be ~one bar length (ratios of interval ms).
+OHLCV_KLINES_GRID_MAX_STEP_RATIO: float = 1.51
+OHLCV_KLINES_GRID_MIN_STEP_RATIO: float = 0.99
+
+# With explicit start+end: first bar may lag ``startTime`` by up to this many intervals (Binance grid).
+OHLCV_KLINES_HEAD_MAX_SLACK_INTERVALS: int = 3
+
+# Only run span / tail / head coverage checks when window is at least this many bars wide.
+OHLCV_KLINES_SPAN_CHECK_MIN_INTERVALS: int = 10
+
 
 class MarketDataSettings(BaseSettings):
     """

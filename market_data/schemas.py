@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, List, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _ms_to_utc_aware(ms: int) -> datetime:
@@ -46,6 +46,24 @@ class OhlcvBar(BaseModel):
     def strip_interval(cls, v: str) -> str:
         return v.strip()
 
+    @model_validator(mode="after")
+    def ohlcv_sanity(self) -> OhlcvBar:
+        if self.high < self.low:
+            raise ValueError("high must be >= low")
+        if self.high < self.open or self.high < self.close:
+            raise ValueError("high must be >= open and close")
+        if self.low > self.open or self.low > self.close:
+            raise ValueError("low must be <= open and close")
+        if self.volume < 0:
+            raise ValueError("volume must be >= 0")
+        if self.quote_volume is not None and self.quote_volume < 0:
+            raise ValueError("quote_volume must be >= 0 when set")
+        if self.trades is not None and self.trades < 0:
+            raise ValueError("trades must be >= 0 when set")
+        if self.close_time is not None and self.close_time < self.open_time:
+            raise ValueError("close_time must be >= open_time when set")
+        return self
+
 
 def parse_binance_kline(
     row: List[Union[str, int, float]],
@@ -66,6 +84,13 @@ def parse_binance_kline(
         open_ms = int(row[0])
     except (TypeError, ValueError) as e:
         raise ValueError(f"Invalid open time: {row[0]!r}") from e
+
+    for idx in (1, 2, 3, 4, 5):
+        if idx >= len(row):
+            raise ValueError(f"Binance kline row missing field at index {idx}")
+        cell = row[idx]
+        if cell is None or (isinstance(cell, str) and not str(cell).strip()):
+            raise ValueError(f"missing or empty kline field at index {idx}")
 
     def _dec(i: int) -> Decimal:
         try:
