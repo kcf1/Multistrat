@@ -225,6 +225,8 @@ Order matches **§6.0**: **contract/schema → parse → provider (fetch + rate 
 - [x] **4.5.2** **`correct_window` job (optional but recommended):** rolling re-fetch of last *N* bars / *H* hours → upsert; log or alert on row changes (vendor drift).
 - [x] **4.5.3** **`repair_gap` job (optional):** detect or target time range → fetch range only → upsert → advance cursor.
 
+**Implemented (code):** [`market_data/jobs/ingest_ohlcv.py`](../market_data/jobs/ingest_ohlcv.py), [`correct_window.py`](../market_data/jobs/correct_window.py), [`repair_gap.py`](../market_data/jobs/repair_gap.py) (`detect_ohlcv_time_gaps`, `run_repair_gap`, …); manual one-shot ingest [`scripts/backfill_ohlcv.py`](../scripts/backfill_ohlcv.py). **Still open:** wiring these on a schedule lives under **§9.6** (`market_data.main` + Compose).
+
 ### 9.6 Runner and deploy
 
 - [ ] **4.6.1** `python -m market_data.main`: **scheduler** registers **§9.5** jobs (**REST-only** until §9.8); graceful shutdown.
