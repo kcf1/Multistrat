@@ -142,6 +142,8 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 **Goal:** Ingest market data into Postgres and Redis so strategies can query it.
 
+**Detailed plan:** [docs/PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) — schema, Redis contract, Binance REST/WS, `market_data/` layout, tasks, acceptance, PMS hook.
+
 ### Dependencies
 
 - Phase 1 (Postgres, Redis)

@@ -2,7 +2,7 @@
 
 Single reference for the multistrategy trading system: directory layout by module, Postgres schema (all tables), Redis streams and keys, and pointers to detailed docs.
 
-**See also:** [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md), [PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md), [oms/OMS_ARCHITECTURE.md](oms/OMS_ARCHITECTURE.md), [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md), [risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md).
+**See also:** [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md), [PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md), [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md), [oms/OMS_ARCHITECTURE.md](oms/OMS_ARCHITECTURE.md), [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md), [risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md).
 
 ---
 
@@ -50,6 +50,7 @@ Single reference for the multistrategy trading system: directory layout by modul
 | **oms/** | OMS | Order management: consume `risk_approved` / `cancel_requested`, broker adapters, Redis order/account store, sync to Postgres, produce `oms_fills`. |
 | **pms/** | PMS | Portfolio: read Postgres only (orders, balance_changes, symbols, assets) → derive positions → write `positions` table. Does not consume Redis. |
 | **risk/** | Risk | Pre-trade: consume `strategy_orders`, rule engine (optional), produce `risk_approved`. |
+| **market_data/** | (Phase 4) | Public market feeds → Postgres (`candles`, …) + Redis hot keys (`market:{symbol}:…`). See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md). |
 | **admin/** | (Phase 3) | Admin CLI/API: publish commands to streams, read-only views over Postgres/Redis. |
 | **alembic/** | Shared | Postgres migrations; schema owned by OMS (orders, accounts, balances, balance_changes) and PMS (symbols, assets, positions). |
 | **scripts/** | Shared | E2E tests, deploy, reset (e.g. `e2e_with_risk.py`, `update_and_deploy.ps1`, `reset_redis_postgres.ps1`). |
@@ -83,6 +84,12 @@ All tables are managed via **Alembic** under `alembic/versions/`. OMS writes ord
 |-------|---------|----------------------|
 | **positions** | Derived positions at asset level; source of truth for PnL/valuation | Grain: `(broker, account_id, book, asset)`. Columns: `id`, `broker`, `account_id`, `book`, `asset`, `open_qty`, `position_side`, `usd_price`, `usd_notional` (generated: `open_qty * usd_price`), `updated_at`. Written by PMS `granular_store.write_pms_positions`. See [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md), [pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md](pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md). |
 
+### 3.4 Market data (Phase 4)
+
+| Table | Purpose | Key columns / grain |
+|-------|---------|---------------------|
+| **candles** | Historical OHLCV per symbol and interval | Unique `(symbol, interval, open_time)`; see [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §4. |
+
 ---
 
 ## 4. Redis
@@ -103,6 +110,10 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 - **Order store** (`oms/storage/redis_order_store.py`): `orders:{order_id}` (Hash), `orders:by_status:{status}` (Set), `orders:by_book:{book}` (Set), `orders:by_broker_order_id:{broker_order_id}` (String → order_id).
 - **Account store** (`oms/storage/redis_account_store.py`): `account:{broker}:{account_id}` (Hash), `account:{broker}:{account_id}:balances` (Hash asset→balance), `account:{broker}:{account_id}:positions` (Hash symbol→position), `accounts:by_broker:{broker}` (Set).
 - **Retry:** `oms:retry:risk_approved:{entry_id}` for place-order retry count.
+
+### 4.3 Key patterns (Market Data, Phase 4)
+
+- **Namespace:** `market:{symbol}:…` (ticker, candle, optional mark)—written by **`market_data`**; documented in [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §5. OMS must not reuse this prefix.
 
 ---
 
@@ -127,7 +138,13 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 - **Outputs:** Redis stream `risk_approved`.
 - **Logic:** Rule engine (optional); empty pipeline = pass-through. See [risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md).
 
-### 5.4 Admin (Phase 3, `admin/`)
+### 5.4 Market data (Phase 4, `market_data/`)
+
+- **Inputs:** Binance (or other) **public** REST + WebSocket; config symbols/intervals.
+- **Outputs:** Postgres **`candles`**; Redis keys under `market:{symbol}:…` (see §4.3).
+- **Details:** [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md).
+
+### 5.5 Admin (Phase 3, `admin/`)
 
 - **Commands:** Publish to `risk_approved` (manual order), `cancel_requested` (cancel). Optional: flush risk queue, refresh account.
 - **Read-only:** Postgres `orders`, `accounts`, `balances`, `positions`, **symbols**, **assets**; Redis order/account store; optional `oms_fills` tail.
@@ -137,6 +154,6 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 
 ## 6. Deployment
 
-- **Docker:** Single app image (e.g. `oms`) used for `oms`, `pms`, and `risk` services; entrypoints: `python -m oms.main`, `python -m pms.main`, `python -m risk.main`.
+- **Docker:** Single app image (e.g. `oms`) used for `oms`, `pms`, and `risk` services; entrypoints: `python -m oms.main`, `python -m pms.main`, `python -m risk.main`. Phase 4 adds **`market_data`** on the same image pattern unless split out—see [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §8.
 - **Scripts:** `scripts/update_and_deploy.ps1` builds once and starts `oms`, `pms`, `risk`; `docker-compose up -d oms pms risk`.
 - **E2E:** `scripts/e2e_with_risk.py` injects to `strategy_orders`, asserts risk_approved → oms_fills → orders table; optional `--runs N` for timing stats.
