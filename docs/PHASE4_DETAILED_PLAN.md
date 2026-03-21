@@ -209,15 +209,15 @@ Order matches **§6.0**: **contract/schema → parse → provider (fetch + rate 
 
 ### 9.3 Provider adapter and rate limiting (**§6.0**)
 
-- [ ] **4.3.1** `providers/base.py`: Protocol / ABC for “fetch klines range” (and later optional WS hooks).
-- [ ] **4.3.2** `providers/binance_spot.py`: REST klines client; integrate **one shared rate limiter / queue per provider instance** (all jobs share it).
-- [ ] **4.3.3** **Unit tests:** mock HTTP responses; verify parsing and limiter sequencing.
+- [x] **4.3.1** `providers/base.py`: Protocol / ABC for “fetch klines range” (and later optional WS hooks).
+- [x] **4.3.2** `providers/binance_spot.py`: REST klines client; integrate **one shared rate limiter / queue per provider instance** (all jobs share it).
+- [x] **4.3.3** **Unit tests:** mock HTTP responses; verify parsing and limiter sequencing.
 
 ### 9.4 Storage layer (Postgres + cursor)
 
-- [ ] **4.4.1** `upsert_ohlcv` (or bulk) with **idempotent** `ON CONFLICT` on `(symbol, interval, open_time)`.
-- [ ] **4.4.2** **Cursors:** explicit `ingestion_cursor` table and/or documented use of `MAX(open_time)` per `(symbol, interval)`; update after successful commits.
-- [ ] **4.4.3** **Unit tests:** mock DB or test container; verify upsert and idempotency.
+- [x] **4.4.1** `upsert_ohlcv` (or bulk) with **idempotent** `ON CONFLICT` on `(symbol, interval, open_time)`.
+- [x] **4.4.2** **Cursors:** explicit `ingestion_cursor` table and/or documented use of `MAX(open_time)` per `(symbol, interval)`; update after successful commits.
+- [x] **4.4.3** **Unit tests:** mock DB or test container; verify upsert and idempotency.
 
 ### 9.5 Jobs (scheduled work units)
 

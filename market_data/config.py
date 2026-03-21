@@ -21,6 +21,10 @@ OHLCV_SYMBOLS: tuple[str, ...] = DATA_COLLECTION_SYMBOLS
 # Used only when ``MARKET_DATA_BINANCE_BASE_URL`` is unset.
 DEFAULT_BINANCE_REST_URL: str = "https://api.binance.com"
 
+# Min seconds between REST calls **per provider instance** (shared by all jobs on that instance).
+# ``None`` = **unlimited** (default) until venue weight/QPS is documented.
+MARKET_DATA_MIN_REQUEST_INTERVAL_SEC: float | None = None
+
 
 class MarketDataSettings(BaseSettings):
     """
