@@ -4,8 +4,12 @@ Targeted range repair and simple gap detection (Phase 4 §9.5 / §4.5.3).
 ``run_repair_gap`` refetches a closed ``[start_time_ms, end_time_ms]`` window in chunks,
 upserts after each chunk, and **does not** change ``ingestion_cursor`` (historical fill).
 
-``detect_ohlcv_time_gaps`` finds missing bar spans inside a wall-clock window from
-stored ``open_time`` sequences (coarse; assumes regular grid).
+``detect_ohlcv_time_gaps`` finds missing spans **inside the given**
+``[range_start, range_end]`` by walking ordered ``open_time`` rows in that window
+(head gap before the first bar, oversized steps between bars, tail after the last).
+It does **not** infer gaps from global ``min``/``max(open_time)`` alone—that would
+drop the prefix ``[range_start, first_bar)`` and any interior holes if you only
+compared endpoint extrema.
 """
 
 from __future__ import annotations
@@ -64,8 +68,12 @@ def detect_ohlcv_time_gaps(
     gap_multiple: float = 1.5,
 ) -> list[tuple[datetime, datetime]]:
     """
-    Return sub-ranges ``(gap_start, gap_end)`` (inclusive) where stored bars skip at least
-    ``gap_multiple`` bar lengths. If no rows exist in the window, returns the whole window.
+    Return sub-ranges ``(gap_start, gap_end)`` (inclusive) **within**
+    ``[range_start, range_end]`` where stored bars are missing or skip at least
+    ``gap_multiple`` bar lengths. If no rows exist in that window, returns the whole
+    window. Gaps are **sub-intervals of that fixed window** (what the policy range
+    requires minus what rows exist on the grid)—not ``min``/``max(open_time)``
+    endpoint tricks that omit the head or interior.
 
     ``range_*`` must be timezone-aware (UTC recommended).
     """

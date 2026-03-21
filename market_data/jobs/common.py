@@ -14,6 +14,13 @@ def utc_now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def expected_ohlcv_slots(start_ms: int, end_ms: int, iv_ms: int) -> int:
+    """Approximate number of interval buckets in ``[start_ms, end_ms]`` (inclusive-style)."""
+    if end_ms <= start_ms or iv_ms <= 0:
+        return 0
+    return (end_ms - start_ms) // iv_ms + 1
+
+
 def open_time_plus_interval_ms(open_time: datetime, interval_ms: int) -> int:
     nxt = open_time + timedelta(milliseconds=interval_ms)
     return int(nxt.timestamp() * 1000)

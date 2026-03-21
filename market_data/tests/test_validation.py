@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 
@@ -76,17 +77,38 @@ def test_parse_rejects_empty_ohlc_field() -> None:
         parse_binance_kline(r, symbol="BTCUSDT", interval="1m")
 
 
-def test_interior_gap_detected() -> None:
+def test_large_time_gap_allowed_in_payload() -> None:
+    """Venues skip candles for illiquid periods; multi-interval jumps must not fail ingest."""
     a = _row(0)
     b = _row(180_000)
-    with pytest.raises(ValueError, match="interior gap"):
+    with patch("market_data.validation.logger.warning") as w:
+        bars = process_binance_klines_payload([a, b], symbol="BTCUSDT", interval="1m")
+    w.assert_not_called()
+    assert len(bars) == 2
+
+
+def test_gap_beyond_buffer_logs_warning() -> None:
+    """More than ``OHLCV_KLINES_WARN_OPEN_TIME_GAP_BARS`` implied missing bars → warning."""
+    a = _row(0)
+    b = _row(420_000)  # 7 min on 1m → implied 6 missing
+    with patch("market_data.validation.logger.warning") as w:
+        bars = process_binance_klines_payload([a, b], symbol="BTCUSDT", interval="1m")
+    assert len(bars) == 2
+    w.assert_called_once()
+
+
+def test_interior_overlap_rejected() -> None:
+    a = _row(0)
+    b = _row(30_000)
+    with pytest.raises(ValueError, match="overlap|open_time"):
         process_binance_klines_payload([a, b], symbol="BTCUSDT", interval="1m")
 
 
-def test_tail_shortfall_with_explicit_window() -> None:
+def test_tail_shortfall_with_explicit_window_warns_only() -> None:
+    """Short last page with room left to ``end_ms`` is allowed (delisted / venue gaps)."""
     raw = [_row(0), _row(60_000)]
-    with pytest.raises(ValueError, match="tail shortfall"):
-        process_binance_klines_payload(
+    with patch("market_data.validation.logger.warning") as w:
+        bars = process_binance_klines_payload(
             raw,
             symbol="BTCUSDT",
             interval="1m",
@@ -94,6 +116,8 @@ def test_tail_shortfall_with_explicit_window() -> None:
             end_time_ms=600_000,
             request_limit=1000,
         )
+    assert len(bars) == 2
+    assert w.called
 
 
 def test_span_checks_skipped_for_small_window() -> None:
@@ -109,10 +133,11 @@ def test_span_checks_skipped_for_small_window() -> None:
     assert len(bars) == 2
 
 
-def test_head_slack_detected() -> None:
+def test_head_slack_warns_only() -> None:
+    """Large gap from ``startTime`` to first open is allowed (late-listed symbols)."""
     raw = [_row(250_000)]
-    with pytest.raises(ValueError, match="head slack"):
-        process_binance_klines_payload(
+    with patch("market_data.validation.logger.warning") as w:
+        bars = process_binance_klines_payload(
             raw,
             symbol="BTCUSDT",
             interval="1m",
@@ -120,6 +145,8 @@ def test_head_slack_detected() -> None:
             end_time_ms=600_000,
             request_limit=1000,
         )
+    assert len(bars) == 1
+    assert w.called
 
 
 def test_theoretical_max_bars_in_window() -> None:
@@ -156,6 +183,7 @@ def test_scan_bar_series_grid_gaps_clean() -> None:
 
 
 def test_scan_bar_series_grid_gaps_detects() -> None:
+    """Notes only when implied missing bars exceed the configured buffer (default 5)."""
     bars = [
         OhlcvBar(
             symbol="BTCUSDT",
@@ -170,7 +198,7 @@ def test_scan_bar_series_grid_gaps_detects() -> None:
         OhlcvBar(
             symbol="BTCUSDT",
             interval="1m",
-            open_time=datetime(2020, 1, 1, 0, 3, tzinfo=timezone.utc),
+            open_time=datetime(2020, 1, 1, 0, 7, tzinfo=timezone.utc),
             open=Decimal("1"),
             high=Decimal("2"),
             low=Decimal("0.5"),

@@ -104,6 +104,54 @@ def fetch_ohlc_by_open_times(
     return out
 
 
+def count_ohlcv_bars_in_window(
+    conn: PsycopgConnection,
+    symbol: str,
+    interval: str,
+    *,
+    open_time_ge: datetime,
+    open_time_le: datetime,
+) -> int:
+    """Count rows with ``open_time`` in ``[open_time_ge, open_time_le]`` (inclusive)."""
+    n, _, _ = ohlcv_window_stats(conn, symbol, interval, open_time_ge=open_time_ge, open_time_le=open_time_le)
+    return n
+
+
+def ohlcv_window_stats(
+    conn: PsycopgConnection,
+    symbol: str,
+    interval: str,
+    *,
+    open_time_ge: datetime,
+    open_time_le: datetime,
+) -> tuple[int, datetime | None, datetime | None]:
+    """
+    Return ``(row_count, min_open_time, max_open_time)`` for rows in the window (inclusive).
+
+    ``min`` / ``max`` are ``None`` when the count is zero.
+    """
+    sym = symbol.strip().upper()
+    iv = interval.strip()
+    if open_time_ge.tzinfo is None or open_time_le.tzinfo is None:
+        raise ValueError("open_time bounds must be timezone-aware")
+    lo = open_time_ge.astimezone(timezone.utc)
+    hi = open_time_le.astimezone(timezone.utc)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*), MIN(open_time), MAX(open_time) FROM ohlcv
+            WHERE symbol = %s AND interval = %s
+              AND open_time >= %s AND open_time <= %s
+            """,
+            (sym, iv, lo, hi),
+        )
+        row = cur.fetchone()
+    if not row:
+        return 0, None, None
+    n = int(row[0]) if row[0] is not None else 0
+    return n, row[1], row[2]
+
+
 def max_open_time_ohlcv(conn: PsycopgConnection, symbol: str, interval: str) -> datetime | None:
     """Latest ``open_time`` in ``ohlcv`` for the series, or ``None`` if empty."""
     sym = symbol.strip().upper()

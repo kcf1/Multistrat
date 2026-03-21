@@ -110,7 +110,7 @@ def test_limit_out_of_range() -> None:
         prov.fetch_klines("BTCUSDT", "1m", start_time_ms=1, limit=0)
 
 
-def test_http_error_propagates() -> None:
+def test_http_error_returns_empty_and_records_give_up() -> None:
     session = MagicMock()
     resp = MagicMock()
     resp.raise_for_status.side_effect = RuntimeError("429")
@@ -120,9 +120,10 @@ def test_http_error_propagates() -> None:
         session=session,
         fetch_max_attempts=1,
     )
-    with pytest.raises(RuntimeError, match="failed after") as ei:
-        prov.fetch_klines("BTCUSDT", "1m", start_time_ms=1)
-    assert ei.value.__cause__ is not None and "429" in str(ei.value.__cause__)
+    bars = prov.fetch_klines("BTCUSDT", "1m", start_time_ms=1)
+    assert bars == []
+    assert len(prov.fetch_give_ups) == 1
+    assert "429" in prov.fetch_give_ups[0]
 
 
 def test_fetch_retries_after_invalid_payload_then_succeeds() -> None:

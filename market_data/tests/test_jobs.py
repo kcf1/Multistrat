@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from market_data.jobs.common import iter_kline_batches_forward, open_time_plus_interval_ms
+from market_data.jobs.common import (
+    expected_ohlcv_slots,
+    iter_kline_batches_forward,
+    open_time_plus_interval_ms,
+)
 from market_data.jobs.correct_window import _log_drifts, run_correct_window_series
 from market_data.jobs.ingest_ohlcv import ingest_ohlcv_series
 from market_data.jobs.repair_gap import detect_ohlcv_time_gaps, run_repair_gap
@@ -71,6 +75,108 @@ def test_resolve_ingest_start_after_max_db() -> None:
             backfill_days=30,
         )
     assert start == open_time_plus_interval_ms(ref, 60_000)
+
+
+def test_resolve_ingest_start_ignores_watermark_when_disabled() -> None:
+    conn = MagicMock()
+    now_ms = 1_000_000_000_000
+    ref = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    with (
+        patch("market_data.jobs.ingest_ohlcv.get_ingestion_cursor", return_value=ref),
+        patch("market_data.jobs.ingest_ohlcv.max_open_time_ohlcv", return_value=ref),
+    ):
+        from market_data.jobs.ingest_ohlcv import resolve_ingest_start_ms
+
+        start = resolve_ingest_start_ms(
+            conn,
+            "BTCUSDT",
+            "1m",
+            now_ms=now_ms,
+            backfill_days=7,
+            use_watermark=False,
+        )
+    assert start == now_ms - 7 * 86_400_000
+
+
+def test_resolve_no_watermark_skip_existing_same_as_horizon() -> None:
+    """``skip_existing`` does not change :func:`resolve_ingest_start_ms` (gap logic is in ingest)."""
+    conn = MagicMock()
+    now_ms = 2_000_000_000_000
+    ref = datetime(2020, 1, 1, 12, 0, tzinfo=timezone.utc)
+    horizon = now_ms - 7 * 86_400_000
+    with patch("market_data.jobs.ingest_ohlcv.max_open_time_ohlcv", return_value=ref):
+        from market_data.jobs.ingest_ohlcv import resolve_ingest_start_ms
+
+        with_skip = resolve_ingest_start_ms(
+            conn,
+            "BTCUSDT",
+            "1m",
+            now_ms=now_ms,
+            backfill_days=7,
+            use_watermark=False,
+            skip_existing_when_no_watermark=True,
+        )
+        no_skip = resolve_ingest_start_ms(
+            conn,
+            "BTCUSDT",
+            "1m",
+            now_ms=now_ms,
+            backfill_days=7,
+            use_watermark=False,
+            skip_existing_when_no_watermark=False,
+        )
+    assert with_skip == horizon == no_skip
+
+
+def test_ingest_skip_existing_gap_mode_calls_detect_and_segments() -> None:
+    end_ms = 2_000_000_000_000
+    backfill_days = 1
+    horizon_ms = end_ms - backfill_days * 86_400_000
+    h_dt = datetime.fromtimestamp(horizon_ms / 1000.0, tz=timezone.utc)
+    g1 = h_dt + timedelta(minutes=10)
+    m_tail = datetime.fromtimestamp(end_ms / 1000.0 - 300, tz=timezone.utc)
+
+    seg_calls: list[tuple[int, int]] = []
+
+    def fake_seg(_conn, _prov, _sym, _iv, *, start_ms, end_ms, chunk_limit, chunk_progress):
+        seg_calls.append((start_ms, end_ms))
+        return (1, 1)
+
+    conn = MagicMock()
+    prov = MagicMock()
+
+    with (
+        patch(
+            "market_data.jobs.ingest_ohlcv.detect_ohlcv_time_gaps",
+            return_value=[(h_dt, g1)],
+        ) as det,
+        patch(
+            "market_data.jobs.ingest_ohlcv._ingest_forward_segment",
+            side_effect=fake_seg,
+        ),
+        patch("market_data.jobs.ingest_ohlcv.max_open_time_ohlcv", return_value=m_tail),
+    ):
+        from market_data.jobs.ingest_ohlcv import ingest_ohlcv_series
+
+        r = ingest_ohlcv_series(
+            conn,
+            prov,
+            "BTCUSDT",
+            "1m",
+            now_ms=end_ms,
+            backfill_days=backfill_days,
+            use_watermark=False,
+            skip_existing_when_no_watermark=True,
+        )
+
+    det.assert_called_once()
+    assert len(seg_calls) == 2
+    assert r.bars_upserted == 2
+    assert r.chunks == 2
+
+
+def test_expected_ohlcv_slots() -> None:
+    assert expected_ohlcv_slots(0, 600_000, 60_000) == 11
 
 
 def test_iter_kline_batches_forward_pages() -> None:
@@ -141,6 +247,7 @@ def test_ingest_ohlcv_series_commits_per_chunk() -> None:
 
     assert r.bars_upserted == 3
     assert r.chunks == 2
+    assert r.fetch_give_ups == ()
     assert uo.call_count == 2
     assert uc.call_count == 2
     assert conn.commit.call_count == 2

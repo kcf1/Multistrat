@@ -26,10 +26,14 @@ DEFAULT_BINANCE_REST_URL: str = "https://api.binance.com"
 MARKET_DATA_MIN_REQUEST_INTERVAL_SEC: float | None = None
 
 # First-time series with no rows / cursor: fetch history back this many days from "now".
-OHLCV_INITIAL_BACKFILL_DAYS: int = 30
+OHLCV_INITIAL_BACKFILL_DAYS: int = 5 * 365  # ~5 calendar years (empty series / cold start)
 
 # Max klines per HTTP request (Binance cap).
 OHLCV_KLINES_CHUNK_LIMIT: int = 1000
+
+# ``skip_existing_when_no_watermark``: :func:`detect_ohlcv_time_gaps` uses this multiple of
+# the bar length to classify a hole (same semantics as ``repair_gap``).
+OHLCV_SKIP_EXISTING_GAP_MULTIPLE: float = 1.5
 
 # ``correct_window`` re-fetches this many recent bars per series for vendor drift checks.
 OHLCV_CORRECT_WINDOW_BARS: int = 48
@@ -42,11 +46,15 @@ OHLCV_KLINES_FETCH_RETRY_BASE_SLEEP_SEC: float = 0.75
 OHLCV_KLINES_GRID_MAX_STEP_RATIO: float = 1.51
 OHLCV_KLINES_GRID_MIN_STEP_RATIO: float = 0.99
 
-# With explicit start+end: first bar may lag ``startTime`` by up to this many intervals (Binance grid).
+# With explicit start+end: head slack beyond this many intervals is logged (non-fatal ingest).
 OHLCV_KLINES_HEAD_MAX_SLACK_INTERVALS: int = 3
 
 # Only run span / tail / head coverage checks when window is at least this many bars wide.
 OHLCV_KLINES_SPAN_CHECK_MIN_INTERVALS: int = 10
+
+# Log ``loguru.warning`` when consecutive kline ``open_time`` skips **more than** this many
+# implied bar slots (venues omit candles; small gaps stay quiet).
+OHLCV_KLINES_WARN_OPEN_TIME_GAP_BARS: int = 5
 
 
 class MarketDataSettings(BaseSettings):

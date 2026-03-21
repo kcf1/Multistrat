@@ -11,8 +11,10 @@ import pytest
 
 from market_data.schemas import OhlcvBar
 from market_data.storage import (
+    count_ohlcv_bars_in_window,
     get_ingestion_cursor,
     max_open_time_ohlcv,
+    ohlcv_window_stats,
     upsert_ingestion_cursor,
     upsert_ohlcv_bars,
 )
@@ -96,6 +98,42 @@ def test_get_ingestion_cursor_returns_time() -> None:
     conn.cursor.return_value = cur
 
     assert get_ingestion_cursor(conn, "BTCUSDT", "1m") == ts
+
+
+def test_count_ohlcv_bars_in_window_executes() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    lo = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    cur.fetchone.return_value = (42, lo, hi)
+    conn.cursor.return_value = cur
+    assert count_ohlcv_bars_in_window(conn, "btcusdt", "1m", open_time_ge=lo, open_time_le=hi) == 42
+
+
+def test_ohlcv_window_stats_empty() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = (0, None, None)
+    conn.cursor.return_value = cur
+    lo = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    assert ohlcv_window_stats(conn, "BTCUSDT", "1h", open_time_ge=lo, open_time_le=hi) == (
+        0,
+        None,
+        None,
+    )
+
+
+def test_count_ohlcv_bars_in_window_rejects_naive() -> None:
+    conn = MagicMock()
+    naive = datetime(2020, 1, 1)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        ohlcv_window_stats(conn, "BTCUSDT", "1m", open_time_ge=naive, open_time_le=hi)
 
 
 def test_max_open_time_ohlcv() -> None:

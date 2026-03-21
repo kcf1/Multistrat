@@ -4,7 +4,9 @@ Binance **spot** public klines (GET /api/v3/klines) — no API key.
 Uses shared ``ProviderRateLimiter`` per provider instance (§6.0).
 
 Fetches **retry** on HTTP errors or invalid / incomplete payloads (row parse failures,
-OHLC invariants, non-monotonic ``open_time``) with exponential backoff.
+OHLC invariants, non-monotonic ``open_time``) with exponential backoff. After the last
+retry, logs an error, appends to ``fetch_give_ups``, and returns an **empty** list so
+callers can continue pagination / other symbols.
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ class BinanceSpotKlinesProvider:
             if fetch_retry_base_sleep_sec is not None
             else OHLCV_KLINES_FETCH_RETRY_BASE_SLEEP_SEC
         )
+        self.fetch_give_ups: list[str] = []
 
     def fetch_klines(
         self,
@@ -114,9 +117,14 @@ class BinanceSpotKlinesProvider:
                 time.sleep(sleep_s)
 
         assert last_exc is not None
-        raise RuntimeError(
-            f"Binance klines failed after {self._fetch_max_attempts} attempts for {sym} {iv}"
-        ) from last_exc
+        detail = f"{sym} {iv}: {last_exc!s}"
+        self.fetch_give_ups.append(detail)
+        logger.error(
+            "Binance klines giving up after {} attempts — {}; returning empty page (ingest proceeds)",
+            self._fetch_max_attempts,
+            detail,
+        )
+        return []
 
 
 def build_binance_spot_provider(settings: MarketDataSettings) -> BinanceSpotKlinesProvider:
