@@ -1,4 +1,4 @@
-# Single app image for oms, pms, and risk (same Dockerfile; docker-compose overrides CMD per service).
+# Single app image for oms, pms, risk, and market_data (docker-compose overrides CMD per service).
 # Build once: "docker compose build oms" — pms and risk use the same image.
 FROM python:3.12-slim
 

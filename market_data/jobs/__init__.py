@@ -12,15 +12,18 @@ from market_data.jobs.ingest_ohlcv import (
     run_ingest_ohlcv,
 )
 from market_data.jobs.repair_gap import (
+    PolicyRepairSeriesResult,
     detect_ohlcv_time_gaps,
     run_repair_detected_gaps,
     run_repair_gap,
     run_repair_gaps_in_window,
+    run_repair_gaps_policy_window_all_series,
 )
 
 __all__ = [
     "CorrectWindowResult",
     "IngestSeriesResult",
+    "PolicyRepairSeriesResult",
     "detect_ohlcv_time_gaps",
     "ingest_ohlcv_series",
     "resolve_ingest_start_ms",
@@ -30,4 +33,5 @@ __all__ = [
     "run_repair_detected_gaps",
     "run_repair_gap",
     "run_repair_gaps_in_window",
+    "run_repair_gaps_policy_window_all_series",
 ]

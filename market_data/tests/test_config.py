@@ -7,6 +7,9 @@ from pydantic_settings import SettingsConfigDict
 from market_data.config import (
     DEFAULT_BINANCE_REST_URL,
     OHLCV_INTERVALS,
+    OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+    OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS,
+    OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
     MarketDataSettings,
 )
 from market_data.universe import DATA_COLLECTION_SYMBOLS
@@ -70,3 +73,9 @@ def test_binance_rest_url_from_market_data_binance_base_url(
     monkeypatch.setenv("MARKET_DATA_BINANCE_BASE_URL", "https://testnet.binance.vision/")
     s = MarketDataSettings()
     assert s.binance_rest_url == "https://testnet.binance.vision"
+
+
+def test_scheduler_cadence_is_module_constants() -> None:
+    assert OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS == 300
+    assert OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS == 3600
+    assert OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS == 0

@@ -14,13 +14,20 @@ compared endpoint extrema.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
+from loguru import logger
 
-from market_data.config import OHLCV_KLINES_CHUNK_LIMIT, MarketDataSettings
+from market_data.config import (
+    OHLCV_INITIAL_BACKFILL_DAYS,
+    OHLCV_KLINES_CHUNK_LIMIT,
+    OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
+    MarketDataSettings,
+)
 from market_data.intervals import interval_to_millis
-from market_data.jobs.common import iter_kline_batches_forward
+from market_data.jobs.common import iter_kline_batches_forward, utc_now_ms
 from market_data.providers.base import KlinesProvider
 from market_data.providers.binance_spot import build_binance_spot_provider
 from market_data.storage import upsert_ohlcv_bars
@@ -126,6 +133,61 @@ def detect_ohlcv_time_gaps(
             gaps.append((g0, re_))
 
     return gaps
+
+
+@dataclass(frozen=True)
+class PolicyRepairSeriesResult:
+    symbol: str
+    interval: str
+    gap_spans: int
+    bars_upserted: int
+
+
+def run_repair_gaps_policy_window_all_series(
+    settings: MarketDataSettings,
+    *,
+    provider: KlinesProvider | None = None,
+    backfill_days: int | None = None,
+    gap_multiple: float | None = None,
+) -> list[PolicyRepairSeriesResult]:
+    """
+    For each configured ``(symbol, interval)``, detect gaps in
+    ``[now - backfill_days, now]`` (same policy window as ingest) and refetch each gap.
+
+    Uses one Postgres connection for the whole run. Can be API-heavy when many gaps exist;
+    prefer initial history from :func:`run_ingest_ohlcv` before relying on this.
+    """
+    days = OHLCV_INITIAL_BACKFILL_DAYS if backfill_days is None else backfill_days
+    gm = OHLCV_SKIP_EXISTING_GAP_MULTIPLE if gap_multiple is None else gap_multiple
+    end_ms = utc_now_ms()
+    start_ms = end_ms - days * 86_400_000
+    range_start = datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc)
+    range_end = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
+
+    prov = provider if provider is not None else build_binance_spot_provider(settings)
+    conn = psycopg2.connect(settings.database_url)
+    out: list[PolicyRepairSeriesResult] = []
+    try:
+        for sym in settings.symbols:
+            for iv in settings.intervals:
+                gaps = detect_ohlcv_time_gaps(
+                    conn, sym, iv, range_start, range_end, gap_multiple=gm
+                )
+                if not gaps:
+                    out.append(PolicyRepairSeriesResult(sym, iv, 0, 0))
+                    continue
+                n = run_repair_detected_gaps(conn, prov, sym, iv, gaps)
+                logger.info(
+                    "market_data gap repair symbol={} interval={} gap_spans={} bars_upserted={}",
+                    sym,
+                    iv,
+                    len(gaps),
+                    n,
+                )
+                out.append(PolicyRepairSeriesResult(sym, iv, len(gaps), n))
+        return out
+    finally:
+        conn.close()
 
 
 def run_repair_detected_gaps(

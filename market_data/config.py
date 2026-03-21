@@ -56,6 +56,13 @@ OHLCV_KLINES_SPAN_CHECK_MIN_INTERVALS: int = 10
 # implied bar slots (venues omit candles; small gaps stay quiet).
 OHLCV_KLINES_WARN_OPEN_TIME_GAP_BARS: int = 5
 
+# ``python -m market_data.main`` scheduler cadence (UTC-aligned after first immediate run).
+# Do not put these in ``.env`` — tune here (see ``.cursor/rules/env-and-config.mdc``).
+OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS: int = 300
+OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS: int = 3600
+# ``0`` disables scheduled policy-window gap repair (use ``scripts/backfill_ohlcv.py`` / ``--with-repair``).
+OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS: int = 0
+
 
 class MarketDataSettings(BaseSettings):
     """
@@ -64,7 +71,7 @@ class MarketDataSettings(BaseSettings):
     - **DATABASE_URL** or **MARKET_DATA_DATABASE_URL** (latter wins if both set).
     - Optional **MARKET_DATA_BINANCE_BASE_URL** for public REST klines (testnet vs mainnet).
 
-    Micro: **OHLCV_SYMBOLS**, **OHLCV_INTERVALS**, **DEFAULT_BINANCE_REST_URL** in this file.
+    Micro: OHLCV_SYMBOLS, OHLCV_INTERVALS, OHLCV_SCHEDULER_* cadence, DEFAULT_BINANCE_REST_URL in this file.
     """
 
     model_config = SettingsConfigDict(

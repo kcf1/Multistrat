@@ -102,6 +102,20 @@ services:
       redis:
         condition: service_healthy
 
+  market_data:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-multistrat}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-multistrat}
+      # Optional: MARKET_DATA_DATABASE_URL, MARKET_DATA_BINANCE_BASE_URL, scheduler intervals
+    command: ["python", "-m", "market_data.main"]
+    restart: unless-stopped
+    networks:
+      - multistrat
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redisinsight_data:
