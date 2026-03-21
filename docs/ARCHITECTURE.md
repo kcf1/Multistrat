@@ -50,7 +50,7 @@ Single reference for the multistrategy trading system: directory layout by modul
 | **oms/** | OMS | Order management: consume `risk_approved` / `cancel_requested`, broker adapters, Redis order/account store, sync to Postgres, produce `oms_fills`. |
 | **pms/** | PMS | Portfolio: read Postgres only (orders, balance_changes, symbols, assets) → derive positions → write `positions` table. Does not consume Redis. |
 | **risk/** | Risk | Pre-trade: consume `strategy_orders`, rule engine (optional), produce `risk_approved`. |
-| **market_data/** | (Phase 4) | Public market feeds → Postgres (`candles`, …) + Redis hot keys (`market:{symbol}:…`). See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md). |
+| **market_data/** | (Phase 4) | Public market feeds → Postgres (`ohlcv`, …) + Redis hot keys (`market:{symbol}:…`). Default symbol universe: [`market_data/universe.py`](../market_data/universe.py) (`DATA_COLLECTION_SYMBOLS`, USDT spot only). See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md). |
 | **admin/** | (Phase 3) | Admin CLI/API: publish commands to streams, read-only views over Postgres/Redis. |
 | **alembic/** | Shared | Postgres migrations; schema owned by OMS (orders, accounts, balances, balance_changes) and PMS (symbols, assets, positions). |
 | **scripts/** | Shared | E2E tests, deploy, reset (e.g. `e2e_with_risk.py`, `update_and_deploy.ps1`, `reset_redis_postgres.ps1`). |
@@ -88,7 +88,7 @@ All tables are managed via **Alembic** under `alembic/versions/`. OMS writes ord
 
 | Table | Purpose | Key columns / grain |
 |-------|---------|---------------------|
-| **candles** | Historical OHLCV per symbol and interval | Unique `(symbol, interval, open_time)`; see [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §4. |
+| **ohlcv** | Historical OHLCV bars per symbol and interval | Unique `(symbol, interval, open_time)`; see [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §4. |
 
 ---
 
@@ -113,7 +113,7 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 
 ### 4.3 Key patterns (Market Data, Phase 4)
 
-- **Namespace:** `market:{symbol}:…` (ticker, candle, optional mark)—written by **`market_data`**; documented in [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §5. OMS must not reuse this prefix.
+- **Namespace:** `market:{symbol}:…` (ticker, `ohlcv_bar`, `ohlcv_recent`, optional mark)—written by **`market_data`**; documented in [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §5. OMS must not reuse this prefix.
 
 ---
 
@@ -141,7 +141,7 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 ### 5.4 Market data (Phase 4, `market_data/`)
 
 - **Inputs:** Binance (or other) **public** REST + WebSocket; config symbols/intervals.
-- **Outputs:** Postgres **`candles`**; Redis keys under `market:{symbol}:…` (see §4.3).
+- **Outputs:** Postgres **`ohlcv`**; Redis keys under `market:{symbol}:…` (see §4.3).
 - **Details:** [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md).
 
 ### 5.5 Admin (Phase 3, `admin/`)

@@ -11,9 +11,9 @@
 | Item | Choice |
 |------|--------|
 | **Venue (v1)** | **Binance** public REST + WebSocket (spot and/or USDT-M futures—pick one product line per deployment; document which). Testnet vs mainnet via existing URL/env patterns; see [docs/BINANCE_API_RULES.md](BINANCE_API_RULES.md) for limits and connection behavior. |
-| **Postgres role** | **Durable history:** candles (required for Phase 4 acceptance); optional **trades** or **agg_trades** table if strategies need tick granularity later. |
-| **Redis role** | **Low-latency hot state:** latest ticker fields, optional rolling “last N” candles per symbol/interval, optional **mark/index** keys if futures—**TTL** on ephemeral keys to bound memory. |
-| **Process model** | **Single service**, one main loop or asyncio: (1) **scheduled REST** backfill / gap repair for candles; (2) **WebSocket** multiplexed subscriptions for live updates; (3) periodic **flush** from in-memory buffers to Postgres where batching helps. |
+| **Postgres role** | **Durable history:** **`ohlcv`** table (required for Phase 4 acceptance); optional **trades** or **agg_trades** table if strategies need tick granularity later. |
+| **Redis role** | **Low-latency hot state:** latest ticker fields, optional rolling “last N” **OHLCV** bars per symbol/interval, optional **mark/index** keys if futures—**TTL** on ephemeral keys to bound memory. |
+| **Process model** | **Single service**, one main loop or asyncio: (1) **scheduled REST** backfill / gap repair for **OHLCV** history; (2) **WebSocket** multiplexed subscriptions for live updates; (3) periodic **flush** from in-memory buffers to Postgres where batching helps. |
 | **Consumers** | **Phase 5:** strategies read Redis and/or Postgres. **Optional same phase:** PMS `redis` / `market_data` mark provider reading keys documented below. |
 
 ---
@@ -30,7 +30,7 @@
 
 **In scope**
 
-- Configurable **symbol list** and **candle intervals** (e.g. `1m`, `5m`, `1h`).
+- Configurable **symbol list** and **bar intervals** (e.g. `1m`, `5m`, `1h`) for OHLCV rows.
 - **Idempotent writes:** Postgres upserts or `ON CONFLICT` on `(symbol, interval, open_time)` (or equivalent natural key).
 - **Documented Redis key schema** and TTLs (see §5).
 - **Docker** service on the same Compose network as Postgres/Redis.
@@ -46,13 +46,13 @@
 
 ## 4. Postgres schema
 
-### 4.1 `candles` (required)
+### 4.1 `ohlcv` (required)
 
 | Column | Type | Notes |
 |--------|------|--------|
 | `symbol` | TEXT | Exchange symbol, e.g. `BTCUSDT` |
 | `interval` | TEXT | Binance interval string, e.g. `1m`, `1h` |
-| `open_time` | TIMESTAMPTZ | Candle open (UTC); part of uniqueness |
+| `open_time` | TIMESTAMPTZ | Bar open (UTC); part of uniqueness |
 | `open`, `high`, `low`, `close` | NUMERIC | Prices |
 | `volume` | NUMERIC | Base asset volume |
 | `quote_volume` | NUMERIC | Optional but useful |
@@ -71,7 +71,7 @@
 - Only add if a concrete strategy needs **trade tape** in Postgres in Phase 4/5.
 - If deferred, document **Redis-only** recent trades or omit entirely.
 
-### 4.3 Latest candle mirror (optional)
+### 4.3 Latest OHLCV bar mirror (optional)
 
 - Optional small table or materialized path: **latest** row per `(symbol, interval)` for SQL dashboards; otherwise strategies can use **Redis** for “current” bar.
 
@@ -84,8 +84,8 @@ Document in code (e.g. `market_data/redis_keys.py`) and in this section. **Names
 | Pattern | Content | TTL |
 |---------|---------|-----|
 | `market:{symbol}:ticker` | Hash: `last`, `bid`, `ask`, `volume_24h`, `quote_volume_24h`, `ts` (ISO or ms) | **60–300 s** (refresh from WS); extend on each update |
-| `market:{symbol}:candle:{interval}` | Hash or JSON string: `open_time`, `o`, `h`, `l`, `c`, `v`, `is_closed` | **None or long** if overwritten each close; optional short TTL if only “open bar” |
-| `market:{symbol}:candles:{interval}` | List (JSON) **last N** closed candles (newest at head or tail—pick one convention) | Cap **N** in code (e.g. 500); optional max memory eviction |
+| `market:{symbol}:ohlcv_bar:{interval}` | Hash or JSON string: `open_time`, `o`, `h`, `l`, `c`, `v`, `is_closed` | **None or long** if overwritten each close; optional short TTL if only “open bar” |
+| `market:{symbol}:ohlcv_recent:{interval}` | List (JSON) **last N** closed OHLCV bars (newest at head or tail—pick one convention) | Cap **N** in code (e.g. 500); optional max memory eviction |
 | `market:{symbol}:mark` | Last mark price (futures) | **60–120 s** if WS stalls |
 
 **Rules**
@@ -105,11 +105,11 @@ market_data/
   __init__.py
   config.py          # symbols, intervals, BINANCE_WS_URL / REST base, DATABASE_URL, REDIS_URL
   main.py            # entrypoint: start REST scheduler + WS tasks
-  postgres_writer.py # insert/upsert candles, optional trades
+  postgres_writer.py # insert/upsert ohlcv rows, optional trades
   redis_publisher.py # set keys, TTLs
   binance_rest.py    # klines / exchangeInfo (filters)
   binance_ws.py      # combined streams, reconnect, backoff
-  schemas.py         # optional Pydantic for candle/ticker payloads
+  schemas.py         # optional Pydantic for ohlcv/ticker payloads
 ```
 
 Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoints added later—**public** endpoints may not need signing; still respect [BINANCE_API_RULES.md](BINANCE_API_RULES.md)).
@@ -122,8 +122,8 @@ Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoi
 ### 6.3 WebSocket (live)
 
 - Subscribe to **ticker** and/or **kline** streams per symbol (combined URL to reduce connections).
-- **Reconnect** with exponential backoff; **resync** last closed candles from REST after long gaps.
-- Update **Redis** on each message; update **Postgres** for **closed** candles (or buffer and flush every N seconds).
+- **Reconnect** with exponential backoff; **resync** last closed bars from REST after long gaps.
+- Update **Redis** on each message; update **Postgres** `ohlcv` for **closed** bars (or buffer and flush every N seconds).
 
 ### 6.4 Config (env)
 
@@ -131,7 +131,7 @@ Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoi
 |----------|---------|
 | `DATABASE_URL` | Postgres |
 | `REDIS_URL` | Redis |
-| `MARKET_DATA_SYMBOLS` | Comma-separated list, e.g. `BTCUSDT,ETHUSDT` |
+| `MARKET_DATA_SYMBOLS` | Comma-separated list; **default** when unset: all **USDT** pairs in [`market_data/universe.py`](../market_data/universe.py) (`DATA_COLLECTION_SYMBOLS`, 30 bases → `BTCUSDT`, …) |
 | `MARKET_DATA_INTERVALS` | Comma-separated, e.g. `1m,5m,1h` |
 | `BINANCE_REST_URL` / `BINANCE_WS_URL` | Align with spot vs futures testnet/mainnet |
 
@@ -158,12 +158,12 @@ Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoi
 
 ### 9.1 Schema and config
 
-- [ ] **4.1.1** Alembic migration: **`candles`** table + indexes + unique constraint.
+- [ ] **4.1.1** Alembic migration: **`ohlcv`** table + indexes + unique constraint.
 - [ ] **4.1.2** `market_data/config.py` (or equivalent): load symbols, intervals, URLs from env; validate at startup.
 
 ### 9.2 Postgres writes
 
-- [ ] **4.2.1** `upsert_candle` (or bulk) with **idempotent** conflict handling.
+- [ ] **4.2.1** `upsert_ohlcv` (or bulk) with **idempotent** conflict handling.
 - [ ] **4.2.2** REST backfill job: from empty DB and from “last open_time” checkpoint.
 - [ ] **4.2.3** **Unit test:** mock DB or use test container; verify upsert semantics.
 
@@ -175,7 +175,7 @@ Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoi
 ### 9.4 WebSocket
 
 - [ ] **4.4.1** Connect combined streams; parse ticker/kline; reconnect loop.
-- [ ] **4.4.2** Wire closed kline → Postgres upsert + Redis “last N” update.
+- [ ] **4.4.2** Wire closed kline → Postgres `ohlcv` upsert + Redis `ohlcv_recent` update.
 
 ### 9.5 Runner and deploy
 
@@ -193,7 +193,7 @@ Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoi
 ## 10. Testing
 
 - **Unit:** Redis publisher (fakeredis), Postgres writer (mock or transactional rollback), WS message parsing (fixture JSON).
-- **Integration:** Service runs against real Redis + Postgres (Compose); after **N** minutes, `SELECT COUNT(*) FROM candles WHERE symbol = …` increases; Redis `GET`/`HGETALL` shows fresh `ts`.
+- **Integration:** Service runs against real Redis + Postgres (Compose); after **N** minutes, `SELECT COUNT(*) FROM ohlcv WHERE symbol = …` increases; Redis `GET`/`HGETALL` shows fresh `ts`.
 - **Smoke:** Document one command: `docker compose up -d postgres redis market_data`, wait, verify DB + Redis.
 
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) testing table for Phase 4.
@@ -202,8 +202,8 @@ See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) testing table for Phase 4.
 
 ## 11. Acceptance
 
-- [ ] For configured symbols and at least one interval: **Postgres** contains **recent historical candles** (backfill + ongoing closed bars).
-- [ ] **Redis** holds **up-to-date** ticker (and/or latest candle) keys per §5 with **documented TTL** behavior.
+- [ ] For configured symbols and at least one interval: **Postgres** `ohlcv` contains **recent historical** bars (backfill + ongoing closed bars).
+- [ ] **Redis** holds **up-to-date** ticker (and/or `ohlcv_bar` / `ohlcv_recent`) keys per §5 with **documented TTL** behavior.
 - [ ] Service runs in **Docker** on the multistrat network without manual steps beyond env and `docker compose up`.
 - [ ] **(Optional)** PMS can use Redis-fed mark prices when configured.
 
@@ -211,7 +211,7 @@ See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) testing table for Phase 4.
 
 ## 12. Handoff to Phase 5
 
-- Strategies should depend only on **documented** Redis keys and/or **SQL** queries against `candles` (and optional `trades`).
+- Strategies should depend only on **documented** Redis keys and/or **SQL** queries against `ohlcv` (and optional `trades`).
 - Risk / OMS unchanged; no new streams required for market data (unless you later add a **cache invalidation** stream—**not** in Phase 4 minimum).
 
 ---

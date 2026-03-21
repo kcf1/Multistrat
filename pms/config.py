@@ -6,18 +6,16 @@ Task 12.3.1b: Use Pydantic for config. See docs/pms/PMS_ARCHITECTURE.md §12.
 
 from typing import Optional
 
+from market_data.universe import DATA_COLLECTION_BASE_ASSETS
+
 # Asset price feed runs every tick; interval reserved for future use (seconds).
 ASSET_PRICE_FEED_INTERVAL_SECONDS: float = 60.0
 
 # Asset price feed source: "binance" or "" to disable. Not from env.
 ASSET_PRICE_FEED_SOURCE: str = "binance"
 
-# Assets to update from the price feed (same list as reset_and_seed_assets top coins). Not from env.
-ASSET_PRICE_FEED_ASSETS: tuple = (
-    "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "AVAX", "TRX", "DOT",
-    "LINK", "MATIC", "SHIB", "LTC", "BCH", "UNI", "ATOM", "XLM", "XMR", "ETC",
-    "FIL", "APT", "HBAR", "VET", "OP", "ARB", "INJ", "IMX", "SAND", "MANA",
-)
+# Bases to update from the price feed — same as ``market_data.universe.DATA_COLLECTION_BASE_ASSETS``.
+ASSET_PRICE_FEED_ASSETS: tuple[str, ...] = DATA_COLLECTION_BASE_ASSETS
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict

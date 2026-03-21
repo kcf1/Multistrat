@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY oms/ oms/
 COPY pms/ pms/
 COPY risk/ risk/
+COPY market_data/ market_data/
 COPY alembic/ alembic/
 COPY alembic.ini .
 

@@ -152,13 +152,13 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 - [ ] **Market data service**
   - Single process, loop: connect to Binance (or chosen venue) market data (REST + WebSocket)
-  - **REST:** Historical candles (and/or trades) on a schedule; write to Postgres (e.g. `candles`, `trades` tables)
-  - **WebSocket:** Live ticker/candles/trades; write to Redis (e.g. `market:{symbol}:ticker`, `market:{symbol}:candle_1m`) and optionally latest to Postgres (e.g. latest candle per symbol)
+  - **REST:** Historical OHLCV bars (and/or trades) on a schedule; write to Postgres (e.g. `ohlcv`, `trades` tables)
+  - **WebSocket:** Live ticker / kline updates / trades; write to Redis (e.g. `market:{symbol}:ticker`, `market:{symbol}:ohlcv_bar:1m`) and optionally latest bar per symbol to Postgres
 - [ ] **Schema (Postgres)**
-  - Tables: e.g. `candles` (symbol, interval, open_time, o/h/l/c/v), `trades` if needed
+  - Tables: e.g. `ohlcv` (symbol, interval, open_time, o/h/l/c/v), `trades` if needed
   - Indexes for strategy queries (symbol, time range)
 - [ ] **Redis key layout**
-  - Document keys and TTLs; keep hot path minimal (e.g. last N candles, current ticker)
+  - Document keys and TTLs; keep hot path minimal (e.g. `ohlcv_recent`, current ticker)
 - [ ] **Config**
   - Symbols to subscribe; intervals; Binance (or other) endpoints
 - [ ] **Deploy**
@@ -166,7 +166,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 ### Acceptance
 
-- [ ] After running Market Data service: Postgres has historical candles for selected symbols; Redis has up-to-date ticker/latest candle; no dependency on strategies yet.
+- [ ] After running Market Data service: Postgres `ohlcv` has historical bars for selected symbols; Redis has up-to-date ticker and OHLCV hot keys; no dependency on strategies yet.
 
 ---
 
@@ -183,7 +183,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 - [ ] **Strategy runner / harness**
   - Single process per strategy (or one process that runs multiple strategies in threads/async): loop over each strategy’s interval
-  - For each strategy: read from Postgres/Redis (candles, ticker, positions from Redis cache); compute signals; produce order intents (symbol, side, qty, type, etc.) to `strategy_orders`
+  - For each strategy: read from Postgres/Redis (`ohlcv`, ticker, positions from Redis cache); compute signals; produce order intents (symbol, side, qty, type, etc.) to `strategy_orders`
   - Config: which strategies enabled; params per strategy
 - [ ] **Risk service (full)**
   - Same interface as Phase 2 (no-rule first); **add rules on demand**: position limits, max order size, margin/balance checks using Redis/Postgres from OMS/PMS
@@ -223,7 +223,7 @@ The plans do not yet define automated tests for every deliverable. Below is a su
 | **1** | **Smoke / verification:** Compose up succeeds; Postgres accepts connections; Redis `PING`; `alembic upgrade head` idempotent. | Can be a small script or CI step (e.g. `docker-compose up -d && psql $DATABASE_URL -c 'SELECT 1' && redis-cli -u $REDIS_URL ping && alembic current`). |
 | **2** | **Unit:** Component tests with mocked dependencies (API client, Redis store, consumer/producer). **Integration:** OMS flow with fakeredis and mock adapters (`test_oms_integration.py`). **E2E (code-level):** Real Redis + Binance testnet (`test_oms_redis_testnet.py`). **E2E (service-level):** Black-box script (`scripts/full_pipeline_test.py`) assumes running services. See [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md#165-test-classification-and-file-mapping) for test classification. | Mock or testnet only; avoid real money. |
 | **3** | **Integration:** Admin publishes command to stream; target service consumes and reacts. **Smoke:** Manual order and cancel from CLI or GUI. | |
-| **4** | **Integration:** Market data service writes candles to Postgres and latest to Redis; query by symbol/interval. **Smoke:** After run, candles exist for configured symbols. | |
+| **4** | **Integration:** Market data service writes `ohlcv` to Postgres and hot keys to Redis; query by symbol/interval. **Smoke:** After run, `ohlcv` rows exist for configured symbols. | |
 | **5** | **Unit:** Strategy `next_signal()` given mock state; Risk checks (limits, margin). **Integration:** Strategy → Risk → `risk_approved`; full E2E with testnet. | |
 
 - **Where to put tests:** Per-service (e.g. `oms/tests/`, `booking/tests/`) or a top-level `tests/` with subdirs per phase/service. Use one runner (e.g. pytest) and `requirements-dev.txt` if needed.
