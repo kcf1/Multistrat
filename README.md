@@ -152,9 +152,9 @@ The OMS consumes `risk_approved`, places orders via the registered broker adapte
    - **BINANCE_API_KEY**, **BINANCE_API_SECRET** — required for Binance; **BINANCE_BASE_URL** (e.g. `https://testnet.binance.vision` for testnet)
 2. **Run as Docker service (recommended for pipeline test):**
    ```bash
-   docker compose up -d oms pms risk
+   docker compose up -d oms pms risk market_data
    ```
-   Or use the deployment script: `.\scripts\update_and_deploy.ps1` (builds and starts oms, pms, risk). The **risk** service consumes `strategy_orders` and publishes to `risk_approved`; **oms** consumes `risk_approved`. Running `docker compose up -d` starts all defined services including oms, pms, and risk.
+   Or use the deployment script: `.\scripts\update_and_deploy.ps1` (builds and starts oms, pms, risk, market_data). The **risk** service consumes `strategy_orders` and publishes to `risk_approved`; **oms** consumes `risk_approved`. **market_data** runs scheduled OHLCV ingest to Postgres. Running `docker compose up -d` starts all defined services including these app services.
 3. **Full pipeline test (against the OMS service):** With OMS running in Docker (and Postgres/Redis up), from repo root:
    ```bash
    python scripts/full_pipeline_test.py

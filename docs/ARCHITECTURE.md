@@ -154,6 +154,6 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 
 ## 6. Deployment
 
-- **Docker:** Single app image (e.g. `oms`) used for `oms`, `pms`, and `risk` services; entrypoints: `python -m oms.main`, `python -m pms.main`, `python -m risk.main`. Phase 4 adds **`market_data`** on the same image pattern unless split out—see [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §8.
-- **Scripts:** `scripts/update_and_deploy.ps1` builds once and starts `oms`, `pms`, `risk`; `docker-compose up -d oms pms risk`.
+- **Docker:** Single app image (e.g. `oms`) used for `oms`, `pms`, `risk`, and **`market_data`**; entrypoints: `python -m oms.main`, `python -m pms.main`, `python -m risk.main`, `python -m market_data.main` — see [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §8.
+- **Scripts:** `scripts/update_and_deploy.ps1` builds once and starts `oms`, `pms`, `risk`, `market_data`; `docker compose up -d oms pms risk market_data`.
 - **E2E:** `scripts/e2e_with_risk.py` injects to `strategy_orders`, asserts risk_approved → oms_fills → orders table; optional `--runs N` for timing stats.
