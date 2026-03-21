@@ -146,6 +146,8 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 **Detailed plan:** [docs/PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) — schema, Redis contract, Binance REST/WS, `market_data/` layout, tasks, acceptance, PMS hook.
 
+**Ingest checklist (any new dataset):** [docs/DATASET_INGESTION_STEPS.md](DATASET_INGESTION_STEPS.md).
+
 ### Dependencies
 
 - Phase 1 (Postgres, Redis)

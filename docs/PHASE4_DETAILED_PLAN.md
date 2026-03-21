@@ -4,6 +4,8 @@
 
 **Current architecture:** [docs/ARCHITECTURE.md](ARCHITECTURE.md). Phase 2 PMS today uses **`PMS_MARK_PRICE_SOURCE=binance`** for mark prices; Phase 4 adds a path where PMS (or strategies) reads **Redis/Postgres** fed by this service—see [docs/pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md) §11 and `PMS_MARK_PRICE_SOURCE`.
 
+**Adding datasets:** Reusable ingest checklist (grain, schema, cursor, correction/repair, tests): [DATASET_INGESTION_STEPS.md](DATASET_INGESTION_STEPS.md).
+
 ## 0. Implementation priority (defer 9.3–9.4)
 
 **Current stance — Redis hot path + WebSocket deferred:** Ship **Postgres `ohlcv` via REST only** first (checklist **§9.1**, **§9.2**, and a **REST-only** **§9.5** runner/deploy). **Do not require** market-data **Redis** keys (§5) or **WebSocket** live ingestion until this deferral is lifted.
