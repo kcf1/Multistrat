@@ -106,6 +106,8 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 **Goal:** Admin interface (GUI or CLI) to send commands and view state; commands target Redis streams and/or services.
 
+**Implementation priority:** **Admin is deferred first** — ad-hoc injection to `risk_approved` / `cancel_requested` plus existing DB/Redis tooling is enough until a dedicated Admin CLI or API is worth the effort. **Rationale:** [docs/PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md) §0 (*Reasons for deferral*).
+
 **Detailed plan:** [docs/PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md) — command model, streams, read-only views, CLI tasks, and acceptance.
 
 ### Dependencies

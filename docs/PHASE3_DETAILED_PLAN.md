@@ -4,6 +4,20 @@
 
 **Current architecture (data sources):** See [docs/ARCHITECTURE.md](ARCHITECTURE.md) for Postgres tables (orders, accounts, balances, balance_changes, **symbols**, **assets**, **positions**), Redis streams/key patterns, and module layout.
 
+## 0. Implementation priority (mark first)
+
+**Current stance — Admin deferred:** Do not require a dedicated Admin process, `admin/` package, or formal CLI before advancing other work. **Manual order** and **cancel** remain available by publishing to existing streams (`risk_approved`, `cancel_requested`) via **ad-hoc** means (e.g. `redis-cli`, one-off Python, or small throwaway scripts). **Read-only** state can use Postgres/Redis directly (e.g. Compose **pgadmin** / **redisinsight**, SQL, or `XREVRANGE` on `oms_fills`).
+
+### Reasons for deferral
+
+- **Not on the execution critical path:** OMS already consumes `risk_approved` and `cancel_requested`. Admin adds no new execution logic—only a safer, repeatable way to publish and inspect. Manual `XADD` / small scripts are sufficient until operator volume justifies a package.
+- **Visibility already exists:** Phase 1–2 data lives in Postgres tables and Redis keys/streams; Compose includes **pgadmin** and **redisinsight** for ad-hoc read-only access. Planned Admin “read-only views” are **application-level** listings (or equivalent SQL from Python), not a prerequisite for correctness.
+- **No extra runtime today:** `docker-compose.yml` has no Admin service; deferring avoids another process, image surface, and maintenance until needed—relevant for **tight dev machines** (e.g. low RAM) or **24/7 laptop** setups where fewer containers is preferable.
+- **Downstream phases are unblocked:** Market data (Phase 4), strategies (Phase 5), and external batch jobs (e.g. hourly portfolio work with **pre-shipped** models) do not require a formal Admin CLI or HTTP API.
+- **DB views are optional:** Ordinary Postgres `VIEW`s do not improve performance vs the same query from Python; materialized views are only worth it for heavy, stale-tolerant aggregates. Deferring Admin does not force a separate “view layer” in the database.
+
+**When Phase 3 is picked up:** Follow the task checklist in §9 in order — shared publish helpers and unit tests (**3.1.1**), then CLI order/cancel (**3.1.2–3.1.3**), then read-only query helpers and list commands (**3.2.x**), then optional **3.3.x**.
+
 ---
 
 ## 1. Overview
