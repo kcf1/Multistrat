@@ -106,8 +106,11 @@ services:
     build: .
     env_file: .env
     environment:
+      # Both: ``MarketDataSettings`` prefers MARKET_DATA_DATABASE_URL over DATABASE_URL; .env often
+      # points at localhost for host dev — override so the container uses the compose Postgres service.
       DATABASE_URL: postgresql://${POSTGRES_USER:-multistrat}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-multistrat}
-      # Optional: MARKET_DATA_DATABASE_URL, MARKET_DATA_BINANCE_BASE_URL, scheduler intervals
+      MARKET_DATA_DATABASE_URL: postgresql://${POSTGRES_USER:-multistrat}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-multistrat}
+      # Optional: MARKET_DATA_BINANCE_BASE_URL
     command: ["python", "-m", "market_data.main"]
     restart: unless-stopped
     networks:

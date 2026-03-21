@@ -141,7 +141,7 @@ def init_assets_stables(
             count += 1
         conn.commit()
         if count:
-            logger.info("init_assets_stables: upserted %s asset(s) with usd_price=%s", count, usd_price)
+            logger.info("init_assets_stables: upserted {} asset(s) with usd_price={}", count, usd_price)
         return count
     finally:
         if we_opened:
@@ -195,7 +195,7 @@ def sync_assets_from_symbols(
             count += 1
         conn.commit()
         if count:
-            logger.info("sync_assets_from_symbols: upserted %s asset(s) with usd_symbol (quote=%s)", count, quote)
+            logger.info("sync_assets_from_symbols: upserted {} asset(s) with usd_symbol (quote={})", count, quote)
         return count
     finally:
         if we_opened:

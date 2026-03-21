@@ -108,12 +108,17 @@ def run_scheduler_loop(
     next_correct: float | None = None
     next_repair: float | None = None if repair_interval_seconds > 0 else float("inf")
 
+    repair_cadence = (
+        f"every {repair_interval_seconds}s"
+        if repair_interval_seconds > 0
+        else "off"
+    )
     logger.info(
         "market_data scheduler: ingest every {}s (first run now, then UTC-aligned), "
-        "correct_window every {}s, repair_gap every {}s ({})",
+        "correct_window every {}s, repair_gap {} ({})",
         ingest_interval_seconds,
         correct_interval_seconds,
-        repair_interval_seconds if repair_interval_seconds > 0 else "off",
+        repair_cadence,
         "enabled" if repair_interval_seconds > 0 else "disabled",
     )
 

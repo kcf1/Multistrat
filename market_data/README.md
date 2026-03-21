@@ -26,6 +26,8 @@ docker compose up -d market_data
 
 Requires **Postgres** healthy and migrations applied (`ohlcv`, `ingestion_cursor`). Redis is **not** required for this tranche.
 
+**Docker:** If `.env` sets `MARKET_DATA_DATABASE_URL` to `localhost`, override it for the container (see `docker-compose.yml` `market_data.environment`) so the service uses hostname **`postgres`**, not the container’s own loopback.
+
 **Large backfill** ( tqdm, optional `--no-watermark` / `--skip-existing`):
 
 ```bash
