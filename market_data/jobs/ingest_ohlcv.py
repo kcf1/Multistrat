@@ -7,6 +7,7 @@ series starts ``OHLCV_INITIAL_BACKFILL_DAYS`` ago. Commits after each chunk (che
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import psycopg2
@@ -22,6 +23,7 @@ from market_data.jobs.common import (
     open_time_plus_interval_ms,
     utc_now_ms,
 )
+from market_data.schemas import OhlcvBar
 from market_data.providers.base import KlinesProvider
 from market_data.providers.binance_spot import build_binance_spot_provider
 from market_data.storage import (
@@ -73,11 +75,15 @@ def ingest_ohlcv_series(
     now_ms: int | None = None,
     chunk_limit: int = OHLCV_KLINES_CHUNK_LIMIT,
     backfill_days: int = OHLCV_INITIAL_BACKFILL_DAYS,
+    chunk_progress: Callable[[Sequence[OhlcvBar]], None] | None = None,
 ) -> IngestSeriesResult:
     """
     Catch up ``(symbol, interval)`` to ``now`` using chunked fetches + upsert + cursor.
 
     Commits after each successful chunk.
+
+    ``chunk_progress``: optional callback invoked after each committed chunk with that batch
+    (e.g. ``tqdm.update(len(batch))``).
     """
     end_ms = now_ms if now_ms is not None else utc_now_ms()
     start_ms = resolve_ingest_start_ms(
@@ -106,6 +112,8 @@ def ingest_ohlcv_series(
         upsert_ingestion_cursor(conn, symbol, interval, max_ot)
         conn.commit()
         total += len(batch)
+        if chunk_progress is not None:
+            chunk_progress(batch)
 
     return IngestSeriesResult(symbol, interval, total, chunks)
 

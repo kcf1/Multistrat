@@ -15,7 +15,7 @@ from market_data.universe import DATA_COLLECTION_SYMBOLS
 
 # --- Micro (code constants; not .env) ---
 
-OHLCV_INTERVALS: tuple[str, ...] = ("1m",)
+OHLCV_INTERVALS: tuple[str, ...] = ("1h",)
 OHLCV_SYMBOLS: tuple[str, ...] = DATA_COLLECTION_SYMBOLS
 
 # Used only when ``MARKET_DATA_BINANCE_BASE_URL`` is unset.
