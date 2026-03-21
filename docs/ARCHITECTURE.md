@@ -141,7 +141,7 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 ### 5.4 Market data (Phase 4, `market_data/`)
 
 - **Inputs:** Binance (or other) **public** REST + WebSocket; config symbols/intervals.
-- **Outputs:** Postgres **`ohlcv`**; Redis keys under `market:{symbol}:…` (§4.3, **deferred** until PHASE4 §9.3–9.4).
+- **Outputs:** Postgres **`ohlcv`**; Redis keys under `market:{symbol}:…` (§4.3, **deferred** until PHASE4 §9.7–9.8).
 - **Details:** [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md).
 
 ### 5.5 Admin (Phase 3, `admin/`)

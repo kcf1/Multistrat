@@ -2,6 +2,10 @@
 
 Reusable checklist when extending **market data** or any **ingest → Postgres** (and optionally Redis) pipeline. Aligns with [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) for OHLCV; the same pattern applies to other tables (e.g. trades, funding).
 
+### How this fits the `market_data` process
+
+Implement a **supervisor / scheduler** that runs **job types** (ingest, correction, repair, QC). Each job calls **shared** storage (upsert, cursors); **venue-specific** code lives behind a **provider interface** (OMS-style broker adapters, but read-only). **Rate limits** apply **per API identity** (base URL + key): use **one limiter or queue per provider** so all datasets/jobs for that provider **share** the budget—**sequential** or **very low concurrency** by default; **different providers** may run in parallel. See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) **§6.0**.
+
 ---
 
 ## 1. Define the grain and identity
@@ -87,7 +91,7 @@ Reusable checklist when extending **market data** or any **ingest → Postgres**
 
 ## 12. Service runner + deploy
 
-- Register the new **job** in the process `main` loop (schedules + optional WS task).
+- Register the new **job** in the process `main` / scheduler (same pattern as other jobs for that provider; see PHASE4 §6.0).
 - **Docker / Compose** — env vars, `depends_on` for Postgres/Redis as needed.
 
 ---
@@ -100,14 +104,19 @@ Reusable checklist when extending **market data** or any **ingest → Postgres**
 
 ## Suggested build order
 
-1. **2 → 3 → 4 → 5 → 6 → 7 → 8** (durable pipeline and resume)
-2. **9** if live data is required
-3. **10 → 11** (production hygiene)
-4. **12 → 13** (integration and CI)
+Maps to [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) **§9** REST tranche (**§9.1–9.6**). Below, **§N** means **section N of this file** (the numbered headings).
+
+1. **§§2–3** — schema, config → PHASE4 **§9.1**
+2. **§§4–5** — internal model + API client → PHASE4 **§9.2** (parse) and **§9.3** (provider + rate limit)
+3. **§§6–7** — upsert + cursor → PHASE4 **§9.4**
+4. **§8** — backfill implemented as **`ingest_ohlcv`** (and friends) → PHASE4 **§9.5**
+5. **§§10–11** — correction, repair, observability → PHASE4 **§9.5–9.6** (scheduled jobs + logging/alerts)
+6. **§§12–13** — register jobs in `main`, Docker, tests → PHASE4 **§9.6**
+7. **§9** (real-time) — after deferral: PHASE4 **§9.7** (Redis) then **§9.8** (WebSocket), if needed
 
 ---
 
 ## See also
 
-- [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) — `ohlcv`, Binance REST, deferred Redis/WebSocket
+- [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) — §6.0 runner (providers + jobs + rate limits), `ohlcv`, REST, deferred Redis/WebSocket
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Postgres tables and Redis namespaces

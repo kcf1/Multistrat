@@ -180,7 +180,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 ### Dependencies
 
-- Phase 1, 2, 4 (Redis streams; OMS/Booking/Position; Market Data in Postgres—**Redis market keys optional** until PHASE4 §9.3–9.4)
+- Phase 1, 2, 4 (Redis streams; OMS/Booking/Position; Market Data in Postgres—**Redis market keys optional** until PHASE4 §9.7–9.8)
 - Phase 3 optional but recommended (Admin to start/stop strategies)
 
 ### Deliverables
