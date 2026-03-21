@@ -26,8 +26,8 @@ Implement a **supervisor / scheduler** that runs **job types** (ingest, correcti
 
 ## 3. Config
 
-- Settings / env: **API base URL**, **universe** (symbols, intervals), **rate-limit budget**, optional feature flags.
-- **Secrets** — API keys only via env or a secret store; never committed.
+- **Macro** (`.env`): DB/Redis URLs, API keys, **per-service** venue URLs (e.g. `MARKET_DATA_BINANCE_BASE_URL`) so each service stays isolated and configurable. See `.cursor/rules/env-and-config.mdc`.
+- **Micro** (Python constants in `config.py`): symbol lists, intervals, rate-limit *defaults*, feature flags—not a new `.env` line per tunable.
 
 ---
 

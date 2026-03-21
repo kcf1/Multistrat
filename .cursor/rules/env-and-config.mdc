@@ -1,0 +1,14 @@
+---
+description: Use .env for macro infrastructure and secrets; keep micro/tuning in Python constants
+alwaysApply: true
+---
+
+# Environment vs in-code config
+
+- **`.env` (macro):** Use for **infrastructure and secrets** that vary by deployment or must not be committed—e.g. database URLs, Redis URLs, API keys, **per-service venue URLs** (see below).
+
+- **Python modules (micro):** Put **dataset tuning, symbol lists, intervals, feature flags, in-code default endpoints** in **constants** or small config modules (e.g. `market_data/config.py`). Do **not** add `.env` entries for every symbol list, kline interval, or similar—edit the module instead.
+
+- **Adding new services — use separate macro variables:** Give each service its own **prefixed** env names (e.g. `MARKET_DATA_BINANCE_BASE_URL`, `MARKET_DATA_DATABASE_URL`) even if they often match OMS values in dev. That keeps **isolation** (different containers, test doubles, staging URLs) and makes each service **independently configurable**. Prefer explicit `AliasChoices` / dedicated fields in that service’s settings class rather than importing another module’s env contract.
+
+- **`.env.example`:** Document **macro** variables only (global + per-service as needed); avoid tunables that belong in code constants.

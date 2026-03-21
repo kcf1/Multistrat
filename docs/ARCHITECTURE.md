@@ -88,7 +88,7 @@ All tables are managed via **Alembic** under `alembic/versions/`. OMS writes ord
 
 | Table | Purpose | Key columns / grain |
 |-------|---------|---------------------|
-| **ohlcv** | Historical OHLCV bars per symbol and interval | Unique `(symbol, interval, open_time)`; see [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §4. |
+| **ohlcv** | Historical OHLCV bars per symbol and interval | PK `(symbol, interval, open_time)`; columns `open`–`close`, `volume`, optional `quote_volume`, `trades`, `close_time`, `ingested_at`. See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §4. |
 
 ---
 

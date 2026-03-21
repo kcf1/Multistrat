@@ -159,15 +159,21 @@ Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoi
 - **Reconnect** with exponential backoff; **resync** last closed bars from REST after long gaps.
 - Update **Redis** on each message; update **Postgres** `ohlcv` for **closed** bars (or buffer and flush every N seconds).
 
-### 6.4 Config (env)
+### 6.4 Config — `.env` (macro) vs `market_data/config.py` (micro)
+
+**Environment (macro):** Use **service-prefixed** names for isolation (see `.cursor/rules/env-and-config.mdc`). Global `DATABASE_URL` is still accepted as a fallback.
 
 | Variable | Purpose |
 |----------|---------|
-| `DATABASE_URL` | Postgres |
-| `REDIS_URL` | Redis |
-| `MARKET_DATA_SYMBOLS` | Comma-separated list; **default** when unset: all **USDT** pairs in [`market_data/universe.py`](../market_data/universe.py) (`DATA_COLLECTION_SYMBOLS`, 30 bases → `BTCUSDT`, …) |
-| `MARKET_DATA_INTERVALS` | Comma-separated, e.g. `1m,5m,1h` |
-| `BINANCE_REST_URL` / `BINANCE_WS_URL` | Align with spot vs futures testnet/mainnet |
+| `MARKET_DATA_DATABASE_URL` | Optional Postgres URL for this service; **overrides** `DATABASE_URL` when both are set. |
+| `DATABASE_URL` | Fallback Postgres URL if `MARKET_DATA_DATABASE_URL` is unset. |
+| `MARKET_DATA_BINANCE_BASE_URL` | Optional REST base for Binance **public** endpoints (e.g. testnet vs mainnet); independent of OMS `BINANCE_BASE_URL`. |
+| `REDIS_URL` | Redis (when §9.7+ use Redis). |
+| API keys / secrets | Only where an endpoint requires signing (not needed for public klines). |
+
+**Code constants in [`market_data/config.py`](../market_data/config.py) (micro):** `OHLCV_SYMBOLS`, `OHLCV_INTERVALS`, `DEFAULT_BINANCE_REST_URL`. Tune datasets in code—not `.env`.
+
+**Later (deferred WS):** e.g. `MARKET_DATA_BINANCE_WS_URL` (macro, service-specific), not shared with OMS unless you choose to duplicate values manually in `.env`.
 
 ---
 
@@ -194,12 +200,12 @@ Order matches **§6.0**: **contract/schema → parse → provider (fetch + rate 
 
 ### 9.1 Schema and config
 
-- [ ] **4.1.1** Alembic migration: **`ohlcv`** table + indexes + unique constraint.
-- [ ] **4.1.2** `market_data/config.py`: load symbols, intervals, provider base URLs from env; validate at startup.
+- [x] **4.1.1** Alembic migration: **`ohlcv`** table + indexes + unique constraint.
+- [x] **4.1.2** `market_data/config.py`: macro from env (`MARKET_DATA_DATABASE_URL` / `DATABASE_URL`, optional `MARKET_DATA_BINANCE_BASE_URL`); symbols/intervals as **module constants** (see `.cursor/rules/env-and-config.mdc`).
 
 ### 9.2 Internal models and parsing
 
-- [ ] **4.2.1** Internal OHLCV row model (e.g. Pydantic) + **Binance kline array → row** parser; **unit tests** on fixture payloads.
+- [x] **4.2.1** Internal OHLCV row model (e.g. Pydantic) + **Binance kline array → row** parser; **unit tests** on fixture payloads.
 
 ### 9.3 Provider adapter and rate limiting (**§6.0**)
 
