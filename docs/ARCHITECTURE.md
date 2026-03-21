@@ -113,7 +113,7 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 
 ### 4.3 Key patterns (Market Data, Phase 4)
 
-- **Namespace:** `market:{symbol}:…` (ticker, `ohlcv_bar`, `ohlcv_recent`, optional mark)—written by **`market_data`**; documented in [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §5. OMS must not reuse this prefix.
+- **Namespace:** `market:{symbol}:…` (ticker, `ohlcv_bar`, `ohlcv_recent`, optional mark)—**planned** when **`market_data`** implements Redis (currently **deferred**; see [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §0). OMS must not reuse this prefix.
 
 ---
 
@@ -141,7 +141,7 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 ### 5.4 Market data (Phase 4, `market_data/`)
 
 - **Inputs:** Binance (or other) **public** REST + WebSocket; config symbols/intervals.
-- **Outputs:** Postgres **`ohlcv`**; Redis keys under `market:{symbol}:…` (see §4.3).
+- **Outputs:** Postgres **`ohlcv`**; Redis keys under `market:{symbol}:…` (§4.3, **deferred** until PHASE4 §9.3–9.4).
 - **Details:** [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md).
 
 ### 5.5 Admin (Phase 3, `admin/`)

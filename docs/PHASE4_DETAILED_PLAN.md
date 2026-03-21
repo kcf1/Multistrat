@@ -1,8 +1,21 @@
 # Phase 4: Detailed Plan — Market Data
 
-**Goal:** Run a dedicated **market data** process that ingests **public** market feeds from a primary venue (**Binance first**, consistent with Phase 2 OMS), writes **historical** series to **Postgres** and **live / hot** snapshots to **Redis**, so **Phase 5 strategies** (and optional **PMS** mark-price reads) can consume a single, documented contract. No order placement, no account streams—**read-only market APIs only**.
+**Goal:** Run a dedicated **market data** process that ingests **public** market feeds from a primary venue (**Binance first**, consistent with Phase 2 OMS), writes **historical** series to **Postgres** and (when §9.3–9.4 are done) **live / hot** snapshots to **Redis**, so **Phase 5 strategies** (and optional **PMS** mark-price reads) can consume a single, documented contract. **Current tranche:** Postgres + REST only (**§0**). No order placement, no account streams—**read-only market APIs only**.
 
 **Current architecture:** [docs/ARCHITECTURE.md](ARCHITECTURE.md). Phase 2 PMS today uses **`PMS_MARK_PRICE_SOURCE=binance`** for mark prices; Phase 4 adds a path where PMS (or strategies) reads **Redis/Postgres** fed by this service—see [docs/pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md) §11 and `PMS_MARK_PRICE_SOURCE`.
+
+## 0. Implementation priority (defer 9.3–9.4)
+
+**Current stance — Redis hot path + WebSocket deferred:** Ship **Postgres `ohlcv` via REST only** first (checklist **§9.1**, **§9.2**, and a **REST-only** **§9.5** runner/deploy). **Do not require** market-data **Redis** keys (§5) or **WebSocket** live ingestion until this deferral is lifted.
+
+### Reasons for deferral
+
+- **Sufficient for batch / hourly workflows:** Historical bars in Postgres support backtests, factor work, and scheduled rebalance without sub-second Redis or push streams.
+- **Lower operational surface:** No WS reconnect logic, combined-stream limits, or TTL/staleness contract to maintain on Redis for market keys yet.
+- **Phase 5 can start on SQL:** Strategies may read **`ohlcv`** from Postgres (poll or scheduled) until **§9.3–9.4** deliver the low-latency Redis contract and real-time updates.
+- **PMS unchanged:** Keep **`PMS_MARK_PRICE_SOURCE=binance`** (or Postgres-derived marks later); **§4.6.1** (Redis-fed mark) stays optional and blocked on **§9.3** anyway.
+
+**When picked up:** Implement **§9.3** (Redis publisher + tests), then **§9.4** (WS + wire to Redis + closed-bar Postgres), then extend **§9.5** to orchestrate WS alongside REST.
 
 ---
 
@@ -12,9 +25,9 @@
 |------|--------|
 | **Venue (v1)** | **Binance** public REST + WebSocket (spot and/or USDT-M futures—pick one product line per deployment; document which). Testnet vs mainnet via existing URL/env patterns; see [docs/BINANCE_API_RULES.md](BINANCE_API_RULES.md) for limits and connection behavior. |
 | **Postgres role** | **Durable history:** **`ohlcv`** table (required for Phase 4 acceptance); optional **trades** or **agg_trades** table if strategies need tick granularity later. |
-| **Redis role** | **Low-latency hot state:** latest ticker fields, optional rolling “last N” **OHLCV** bars per symbol/interval, optional **mark/index** keys if futures—**TTL** on ephemeral keys to bound memory. |
-| **Process model** | **Single service**, one main loop or asyncio: (1) **scheduled REST** backfill / gap repair for **OHLCV** history; (2) **WebSocket** multiplexed subscriptions for live updates; (3) periodic **flush** from in-memory buffers to Postgres where batching helps. |
-| **Consumers** | **Phase 5:** strategies read Redis and/or Postgres. **Optional same phase:** PMS `redis` / `market_data` mark provider reading keys documented below. |
+| **Redis role** | **(Deferred — §0.)** Planned: low-latency hot state per §5. **Until then:** no required `market:*` keys from `market_data`; optional use of Redis only if you add an unrelated cache. |
+| **Process model** | **Now:** **scheduled REST** backfill / gap repair → Postgres `ohlcv`. **Deferred:** WebSocket live path + Redis updates (§9.4 / §9.3). |
+| **Consumers** | **Now:** strategies (or jobs) read **Postgres `ohlcv`**. **After deferral lift:** Redis per §5; PMS Redis mark (**§4.6.1**). |
 
 ---
 
@@ -167,19 +180,19 @@ Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoi
 - [ ] **4.2.2** REST backfill job: from empty DB and from “last open_time” checkpoint.
 - [ ] **4.2.3** **Unit test:** mock DB or use test container; verify upsert semantics.
 
-### 9.3 Redis writes
+### 9.3 Redis writes **(deferred — §0)**
 
 - [ ] **4.3.1** Publish ticker (and optional kline) to keys in §5; set **TTL** on update.
 - [ ] **4.3.2** **Unit test:** fakeredis; verify key names, TTL, JSON shape.
 
-### 9.4 WebSocket
+### 9.4 WebSocket **(deferred — §0)**
 
 - [ ] **4.4.1** Connect combined streams; parse ticker/kline; reconnect loop.
 - [ ] **4.4.2** Wire closed kline → Postgres `ohlcv` upsert + Redis `ohlcv_recent` update.
 
 ### 9.5 Runner and deploy
 
-- [ ] **4.5.1** `python -m market_data.main` orchestrates REST + WS; graceful shutdown.
+- [ ] **4.5.1** `python -m market_data.main` orchestrates **REST-only** until §9.3–9.4 are implemented; then add WS + graceful shutdown.
 - [ ] **4.5.2** `docker-compose.yml` service **`market_data`**; document in README or `market_data/README.md`.
 
 ### 9.6 Optional
@@ -192,9 +205,9 @@ Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoi
 
 ## 10. Testing
 
-- **Unit:** Redis publisher (fakeredis), Postgres writer (mock or transactional rollback), WS message parsing (fixture JSON).
-- **Integration:** Service runs against real Redis + Postgres (Compose); after **N** minutes, `SELECT COUNT(*) FROM ohlcv WHERE symbol = …` increases; Redis `GET`/`HGETALL` shows fresh `ts`.
-- **Smoke:** Document one command: `docker compose up -d postgres redis market_data`, wait, verify DB + Redis.
+- **Unit (current tranche):** Postgres writer (mock or transactional rollback). **Deferred with §9.3–9.4:** Redis publisher (fakeredis), WS message parsing (fixture JSON).
+- **Integration (current tranche):** Service + Postgres; after **N** minutes, `SELECT COUNT(*) FROM ohlcv WHERE symbol = …` increases. **Deferred:** Redis `GET`/`HGETALL` fresh `ts`.
+- **Smoke:** `docker compose up -d postgres market_data` (Redis optional until §9.3); verify `ohlcv` rows.
 
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) testing table for Phase 4.
 
@@ -202,16 +215,16 @@ See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) testing table for Phase 4.
 
 ## 11. Acceptance
 
-- [ ] For configured symbols and at least one interval: **Postgres** `ohlcv` contains **recent historical** bars (backfill + ongoing closed bars).
-- [ ] **Redis** holds **up-to-date** ticker (and/or `ohlcv_bar` / `ohlcv_recent`) keys per §5 with **documented TTL** behavior.
-- [ ] Service runs in **Docker** on the multistrat network without manual steps beyond env and `docker compose up`.
-- [ ] **(Optional)** PMS can use Redis-fed mark prices when configured.
+- [ ] For configured symbols and at least one interval: **Postgres** `ohlcv` contains **recent historical** bars (REST backfill + scheduled refresh of closed bars).
+- [ ] **(Deferred — §9.3–9.4)** **Redis** holds **up-to-date** ticker (and/or `ohlcv_bar` / `ohlcv_recent`) keys per §5 with **documented TTL** behavior.
+- [ ] **market_data** service runs in **Docker** on the multistrat network (**REST-only** OK under §0).
+- [ ] **(Deferred / optional)** PMS Redis-fed mark prices (**§4.6.1**); until then PMS keeps direct Binance (or other) mark source.
 
 ---
 
 ## 12. Handoff to Phase 5
 
-- Strategies should depend only on **documented** Redis keys and/or **SQL** queries against `ohlcv` (and optional `trades`).
+- **Until §9.3–9.4:** strategies should use **SQL** against `ohlcv` (and optional `trades`) as the supported contract. **After deferral lift:** add dependence on **documented** Redis keys (§5) for low-latency reads.
 - Risk / OMS unchanged; no new streams required for market data (unless you later add a **cache invalidation** stream—**not** in Phase 4 minimum).
 
 ---

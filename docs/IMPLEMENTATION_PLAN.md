@@ -142,6 +142,8 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 **Goal:** Ingest market data into Postgres and Redis so strategies can query it.
 
+**Implementation priority:** **REST → Postgres `ohlcv` first**; **Redis hot keys + WebSocket** deferred — see [docs/PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §0.
+
 **Detailed plan:** [docs/PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) — schema, Redis contract, Binance REST/WS, `market_data/` layout, tasks, acceptance, PMS hook.
 
 ### Dependencies
@@ -151,14 +153,14 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 ### Deliverables
 
 - [ ] **Market data service**
-  - Single process, loop: connect to Binance (or chosen venue) market data (REST + WebSocket)
+  - Single process, loop: connect to Binance (or chosen venue) market data (**REST required first**; **WebSocket deferred** per PHASE4 §0)
   - **REST:** Historical OHLCV bars (and/or trades) on a schedule; write to Postgres (e.g. `ohlcv`, `trades` tables)
-  - **WebSocket:** Live ticker / kline updates / trades; write to Redis (e.g. `market:{symbol}:ticker`, `market:{symbol}:ohlcv_bar:1m`) and optionally latest bar per symbol to Postgres
+  - **WebSocket (deferred):** Live ticker / kline updates / trades; write to Redis (e.g. `market:{symbol}:ticker`, `market:{symbol}:ohlcv_bar:1m`) and optionally latest bar per symbol to Postgres
 - [ ] **Schema (Postgres)**
   - Tables: e.g. `ohlcv` (symbol, interval, open_time, o/h/l/c/v), `trades` if needed
   - Indexes for strategy queries (symbol, time range)
-- [ ] **Redis key layout**
-  - Document keys and TTLs; keep hot path minimal (e.g. `ohlcv_recent`, current ticker)
+- [ ] **Redis key layout (deferred until WS + Redis publisher)**
+  - Document keys and TTLs in PHASE4 §5; keep hot path minimal (e.g. `ohlcv_recent`, current ticker)
 - [ ] **Config**
   - Symbols to subscribe; intervals; Binance (or other) endpoints
 - [ ] **Deploy**
@@ -166,7 +168,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 ### Acceptance
 
-- [ ] After running Market Data service: Postgres `ohlcv` has historical bars for selected symbols; Redis has up-to-date ticker and OHLCV hot keys; no dependency on strategies yet.
+- [ ] After running Market Data service: Postgres `ohlcv` has historical bars for selected symbols (**minimum acceptance**). **(Deferred)** Redis hot keys for ticker/OHLCV per PHASE4 §5.
 
 ---
 
@@ -176,14 +178,14 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 ### Dependencies
 
-- Phase 1, 2, 4 (Redis streams; OMS/Booking/Position; Market Data in Postgres/Redis)
+- Phase 1, 2, 4 (Redis streams; OMS/Booking/Position; Market Data in Postgres—**Redis market keys optional** until PHASE4 §9.3–9.4)
 - Phase 3 optional but recommended (Admin to start/stop strategies)
 
 ### Deliverables
 
 - [ ] **Strategy runner / harness**
   - Single process per strategy (or one process that runs multiple strategies in threads/async): loop over each strategy’s interval
-  - For each strategy: read from Postgres/Redis (`ohlcv`, ticker, positions from Redis cache); compute signals; produce order intents (symbol, side, qty, type, etc.) to `strategy_orders`
+  - For each strategy: read from Postgres (`ohlcv`) and/or Redis (ticker when available); positions from Redis/Postgres as today; compute signals; produce order intents (symbol, side, qty, type, etc.) to `strategy_orders`
   - Config: which strategies enabled; params per strategy
 - [ ] **Risk service (full)**
   - Same interface as Phase 2 (no-rule first); **add rules on demand**: position limits, max order size, margin/balance checks using Redis/Postgres from OMS/PMS
@@ -209,7 +211,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 | 1     | Docker, Postgres, Redis       | —          | Infra up; `.env`; `docker-compose up`            |
 | 2     | OMS, Booking, Position (Binance) | 1       | E2E order → fill → positions/balances/margin    |
 | 3     | Admin                         | 1, 2       | Commands via streams; view positions/fills      |
-| 4     | Market data                   | 1          | Postgres + Redis populated with market data     |
+| 4     | Market data                   | 1          | Postgres `ohlcv` (Redis hot path deferred)      |
 | 5     | Strategy modules              | 1, 2, 4    | Strategies → Risk → OMS → Booking automated     |
 
 ---
@@ -223,7 +225,7 @@ The plans do not yet define automated tests for every deliverable. Below is a su
 | **1** | **Smoke / verification:** Compose up succeeds; Postgres accepts connections; Redis `PING`; `alembic upgrade head` idempotent. | Can be a small script or CI step (e.g. `docker-compose up -d && psql $DATABASE_URL -c 'SELECT 1' && redis-cli -u $REDIS_URL ping && alembic current`). |
 | **2** | **Unit:** Component tests with mocked dependencies (API client, Redis store, consumer/producer). **Integration:** OMS flow with fakeredis and mock adapters (`test_oms_integration.py`). **E2E (code-level):** Real Redis + Binance testnet (`test_oms_redis_testnet.py`). **E2E (service-level):** Black-box script (`scripts/full_pipeline_test.py`) assumes running services. See [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md#165-test-classification-and-file-mapping) for test classification. | Mock or testnet only; avoid real money. |
 | **3** | **Integration:** Admin publishes command to stream; target service consumes and reacts. **Smoke:** Manual order and cancel from CLI or GUI. | |
-| **4** | **Integration:** Market data service writes `ohlcv` to Postgres and hot keys to Redis; query by symbol/interval. **Smoke:** After run, `ohlcv` rows exist for configured symbols. | |
+| **4** | **Integration:** Market data service writes `ohlcv` to Postgres; query by symbol/interval. **(Deferred)** Hot keys to Redis. **Smoke:** `ohlcv` rows for configured symbols. | See PHASE4 §0. |
 | **5** | **Unit:** Strategy `next_signal()` given mock state; Risk checks (limits, margin). **Integration:** Strategy → Risk → `risk_approved`; full E2E with testnet. | |
 
 - **Where to put tests:** Per-service (e.g. `oms/tests/`, `booking/tests/`) or a top-level `tests/` with subdirs per phase/service. Use one runner (e.g. pytest) and `requirements-dev.txt` if needed.
