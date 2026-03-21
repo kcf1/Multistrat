@@ -22,6 +22,7 @@ _KLINE_ROW = [
 
 def _mock_response(payload: list) -> MagicMock:
     r = MagicMock()
+    r.status_code = 200
     r.json.return_value = payload
     r.raise_for_status = MagicMock()
     return r
@@ -110,9 +111,31 @@ def test_limit_out_of_range() -> None:
         prov.fetch_klines("BTCUSDT", "1m", start_time_ms=1, limit=0)
 
 
+def test_http_400_no_retry_returns_empty() -> None:
+    session = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.text = '{"code":-1121,"msg":"Invalid symbol."}'
+    session.get.return_value = resp
+    prov = BinanceSpotKlinesProvider(
+        "https://api.binance.com",
+        session=session,
+        fetch_max_attempts=5,
+        fetch_retry_base_sleep_sec=0.0,
+    )
+    with patch("market_data.providers.binance_spot.time.sleep") as sl:
+        bars = prov.fetch_klines("BADUSDT", "1m", start_time_ms=1)
+    sl.assert_not_called()
+    session.get.assert_called_once()
+    assert bars == []
+    assert len(prov.fetch_give_ups) == 1
+    assert "400" in prov.fetch_give_ups[0]
+
+
 def test_http_error_returns_empty_and_records_give_up() -> None:
     session = MagicMock()
     resp = MagicMock()
+    resp.status_code = 500
     resp.raise_for_status.side_effect = RuntimeError("429")
     session.get.return_value = resp
     prov = BinanceSpotKlinesProvider(

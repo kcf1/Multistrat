@@ -4,9 +4,9 @@ Binance **spot** public klines (GET /api/v3/klines) — no API key.
 Uses shared ``ProviderRateLimiter`` per provider instance (§6.0).
 
 Fetches **retry** on HTTP errors or invalid / incomplete payloads (row parse failures,
-OHLC invariants, non-monotonic ``open_time``) with exponential backoff. After the last
-retry, logs an error, appends to ``fetch_give_ups``, and returns an **empty** list so
-callers can continue pagination / other symbols.
+OHLC invariants, non-monotonic ``open_time``) with exponential backoff. **HTTP 400** is not
+retried (client error / invalid symbol, etc.): one ``loguru.warning``, append ``fetch_give_ups``,
+return **[]**. After the last retry on other failures, logs an error and returns **[]**.
 """
 
 from __future__ import annotations
@@ -90,6 +90,18 @@ class BinanceSpotKlinesProvider:
             try:
                 self._limiter.acquire()
                 resp = self._session.get(url, timeout=self._timeout)
+                if resp.status_code == 400:
+                    body = (resp.text or "").strip()
+                    snippet = body[:400] + ("…" if len(body) > 400 else "")
+                    detail = f"{sym} {iv}: HTTP 400 {snippet or '(no body)'}"
+                    self.fetch_give_ups.append(detail)
+                    logger.warning(
+                        "Binance klines {} {} HTTP 400 — not retrying; {}",
+                        sym,
+                        iv,
+                        snippet or "(no body)",
+                    )
+                    return []
                 resp.raise_for_status()
                 raw: List[Any] = resp.json()
                 return process_binance_klines_payload(
