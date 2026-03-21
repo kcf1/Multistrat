@@ -146,6 +146,8 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 **Detailed plan:** [docs/PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) — schema, Redis contract, Binance REST/WS, `market_data/` layout, tasks, acceptance, PMS hook.
 
+**Implementation order:** [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) **§9** — **§9.1–9.6** REST tranche (schema → parser → provider + rate limit → storage → jobs → runner/Docker); **§9.7–9.8** Redis + WebSocket deferred (**§0**).
+
 **Ingest checklist (any new dataset):** [docs/DATASET_INGESTION_STEPS.md](DATASET_INGESTION_STEPS.md).
 
 ### Dependencies
