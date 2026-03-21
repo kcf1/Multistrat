@@ -25,6 +25,15 @@ DEFAULT_BINANCE_REST_URL: str = "https://api.binance.com"
 # ``None`` = **unlimited** (default) until venue weight/QPS is documented.
 MARKET_DATA_MIN_REQUEST_INTERVAL_SEC: float | None = None
 
+# First-time series with no rows / cursor: fetch history back this many days from "now".
+OHLCV_INITIAL_BACKFILL_DAYS: int = 30
+
+# Max klines per HTTP request (Binance cap).
+OHLCV_KLINES_CHUNK_LIMIT: int = 1000
+
+# ``correct_window`` re-fetches this many recent bars per series for vendor drift checks.
+OHLCV_CORRECT_WINDOW_BARS: int = 48
+
 
 class MarketDataSettings(BaseSettings):
     """

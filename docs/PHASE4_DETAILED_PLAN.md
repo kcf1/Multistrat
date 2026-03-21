@@ -221,9 +221,9 @@ Order matches **§6.0**: **contract/schema → parse → provider (fetch + rate 
 
 ### 9.5 Jobs (scheduled work units)
 
-- [ ] **4.5.1** **`ingest_ohlcv` job:** backfill from empty DB + incremental “catch up” using provider + storage + cursor (throttled chunks).
-- [ ] **4.5.2** **`correct_window` job (optional but recommended):** rolling re-fetch of last *N* bars / *H* hours → upsert; log or alert on row changes (vendor drift).
-- [ ] **4.5.3** **`repair_gap` job (optional):** detect or target time range → fetch range only → upsert → advance cursor.
+- [x] **4.5.1** **`ingest_ohlcv` job:** backfill from empty DB + incremental “catch up” using provider + storage + cursor (throttled chunks).
+- [x] **4.5.2** **`correct_window` job (optional but recommended):** rolling re-fetch of last *N* bars / *H* hours → upsert; log or alert on row changes (vendor drift).
+- [x] **4.5.3** **`repair_gap` job (optional):** detect or target time range → fetch range only → upsert → advance cursor.
 
 ### 9.6 Runner and deploy
 

@@ -13,7 +13,8 @@ Callers own transactions: these functions **do not** ``commit``.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from decimal import Decimal
+from typing import Any, Mapping, Sequence
 
 from psycopg2.extensions import connection as PsycopgConnection
 from psycopg2.extras import execute_values
@@ -72,6 +73,35 @@ def upsert_ohlcv_bars(conn: PsycopgConnection, bars: Sequence[OhlcvBar]) -> int:
             page_size=min(500, len(rows)),
         )
     return len(rows)
+
+
+def fetch_ohlc_by_open_times(
+    conn: PsycopgConnection,
+    symbol: str,
+    interval: str,
+    open_times: Sequence[datetime],
+) -> Mapping[datetime, tuple[Decimal, Decimal, Decimal, Decimal]]:
+    """
+    Return ``open_time -> (open, high, low, close)`` for rows that exist.
+    Missing keys are omitted.
+    """
+    if not open_times:
+        return {}
+    sym = symbol.strip().upper()
+    iv = interval.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT open_time, open, high, low, close FROM ohlcv
+            WHERE symbol = %s AND interval = %s AND open_time = ANY(%s)
+            """,
+            (sym, iv, list(open_times)),
+        )
+        rows = cur.fetchall()
+    out: dict[datetime, tuple[Decimal, Decimal, Decimal, Decimal]] = {}
+    for open_time, o, h, l, c in rows:
+        out[open_time] = (o, h, l, c)
+    return out
 
 
 def max_open_time_ohlcv(conn: PsycopgConnection, symbol: str, interval: str) -> datetime | None:

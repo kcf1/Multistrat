@@ -1,0 +1,178 @@
+"""
+Targeted range repair and simple gap detection (Phase 4 §9.5 / §4.5.3).
+
+``run_repair_gap`` refetches a closed ``[start_time_ms, end_time_ms]`` window in chunks,
+upserts after each chunk, and **does not** change ``ingestion_cursor`` (historical fill).
+
+``detect_ohlcv_time_gaps`` finds missing bar spans inside a wall-clock window from
+stored ``open_time`` sequences (coarse; assumes regular grid).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import psycopg2
+
+from market_data.config import OHLCV_KLINES_CHUNK_LIMIT, MarketDataSettings
+from market_data.intervals import interval_to_millis
+from market_data.jobs.common import iter_kline_batches_forward
+from market_data.providers.base import KlinesProvider
+from market_data.providers.binance_spot import build_binance_spot_provider
+from market_data.storage import upsert_ohlcv_bars
+
+
+def run_repair_gap(
+    conn,
+    provider: KlinesProvider,
+    symbol: str,
+    interval: str,
+    *,
+    start_time_ms: int,
+    end_time_ms: int,
+    chunk_limit: int = OHLCV_KLINES_CHUNK_LIMIT,
+) -> int:
+    """
+    Refetch and upsert klines in ``[start_time_ms, end_time_ms]`` (inclusive intent via API).
+
+    Commits once per chunk. Does **not** update ``ingestion_cursor``.
+    """
+    if start_time_ms >= end_time_ms:
+        return 0
+    total = 0
+    for batch in iter_kline_batches_forward(
+        provider,
+        symbol,
+        interval,
+        start_ms=start_time_ms,
+        end_ms=end_time_ms,
+        chunk_limit=chunk_limit,
+    ):
+        upsert_ohlcv_bars(conn, batch)
+        conn.commit()
+        total += len(batch)
+    return total
+
+
+def detect_ohlcv_time_gaps(
+    conn,
+    symbol: str,
+    interval: str,
+    range_start: datetime,
+    range_end: datetime,
+    *,
+    gap_multiple: float = 1.5,
+) -> list[tuple[datetime, datetime]]:
+    """
+    Return sub-ranges ``(gap_start, gap_end)`` (inclusive) where stored bars skip at least
+    ``gap_multiple`` bar lengths. If no rows exist in the window, returns the whole window.
+
+    ``range_*`` must be timezone-aware (UTC recommended).
+    """
+    if range_start.tzinfo is None or range_end.tzinfo is None:
+        raise ValueError("range_start and range_end must be timezone-aware")
+    if range_end < range_start:
+        return []
+
+    sym = symbol.strip().upper()
+    iv = interval.strip()
+    iv_ms = interval_to_millis(interval)
+    iv_td = timedelta(milliseconds=iv_ms)
+    threshold = iv_ms * gap_multiple
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT open_time FROM ohlcv
+            WHERE symbol = %s AND interval = %s
+              AND open_time >= %s AND open_time <= %s
+            ORDER BY open_time
+            """,
+            (sym, iv, range_start, range_end),
+        )
+        times = [r[0] for r in cur.fetchall()]
+
+    gaps: list[tuple[datetime, datetime]] = []
+    if not times:
+        return [(range_start, range_end)]
+
+    rs = range_start.astimezone(timezone.utc)
+    re_ = range_end.astimezone(timezone.utc)
+
+    first_ms = (times[0] - rs).total_seconds() * 1000.0
+    if first_ms > threshold:
+        gaps.append((rs, times[0] - iv_td))
+
+    for i in range(len(times) - 1):
+        delta_ms = (times[i + 1] - times[i]).total_seconds() * 1000.0
+        if delta_ms > threshold:
+            g0 = times[i] + iv_td
+            g1 = times[i + 1] - iv_td
+            if g0 <= g1:
+                gaps.append((g0, g1))
+
+    last_ms = (re_ - times[-1]).total_seconds() * 1000.0
+    if last_ms > threshold:
+        g0 = times[-1] + iv_td
+        if g0 <= re_:
+            gaps.append((g0, re_))
+
+    return gaps
+
+
+def run_repair_detected_gaps(
+    conn,
+    provider: KlinesProvider,
+    symbol: str,
+    interval: str,
+    gaps: list[tuple[datetime, datetime]],
+    *,
+    chunk_limit: int = OHLCV_KLINES_CHUNK_LIMIT,
+) -> int:
+    """Run :func:`run_repair_gap` for each gap window (ms bounds from datetimes)."""
+    total = 0
+    for g0, g1 in gaps:
+        start_ms = int(g0.timestamp() * 1000)
+        end_ms = int(g1.timestamp() * 1000)
+        total += run_repair_gap(
+            conn,
+            provider,
+            symbol,
+            interval,
+            start_time_ms=start_ms,
+            end_time_ms=end_ms,
+            chunk_limit=chunk_limit,
+        )
+    return total
+
+
+def run_repair_gaps_in_window(
+    settings: MarketDataSettings,
+    symbol: str,
+    interval: str,
+    range_start: datetime,
+    range_end: datetime,
+    *,
+    provider: KlinesProvider | None = None,
+    gap_multiple: float = 1.5,
+) -> tuple[list[tuple[datetime, datetime]], int]:
+    """
+    Detect gaps in ``[range_start, range_end]`` then repair them.
+
+    Returns ``(gaps, bars_upserted)``.
+    """
+    prov = provider if provider is not None else build_binance_spot_provider(settings)
+    conn = psycopg2.connect(settings.database_url)
+    try:
+        gaps = detect_ohlcv_time_gaps(
+            conn,
+            symbol,
+            interval,
+            range_start,
+            range_end,
+            gap_multiple=gap_multiple,
+        )
+        n = run_repair_detected_gaps(conn, prov, symbol, interval, gaps)
+        return gaps, n
+    finally:
+        conn.close()
