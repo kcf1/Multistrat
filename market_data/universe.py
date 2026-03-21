@@ -9,6 +9,10 @@ Extend by appending to ``DATA_COLLECTION_BASE_ASSETS``; symbols are always ``{BA
 Many appended names are **liquidity-screen probes**: Binance may not list every ``BASEUSDT``;
 ingest/backfill will show which pairs exist. Screen ticker **RENDER** is **RNDR** here (Binance
 spot). **M** (ambiguous) omitted.
+
+**Do not drop** bases whose spot history **ends early** (delist, migration, symbol change): keeping
+them in this tuple preserves a **fuller cross-section** and avoids **survivorship bias** in research
+and completeness reporting; only remove tickers that are **invalid** on the venue (e.g. wrong symbol).
 """
 
 from __future__ import annotations
