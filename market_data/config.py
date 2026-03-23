@@ -28,8 +28,14 @@ MARKET_DATA_MIN_REQUEST_INTERVAL_SEC: float | None = None
 # First-time series with no rows / cursor: fetch history back this many days from "now".
 OHLCV_INITIAL_BACKFILL_DAYS: int = 5 * 365  # ~5 calendar years (empty series / cold start)
 
-# Shared policy window for Binance futures datasets with provider-limited historical retention.
-BINANCE_FUTURES_30D_DATASET_BACKFILL_DAYS: int = 27
+# Shared cold-start / policy horizon for Binance futures datasets whose history is capped near
+# ~30 calendar days (basis, open interest, etc.). We intentionally use **27** days—not the full
+# advertised window—as a **buffer** so ``startTime`` stays safely inside the venue-valid range
+# (reduces invalid-parameter / retention-edge failures at the oldest boundary).
+BINANCE_FUTURES_LIMITED_RETENTION_BACKFILL_DAYS: int = 27
+
+# Backward-compatible alias (value is 27 with buffer semantics, not a literal 30-day request).
+BINANCE_FUTURES_30D_DATASET_BACKFILL_DAYS: int = BINANCE_FUTURES_LIMITED_RETENTION_BACKFILL_DAYS
 
 # Max klines per HTTP request (Binance cap).
 OHLCV_KLINES_CHUNK_LIMIT: int = 1000
@@ -70,7 +76,7 @@ OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS: int = 0
 BASIS_PAIRS: tuple[str, ...] = DATA_COLLECTION_SYMBOLS
 BASIS_CONTRACT_TYPES: tuple[str, ...] = ("PERPETUAL",)
 BASIS_PERIODS: tuple[str, ...] = ("1h",)
-BASIS_INITIAL_BACKFILL_DAYS: int = BINANCE_FUTURES_30D_DATASET_BACKFILL_DAYS
+BASIS_INITIAL_BACKFILL_DAYS: int = BINANCE_FUTURES_LIMITED_RETENTION_BACKFILL_DAYS
 BASIS_FETCH_CHUNK_LIMIT: int = 500
 BASIS_CORRECT_WINDOW_POINTS: int = 48
 BASIS_SCHEDULER_INGEST_INTERVAL_SECONDS: int = 300
@@ -83,7 +89,7 @@ BASIS_FETCH_RETRY_BASE_SLEEP_SEC: float = 0.75
 OPEN_INTEREST_SYMBOLS: tuple[str, ...] = DATA_COLLECTION_SYMBOLS
 OPEN_INTEREST_CONTRACT_TYPES: tuple[str, ...] = ("PERPETUAL",)
 OPEN_INTEREST_PERIODS: tuple[str, ...] = ("1h",)
-OPEN_INTEREST_INITIAL_BACKFILL_DAYS: int = BINANCE_FUTURES_30D_DATASET_BACKFILL_DAYS
+OPEN_INTEREST_INITIAL_BACKFILL_DAYS: int = BINANCE_FUTURES_LIMITED_RETENTION_BACKFILL_DAYS
 OPEN_INTEREST_FETCH_CHUNK_LIMIT: int = 500
 OPEN_INTEREST_CORRECT_WINDOW_POINTS: int = 48
 OPEN_INTEREST_SCHEDULER_INGEST_INTERVAL_SECONDS: int = 300

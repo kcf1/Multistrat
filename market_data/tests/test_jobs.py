@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from market_data.config import (
+    OPEN_INTEREST_CONTRACT_TYPES,
+    OPEN_INTEREST_PERIODS,
+    OPEN_INTEREST_SYMBOLS,
+)
 from market_data.jobs.common import (
     expected_ohlcv_slots,
     iter_kline_batches_forward,
@@ -19,11 +25,17 @@ from market_data.jobs.correct_window_basis_rate import (
     run_correct_window_basis_series,
 )
 from market_data.jobs.correct_window_open_interest import (
+    CorrectOpenInterestWindowResult,
     _log_open_interest_drifts,
+    run_correct_window_open_interest,
     run_correct_window_open_interest_series,
 )
 from market_data.jobs.ingest_basis_rate import ingest_basis_series
-from market_data.jobs.ingest_open_interest import ingest_open_interest_series
+from market_data.jobs.ingest_open_interest import (
+    IngestOpenInterestSeriesResult,
+    ingest_open_interest_series,
+    run_ingest_open_interest,
+)
 from market_data.jobs.ingest_ohlcv import ingest_ohlcv_series
 from market_data.jobs.repair_gap_open_interest import (
     detect_open_interest_time_gaps,
@@ -636,3 +648,45 @@ def test_run_correct_window_open_interest_series_upserts() -> None:
     assert r.drift_rows == 0
     up.assert_called_once_with(conn, rows)
     conn.commit.assert_called_once()
+
+
+def test_run_ingest_open_interest_calls_series_once_per_config_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_ingest(conn, prov, symbol, contract_type, period, **kwargs):
+        calls.append((symbol, contract_type, period))
+        return IngestOpenInterestSeriesResult(symbol, contract_type, period, 0, 0, ())
+
+    monkeypatch.setattr(
+        "market_data.jobs.ingest_open_interest.ingest_open_interest_series",
+        fake_ingest,
+    )
+    monkeypatch.setattr(
+        "market_data.jobs.ingest_open_interest.psycopg2.connect",
+        lambda _url: MagicMock(close=MagicMock()),
+    )
+    settings = SimpleNamespace(database_url="postgresql://test")
+    run_ingest_open_interest(settings, provider=MagicMock())
+    expected_n = len(OPEN_INTEREST_SYMBOLS) * len(OPEN_INTEREST_CONTRACT_TYPES) * len(OPEN_INTEREST_PERIODS)
+    assert len(calls) == expected_n
+
+
+def test_run_correct_window_open_interest_calls_series_once_per_config_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_series(conn, prov, symbol, contract_type, period, **kwargs):
+        calls.append((symbol, contract_type, period))
+        return CorrectOpenInterestWindowResult(symbol, contract_type, period, 0, 0)
+
+    monkeypatch.setattr(
+        "market_data.jobs.correct_window_open_interest.run_correct_window_open_interest_series",
+        fake_series,
+    )
+    monkeypatch.setattr(
+        "market_data.jobs.correct_window_open_interest.psycopg2.connect",
+        lambda _url: MagicMock(close=MagicMock()),
+    )
+    settings = SimpleNamespace(database_url="postgresql://test")
+    run_correct_window_open_interest(settings, provider=MagicMock())
+    expected_n = len(OPEN_INTEREST_SYMBOLS) * len(OPEN_INTEREST_CONTRACT_TYPES) * len(OPEN_INTEREST_PERIODS)
+    assert len(calls) == expected_n

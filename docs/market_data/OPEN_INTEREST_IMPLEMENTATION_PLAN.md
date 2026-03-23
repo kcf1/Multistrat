@@ -41,7 +41,7 @@ Expected response fields (dataset payload):
 
 Key constraints to encode in plan:
 
-- Source retention is limited (Binance docs indicate latest ~30 days).
+- Source retention is limited (Binance docs indicate latest ~30 days). In code we use **`BINANCE_FUTURES_LIMITED_RETENTION_BACKFILL_DAYS` (27)** as a buffer below that cap so `startTime` stays valid at the oldest edge.
 - Backfill horizon must be treated as request intent; actual returned history is provider-capped.
 
 ---
@@ -224,8 +224,8 @@ Key constraints to encode in plan:
 - [x] Implement `repair_gap_open_interest`.
 - [x] Wire open-interest jobs into `market_data/main.py`.
 - [x] Add one-shot/backfill CLI for open interest.
-- [ ] Update README and dataset docs.
-- [ ] Add unit/job/integration coverage.
+- [x] Update README and dataset docs.
+- [x] Add unit/job/integration coverage (automated unit + job + scheduler-step tests; live DB E2E is manual — §12).
 
 ---
 
@@ -263,6 +263,66 @@ Key constraints to encode in plan:
 16. Add job-level tests and scheduler smoke tests.
 17. Run local one-shot smoke and verify cursor progression.
 18. Finalize docs and operational runbook.
+
+**Phase E status:** done in-repo — parser/provider/storage/job tests under `market_data/tests/` (including `test_common.py` for `floor_align_ms_to_interval`, runner enumeration tests in `test_jobs.py`, scheduler step hooks in `test_main.py`). **§12** documents manual smoke and SQL checks. Full live-Postgres E2E remains an operator step.
+
+---
+
+## 12) Operational runbook (smoke & verification)
+
+### Preconditions
+
+- Postgres reachable; migrations applied (`alembic upgrade head`) including `open_interest` and open-interest cursor table.
+- Env: `MARKET_DATA_DATABASE_URL` or `DATABASE_URL`; optional `MARKET_DATA_BINANCE_PERPS_BASE_URL` for testnet/mainnet.
+
+### Automated tests
+
+```bash
+python -m pytest market_data/tests/ -q
+```
+
+### One-shot service run (no daemon)
+
+```bash
+python -m market_data.main --once
+```
+
+With a single policy-window gap repair pass for OHLCV, basis, and open interest:
+
+```bash
+python -m market_data.main --once --with-repair
+```
+
+### Large / policy backfill CLI
+
+```bash
+python scripts/backfill_open_interest.py
+python scripts/backfill_open_interest.py --no-watermark
+python scripts/backfill_open_interest.py --no-watermark --skip-existing
+```
+
+### Verify cursor / watermark (examples)
+
+```sql
+SELECT symbol, contract_type, period, last_sample_time
+  FROM open_interest_cursor
+ ORDER BY symbol, contract_type, period;
+
+SELECT symbol, contract_type, period, max(sample_time) AS newest
+  FROM open_interest
+ GROUP BY symbol, contract_type, period
+ ORDER BY symbol, contract_type, period;
+```
+
+After ingest, `open_interest_cursor.last_sample_time` and `max(sample_time)` should advance toward “now” (subject to Binance retention and per-symbol give-ups).
+
+### Long-running scheduler
+
+```bash
+python -m market_data.main
+```
+
+Tune cadence via `OPEN_INTEREST_SCHEDULER_*` in `market_data/config.py`. Set `OPEN_INTEREST_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS` to a positive value to enable scheduled gap repair (default `0` = off).
 
 ---
 

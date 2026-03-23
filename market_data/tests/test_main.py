@@ -196,3 +196,31 @@ def test_due_and_sleep_deadline() -> None:
     assert _due(100.0, 150.0) is False
     assert _sleep_deadline(None) == 0.0
     assert _sleep_deadline(500.0) == 500.0
+
+
+def test_open_interest_ingest_step_calls_run_ingest(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[object] = []
+    monkeypatch.setattr("market_data.main.load_settings", lambda: mock_settings)
+    monkeypatch.setattr(
+        "market_data.main.run_ingest_open_interest",
+        lambda s: called.append(s) or [],
+    )
+    from market_data.main import _run_open_interest_ingest_step
+
+    _run_open_interest_ingest_step()
+    assert len(called) == 1
+    assert called[0] is mock_settings
+
+
+def test_open_interest_repair_step_calls_policy_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[object] = []
+    monkeypatch.setattr("market_data.main.load_settings", lambda: mock_settings)
+    monkeypatch.setattr(
+        "market_data.main.run_repair_open_interest_gaps_policy_window_all_series",
+        lambda s: called.append(s) or [],
+    )
+    from market_data.main import _run_open_interest_repair_step
+
+    _run_open_interest_repair_step()
+    assert len(called) == 1
+    assert called[0] is mock_settings
