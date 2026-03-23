@@ -5,26 +5,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
-from market_data.intervals import interval_to_millis
+from market_data.intervals import floor_align_ms_to_interval, interval_to_millis
 from market_data.providers.base import BasisProvider, KlinesProvider, OpenInterestProvider
 from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint
 
 
 def utc_now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
-
-
-def floor_align_ms_to_interval(ms: int, interval: str) -> int:
-    """
-    Floor ``ms`` to a multiple of the bar length for a Binance-style ``interval`` string.
-
-    Some Binance futures history endpoints reject ``startTime`` values that are not on the
-    series grid (e.g. ``openInterestHist`` with ``period=1h``).
-    """
-    iv_ms = interval_to_millis(interval)
-    if iv_ms <= 0:
-        return ms
-    return (ms // iv_ms) * iv_ms
 
 
 def expected_ohlcv_slots(start_ms: int, end_ms: int, iv_ms: int) -> int:

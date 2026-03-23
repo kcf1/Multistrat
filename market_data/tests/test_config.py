@@ -11,6 +11,7 @@ from market_data.config import (
     BASIS_PERIODS,
     BINANCE_FUTURES_LIMITED_RETENTION_BACKFILL_DAYS,
     BINANCE_FUTURES_30D_DATASET_BACKFILL_DAYS,
+    DEFAULT_BINANCE_PERPS_REST_URL,
     DEFAULT_BINANCE_REST_URL,
     OPEN_INTEREST_CONTRACT_TYPES,
     OPEN_INTEREST_INITIAL_BACKFILL_DAYS,
@@ -94,7 +95,7 @@ def test_binance_perps_rest_url_default_when_unset(
         model_config = SettingsConfigDict(env_file=None, extra="ignore")
 
     s = NoDotEnv()
-    assert s.binance_perps_rest_url == DEFAULT_BINANCE_REST_URL
+    assert s.binance_perps_rest_url == DEFAULT_BINANCE_PERPS_REST_URL
 
 
 def test_binance_perps_rest_url_from_market_data_binance_perps_base_url(

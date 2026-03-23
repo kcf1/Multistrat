@@ -47,13 +47,16 @@ def test_fetch_basis_parses_and_calls_get() -> None:
         rate_limiter=ProviderRateLimiter(None),
         fetch_max_attempts=1,
     )
-    rows = prov.fetch_basis(
-        "btcusdt",
-        "perpetual",
-        "1h",
-        start_time_ms=1640995200000,
-        limit=100,
-    )
+    # Same as start → provider bumps end by one period so endTime > startTime (Binance -1102).
+    fixed_now = 1640995200000
+    with patch("market_data.providers.binance_perps._utc_now_ms", return_value=fixed_now):
+        rows = prov.fetch_basis(
+            "btcusdt",
+            "perpetual",
+            "1h",
+            start_time_ms=1640995200000,
+            limit=100,
+        )
     assert len(rows) == 1
     assert rows[0].pair == "BTCUSDT"
     assert rows[0].contract_type == "PERPETUAL"
@@ -63,6 +66,7 @@ def test_fetch_basis_parses_and_calls_get() -> None:
     assert "contractType=PERPETUAL" in url
     assert "period=1h" in url
     assert "startTime=1640995200000" in url
+    assert "endTime=1640998800000" in url  # +1h
     assert "limit=100" in url
 
 
@@ -74,16 +78,18 @@ def test_fetch_basis_includes_end_time() -> None:
         session=session,
         fetch_max_attempts=1,
     )
+    # Aligned 1h window so URL reflects floor-aligned start/end (Binance grid).
     prov.fetch_basis(
         "BTCUSDT",
         "PERPETUAL",
         "1h",
-        start_time_ms=100,
-        end_time_ms=200,
+        start_time_ms=3_600_000,
+        end_time_ms=7_200_000,
         limit=10,
     )
     url = session.get.call_args[0][0]
-    assert "endTime=200" in url
+    assert "startTime=3600000" in url
+    assert "endTime=7200000" in url
 
 
 def test_limit_out_of_range() -> None:
@@ -120,7 +126,8 @@ def test_acquire_before_http() -> None:
         rate_limiter=limiter,
         fetch_max_attempts=1,
     )
-    prov.fetch_basis("BTCUSDT", "PERPETUAL", "1h", start_time_ms=1)
+    with patch("market_data.providers.binance_perps._utc_now_ms", return_value=7_200_000):
+        prov.fetch_basis("BTCUSDT", "PERPETUAL", "1h", start_time_ms=1)
     assert order == ["acquire", "get"]
 
 
@@ -137,12 +144,15 @@ def test_http_400_no_retry_returns_empty() -> None:
         fetch_retry_base_sleep_sec=0.0,
     )
     with patch("market_data.providers.binance_perps.time.sleep") as sl:
-        rows = prov.fetch_basis("BADUSDT", "PERPETUAL", "1h", start_time_ms=1)
+        with patch("market_data.providers.binance_perps._utc_now_ms", return_value=7_200_000):
+            rows = prov.fetch_basis("BADUSDT", "PERPETUAL", "1h", start_time_ms=1)
     sl.assert_not_called()
     session.get.assert_called_once()
     assert rows == []
     assert len(prov.fetch_give_ups) == 1
     assert "400" in prov.fetch_give_ups[0]
+    url = session.get.call_args[0][0]
+    assert "endTime=" in url
 
 
 def test_fetch_retries_after_invalid_payload_then_succeeds() -> None:
@@ -159,7 +169,8 @@ def test_fetch_retries_after_invalid_payload_then_succeeds() -> None:
         fetch_retry_base_sleep_sec=0.0,
     )
     with patch("market_data.providers.binance_perps.time.sleep"):
-        rows = prov.fetch_basis("BTCUSDT", "PERPETUAL", "1h", start_time_ms=1)
+        with patch("market_data.providers.binance_perps._utc_now_ms", return_value=7_200_000):
+            rows = prov.fetch_basis("BTCUSDT", "PERPETUAL", "1h", start_time_ms=1)
     assert len(rows) == 1
     assert session.get.call_count == 2
 

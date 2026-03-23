@@ -21,6 +21,10 @@ OHLCV_SYMBOLS: tuple[str, ...] = DATA_COLLECTION_SYMBOLS
 # Used only when ``MARKET_DATA_BINANCE_BASE_URL`` is unset.
 DEFAULT_BINANCE_REST_URL: str = "https://api.binance.com"
 
+# Used when ``MARKET_DATA_BINANCE_PERPS_BASE_URL`` is unset (basis / open interest / futures data).
+# Do **not** fall back to spot ``api.binance.com`` — USD-M futures REST is on ``fapi``.
+DEFAULT_BINANCE_PERPS_REST_URL: str = "https://fapi.binance.com"
+
 # Min seconds between REST calls **per provider instance** (shared by all jobs on that instance).
 # ``None`` = **unlimited** (default) until venue weight/QPS is documented.
 MARKET_DATA_MIN_REQUEST_INTERVAL_SEC: float | None = None
@@ -144,7 +148,7 @@ class MarketDataSettings(BaseSettings):
     @property
     def binance_perps_rest_url(self) -> str:
         u = (self.market_data_binance_perps_base_url or "").strip().rstrip("/")
-        return u if u else DEFAULT_BINANCE_REST_URL
+        return u if u else DEFAULT_BINANCE_PERPS_REST_URL
 
     @computed_field  # type: ignore[prop-decorator]
     @property

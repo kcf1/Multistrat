@@ -8,6 +8,7 @@ with exponential backoff. HTTP 400 is treated as non-retryable and returns [].
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -22,12 +23,17 @@ from market_data.config import (
     OPEN_INTEREST_FETCH_RETRY_BASE_SLEEP_SEC,
     MarketDataSettings,
 )
+from market_data.intervals import floor_align_ms_to_interval, interval_to_millis
 from market_data.rate_limit import ProviderRateLimiter
 from market_data.schemas import BasisPoint, OpenInterestPoint
 from market_data.validation import (
     process_binance_basis_payload,
     process_binance_open_interest_payload,
 )
+
+
+def _utc_now_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
 class BinancePerpsMarketDataProvider:
@@ -87,15 +93,24 @@ class BinancePerpsMarketDataProvider:
         if limit < 1 or limit > 500:
             raise ValueError("limit must be between 1 and 500 for Binance basis")
 
+        pd = period.strip()
+        pd_ms = interval_to_millis(pd)
+        # Binance /futures/data/basis treats endTime as mandatory; missing or off-grid
+        # timestamps can yield -1102 ("not sent ... or malformed").
+        end_raw = int(end_time_ms) if end_time_ms is not None else _utc_now_ms()
+        start_eff = floor_align_ms_to_interval(int(start_time_ms), pd)
+        end_eff = floor_align_ms_to_interval(end_raw, pd)
+        if end_eff <= start_eff:
+            end_eff = start_eff + pd_ms
+
         params: dict[str, Any] = {
             "pair": pair.strip().upper(),
             "contractType": contract_type.strip().upper(),
-            "period": period.strip(),
-            "startTime": int(start_time_ms),
+            "period": pd,
+            "startTime": int(start_eff),
+            "endTime": int(end_eff),
             "limit": int(limit),
         }
-        if end_time_ms is not None:
-            params["endTime"] = int(end_time_ms)
 
         url = f"{self._base}{self.BASIS_PATH}?{urlencode(params)}"
         p = params["pair"]

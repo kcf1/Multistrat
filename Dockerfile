@@ -13,6 +13,7 @@ COPY oms/ oms/
 COPY pms/ pms/
 COPY risk/ risk/
 COPY market_data/ market_data/
+COPY scripts/ scripts/
 COPY alembic/ alembic/
 COPY alembic.ini .
 
