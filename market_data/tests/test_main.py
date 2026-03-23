@@ -35,9 +35,21 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
         "market_data.main.run_repair_gaps_policy_window_all_series",
         lambda _s: calls.append("repair") or [],
     )
+    monkeypatch.setattr(
+        "market_data.main.run_ingest_basis_rate",
+        lambda _s: calls.append("basis_ingest") or [],
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_correct_window_basis_rate",
+        lambda _s: calls.append("basis_correct") or [],
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_repair_basis_gaps_policy_window_all_series",
+        lambda _s: calls.append("basis_repair") or [],
+    )
     monkeypatch.setattr(sys, "argv", ["market_data.main", "--once"])
     main()
-    assert calls == ["ingest", "correct"]
+    assert calls == ["ingest", "correct", "basis_ingest", "basis_correct"]
 
 
 def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,9 +66,28 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
         "market_data.main.run_repair_gaps_policy_window_all_series",
         lambda _s: calls.append("repair") or [],
     )
+    monkeypatch.setattr(
+        "market_data.main.run_ingest_basis_rate",
+        lambda _s: calls.append("basis_ingest") or [],
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_correct_window_basis_rate",
+        lambda _s: calls.append("basis_correct") or [],
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_repair_basis_gaps_policy_window_all_series",
+        lambda _s: calls.append("basis_repair") or [],
+    )
     monkeypatch.setattr(sys, "argv", ["market_data.main", "--once", "--with-repair"])
     main()
-    assert calls == ["ingest", "correct", "repair"]
+    assert calls == [
+        "ingest",
+        "correct",
+        "basis_ingest",
+        "basis_correct",
+        "repair",
+        "basis_repair",
+    ]
 
 
 def test_scheduler_loop_respects_immediate_stop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -64,6 +95,9 @@ def test_scheduler_loop_respects_immediate_stop(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("market_data.main._run_ingest_step", lambda: called.append("i"))
     monkeypatch.setattr("market_data.main._run_correct_step", lambda: called.append("c"))
     monkeypatch.setattr("market_data.main._run_repair_step", lambda: called.append("r"))
+    monkeypatch.setattr("market_data.main._run_basis_ingest_step", lambda: called.append("bi"))
+    monkeypatch.setattr("market_data.main._run_basis_correct_step", lambda: called.append("bc"))
+    monkeypatch.setattr("market_data.main._run_basis_repair_step", lambda: called.append("br"))
 
     import threading
 
@@ -73,6 +107,9 @@ def test_scheduler_loop_respects_immediate_stop(monkeypatch: pytest.MonkeyPatch)
         ingest_interval_seconds=300,
         correct_interval_seconds=3600,
         repair_interval_seconds=0,
+        basis_ingest_interval_seconds=300,
+        basis_correct_interval_seconds=3600,
+        basis_repair_interval_seconds=0,
         stop_event=stop,
     )
     assert called == []
@@ -88,11 +125,17 @@ def test_scheduler_loop_runs_ingest_once(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     monkeypatch.setattr("market_data.main._run_correct_step", lambda: None)
     monkeypatch.setattr("market_data.main._run_repair_step", lambda: None)
+    monkeypatch.setattr("market_data.main._run_basis_ingest_step", lambda: None)
+    monkeypatch.setattr("market_data.main._run_basis_correct_step", lambda: None)
+    monkeypatch.setattr("market_data.main._run_basis_repair_step", lambda: None)
 
     run_scheduler_loop(
         ingest_interval_seconds=300,
         correct_interval_seconds=3600,
         repair_interval_seconds=0,
+        basis_ingest_interval_seconds=300,
+        basis_correct_interval_seconds=3600,
+        basis_repair_interval_seconds=0,
         stop_event=stop,
     )
     assert stop.is_set()
