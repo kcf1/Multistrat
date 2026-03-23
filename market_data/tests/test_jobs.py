@@ -14,9 +14,18 @@ from market_data.jobs.common import (
     open_time_plus_interval_ms,
 )
 from market_data.jobs.correct_window import _log_drifts, run_correct_window_series
+from market_data.jobs.correct_window_basis_rate import (
+    _log_basis_drifts,
+    run_correct_window_basis_series,
+)
+from market_data.jobs.ingest_basis_rate import ingest_basis_series
 from market_data.jobs.ingest_ohlcv import ingest_ohlcv_series
+from market_data.jobs.repair_gap_basis_rate import (
+    detect_basis_time_gaps,
+    run_repair_basis_gap,
+)
 from market_data.jobs.repair_gap import detect_ohlcv_time_gaps, run_repair_gap
-from market_data.schemas import OhlcvBar
+from market_data.schemas import BasisPoint, OhlcvBar
 
 
 def _bar(
@@ -36,6 +45,21 @@ def _bar(
         low=Decimal("0.5"),
         close=close,
         volume=Decimal("10"),
+    )
+
+
+def _basis_point(sample_ms: int, *, pair: str = "BTCUSDT") -> BasisPoint:
+    st = datetime.fromtimestamp(sample_ms / 1000.0, tz=timezone.utc)
+    return BasisPoint(
+        pair=pair,
+        contract_type="PERPETUAL",
+        period="1h",
+        sample_time=st,
+        basis=Decimal("100"),
+        basis_rate=Decimal("0.001"),
+        annualized_basis_rate=Decimal("0.876"),
+        futures_price=Decimal("50100"),
+        index_price=Decimal("50000"),
     )
 
 
@@ -318,4 +342,132 @@ def test_run_correct_window_series_upserts() -> None:
     assert r.bars_fetched == 1
     assert r.drift_rows == 0
     uo.assert_called_once_with(conn, bars)
+    conn.commit.assert_called_once()
+
+
+def test_resolve_basis_ingest_start_backfill_when_empty() -> None:
+    conn = MagicMock()
+    now_ms = 1_000_000_000_000
+    with (
+        patch("market_data.jobs.ingest_basis_rate.get_basis_cursor", return_value=None),
+        patch("market_data.jobs.ingest_basis_rate.max_sample_time_basis", return_value=None),
+    ):
+        from market_data.jobs.ingest_basis_rate import resolve_basis_ingest_start_ms
+
+        start = resolve_basis_ingest_start_ms(
+            conn,
+            "BTCUSDT",
+            "PERPETUAL",
+            "1h",
+            now_ms=now_ms,
+            backfill_days=7,
+        )
+    assert start == now_ms - 7 * 86_400_000
+
+
+def test_ingest_basis_series_commits_per_chunk() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+
+    p1 = [_basis_point(60_000), _basis_point(3_660_000)]
+    p2 = [_basis_point(7_260_000)]
+
+    class P:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def fetch_basis(self, *args, **kwargs):
+            self.n += 1
+            if self.n == 1:
+                return p1
+            if self.n == 2:
+                return p2
+            return []
+
+    with (
+        patch("market_data.jobs.ingest_basis_rate.resolve_basis_ingest_start_ms", return_value=60_000),
+        patch("market_data.jobs.ingest_basis_rate.upsert_basis_points") as up,
+        patch("market_data.jobs.ingest_basis_rate.upsert_basis_cursor") as uc,
+    ):
+        r = ingest_basis_series(
+            conn,
+            P(),
+            "BTCUSDT",
+            "PERPETUAL",
+            "1h",
+            now_ms=10_000_000,
+            chunk_limit=500,
+        )
+    assert r.rows_upserted == 3
+    assert r.chunks == 2
+    assert up.call_count == 2
+    assert uc.call_count == 2
+    assert conn.commit.call_count == 2
+
+
+def test_run_repair_basis_gap_noop_on_bad_range() -> None:
+    conn = MagicMock()
+    p = MagicMock()
+    assert run_repair_basis_gap(conn, p, "BTCUSDT", "PERPETUAL", "1h", start_time_ms=500, end_time_ms=500) == 0
+    p.fetch_basis.assert_not_called()
+
+
+def test_detect_basis_time_gaps_interior() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t1 = datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc)
+    t3 = datetime(2024, 1, 1, 3, 0, tzinfo=timezone.utc)
+    cur.fetchall.return_value = [(t0,), (t1,), (t3,)]
+    conn.cursor.return_value = cur
+    rs = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    re_ = datetime(2024, 1, 1, 6, 0, tzinfo=timezone.utc)
+    gaps = detect_basis_time_gaps(conn, "BTCUSDT", "PERPETUAL", "1h", rs, re_)
+    assert any(g[0].hour == 2 or g[1].hour == 2 for g in gaps)
+
+
+def test_log_basis_drifts_warns_on_mismatch() -> None:
+    st = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    row = _basis_point(int(st.timestamp() * 1000))
+    existing = {st: (Decimal("99"), Decimal("0.001"), Decimal("0.876"), Decimal("50100"), Decimal("50000"))}
+    with patch("market_data.jobs.correct_window_basis_rate.logger.warning") as w:
+        n = _log_basis_drifts(existing, [row])
+    assert n == 1
+    assert w.called
+
+
+def test_run_correct_window_basis_series_upserts() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    rows = [_basis_point(1_700_000_000_000)]
+
+    class P:
+        def fetch_basis(self, *a, **k):
+            return rows
+
+    with (
+        patch("market_data.jobs.correct_window_basis_rate.chunk_fetch_basis_forward", return_value=rows),
+        patch("market_data.jobs.correct_window_basis_rate.fetch_basis_rates_by_sample_times", return_value={}),
+        patch("market_data.jobs.correct_window_basis_rate.upsert_basis_points") as up,
+    ):
+        r = run_correct_window_basis_series(
+            conn,
+            P(),
+            "BTCUSDT",
+            "PERPETUAL",
+            "1h",
+            lookback_points=10,
+            now_ms=1_700_000_060_000,
+        )
+    assert r.rows_fetched == 1
+    assert r.drift_rows == 0
+    up.assert_called_once_with(conn, rows)
     conn.commit.assert_called_once()
