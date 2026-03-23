@@ -331,10 +331,26 @@ def test_process_open_interest_payload_duplicate_sample_time() -> None:
         )
 
 
-def test_process_open_interest_payload_non_monotonic() -> None:
+def test_process_open_interest_payload_sorts_descending_timestamps_to_ascending() -> None:
+    """API may return newest-first; we sort so pagination can use the last row as newest."""
+    older = _open_interest_row(1_640_995_100_000)
+    newer = _open_interest_row(1_640_995_200_000)
+    out = process_binance_open_interest_payload(
+        [newer, older],
+        symbol="BTCUSDT",
+        contract_type="PERPETUAL",
+        period="1h",
+    )
+    assert len(out) == 2
+    assert out[0].sample_time.timestamp() * 1000 == 1_640_995_100_000
+    assert out[1].sample_time.timestamp() * 1000 == 1_640_995_200_000
+
+
+def test_process_open_interest_payload_rejects_non_increasing_after_sort() -> None:
+    """Duplicate timestamps remain invalid after sort (true non-monotonic grid)."""
     a = _open_interest_row(1_640_995_200_000)
-    b = _open_interest_row(1_640_995_100_000)
-    with pytest.raises(ValueError, match="non-increasing"):
+    b = _open_interest_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
         process_binance_open_interest_payload(
             [a, b],
             symbol="BTCUSDT",

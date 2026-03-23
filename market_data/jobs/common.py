@@ -183,6 +183,10 @@ def iter_open_interest_batches_forward(
     """
     Yield each ``fetch_open_interest_hist`` page from ``start_ms`` toward ``end_ms``.
     Stops when page empty or next ``startTime`` would be past ``end_ms``.
+
+    Each page is expected **oldest → newest** after parsing (payload processing sorts by
+    ``sample_time``). The next request uses ``startTime`` after the **newest** point in the
+    page (``batch[-1]`` + one period).
     """
     pd_ms = interval_to_millis(period)
     cur = start_ms

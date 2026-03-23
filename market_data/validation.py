@@ -236,6 +236,10 @@ def process_binance_open_interest_payload(
         more = f" … (+{len(row_errors) - 15} more)" if len(row_errors) > 15 else ""
         raise ValueError(f"open interest row errors ({len(row_errors)}): {head}{more}")
 
+    # Binance docs imply ascending time; normalize so chunk pagination in
+    # ``iter_open_interest_batches_forward`` can safely use ``batch[-1]`` as the newest row.
+    points.sort(key=lambda p: p.sample_time)
+
     issues = _open_interest_batch_integrity_issues(points)
     if issues:
         raise ValueError("open interest batch integrity: " + "; ".join(issues))
