@@ -5,7 +5,13 @@ from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 
 from market_data.config import (
+    BASIS_CONTRACT_TYPES,
+    BASIS_PAIRS,
+    BASIS_PERIODS,
     DEFAULT_BINANCE_REST_URL,
+    OPEN_INTEREST_CONTRACT_TYPES,
+    OPEN_INTEREST_PERIODS,
+    OPEN_INTEREST_SYMBOLS,
     OHLCV_INTERVALS,
     OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
     OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS,
@@ -102,3 +108,12 @@ def test_scheduler_cadence_is_module_constants() -> None:
     assert OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS == 300
     assert OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS == 3600
     assert OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS == 0
+
+
+def test_basis_and_open_interest_series_defaults_align() -> None:
+    assert BASIS_PAIRS == DATA_COLLECTION_SYMBOLS
+    assert OPEN_INTEREST_SYMBOLS == DATA_COLLECTION_SYMBOLS
+    assert BASIS_CONTRACT_TYPES == ("PERPETUAL",)
+    assert OPEN_INTEREST_CONTRACT_TYPES == ("PERPETUAL",)
+    assert BASIS_PERIODS == ("1h",)
+    assert OPEN_INTEREST_PERIODS == ("1h",)
