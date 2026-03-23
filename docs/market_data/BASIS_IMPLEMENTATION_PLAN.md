@@ -217,19 +217,19 @@ Key constraints to encode in plan:
 
 ## 9) Delivery checklist
 
-- [ ] Add migration for `basis_rate` table and indexes.
-- [ ] Add basis config constants in `market_data/config.py`.
-- [ ] Add/confirm perps base URL setting and docs.
-- [ ] Add `BasisPoint` model + parser + tests.
-- [ ] Add/extend perps provider with `fetch_basis`.
-- [ ] Add basis upsert + cursor helpers + tests.
-- [ ] Implement `ingest_basis_rate`.
-- [ ] Implement `correct_window_basis_rate`.
-- [ ] Implement `repair_gap_basis_rate` (or explicitly defer).
-- [ ] Wire basis jobs into `market_data/main.py`.
-- [ ] Add one-shot/backfill CLI for basis.
-- [ ] Update README and dataset docs.
-- [ ] Add unit/job/integration coverage.
+- [x] Add migration for `basis_rate` table and indexes.
+- [x] Add basis config constants in `market_data/config.py`.
+- [x] Add/confirm perps base URL setting and docs.
+- [x] Add `BasisPoint` model + parser + tests.
+- [x] Add/extend perps provider with `fetch_basis`.
+- [x] Add basis upsert + cursor helpers + tests.
+- [x] Implement `ingest_basis_rate`.
+- [x] Implement `correct_window_basis_rate`.
+- [x] Implement `repair_gap_basis_rate`.
+- [x] Wire basis jobs into `market_data/main.py`.
+- [x] Add one-shot/backfill CLI for basis.
+- [x] Update README and dataset docs.
+- [x] Add unit/job/integration coverage.
 
 ---
 
