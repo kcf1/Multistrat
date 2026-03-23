@@ -8,10 +8,13 @@ import pytest
 from market_data.schemas import (
     BasisPoint,
     OhlcvBar,
+    OpenInterestPoint,
     parse_binance_basis_row,
     parse_binance_basis_rows,
     parse_binance_kline,
     parse_binance_klines,
+    parse_binance_open_interest_row,
+    parse_binance_open_interest_rows,
 )
 
 
@@ -123,5 +126,57 @@ def test_basis_point_frozen() -> None:
     from pydantic import ValidationError
 
     p = parse_binance_basis_row(_BASIS_SAMPLE)
+    with pytest.raises(ValidationError):
+        p.period = "4h"  # type: ignore[misc]
+
+
+_OPEN_INTEREST_SAMPLE = {
+    "symbol": "BTCUSDT",
+    "contractType": "PERPETUAL",
+    "sumOpenInterest": "12345.6789",
+    "sumOpenInterestValue": "987654321.123456",
+    "CMCCirculatingSupply": "19500000.0",
+    "timestamp": 1640995200000,
+    "period": "1h",
+}
+
+
+def test_parse_binance_open_interest_row_full() -> None:
+    p = parse_binance_open_interest_row(_OPEN_INTEREST_SAMPLE)
+    assert p.symbol == "BTCUSDT"
+    assert p.contract_type == "PERPETUAL"
+    assert p.period == "1h"
+    assert p.sum_open_interest == Decimal("12345.6789")
+    assert p.sum_open_interest_value == Decimal("987654321.123456")
+    assert p.cmc_circulating_supply == Decimal("19500000.0")
+    assert p.sample_time == datetime(2022, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_binance_open_interest_row_with_explicit_context() -> None:
+    row = dict(_OPEN_INTEREST_SAMPLE)
+    row["symbol"] = "IGNORED"
+    row["contractType"] = "CURRENT_QUARTER"
+    row["period"] = "5m"
+    p = parse_binance_open_interest_row(
+        row,
+        symbol="ethusdt",
+        contract_type="perpetual",
+        period="1h",
+    )
+    assert p.symbol == "ETHUSDT"
+    assert p.contract_type == "PERPETUAL"
+    assert p.period == "1h"
+
+
+def test_parse_binance_open_interest_rows_multiple() -> None:
+    points = parse_binance_open_interest_rows([_OPEN_INTEREST_SAMPLE, _OPEN_INTEREST_SAMPLE])
+    assert len(points) == 2
+    assert all(isinstance(p, OpenInterestPoint) for p in points)
+
+
+def test_open_interest_point_frozen() -> None:
+    from pydantic import ValidationError
+
+    p = parse_binance_open_interest_row(_OPEN_INTEREST_SAMPLE)
     with pytest.raises(ValidationError):
         p.period = "4h"  # type: ignore[misc]

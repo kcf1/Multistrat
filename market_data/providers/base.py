@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from market_data.schemas import BasisPoint, OhlcvBar
+from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint
 
 
 @runtime_checkable
@@ -46,5 +46,27 @@ class BasisProvider(Protocol):
         Return parsed basis points (oldest first, Binance order).
 
         ``limit``: max rows per HTTP request (Binance cap 500 for /futures/data/basis).
+        """
+        ...
+
+
+@runtime_checkable
+class OpenInterestProvider(Protocol):
+    """Fetch open-interest snapshots for a symbol, contract type, and period."""
+
+    def fetch_open_interest_hist(
+        self,
+        symbol: str,
+        contract_type: str,
+        period: str,
+        *,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+        limit: int = 500,
+    ) -> list[OpenInterestPoint]:
+        """
+        Return parsed open-interest points (oldest first, Binance order).
+
+        ``limit``: max rows per HTTP request (Binance cap 500 for /futures/data/openInterestHist).
         """
         ...

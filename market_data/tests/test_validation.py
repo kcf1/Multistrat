@@ -10,6 +10,7 @@ from market_data.schemas import OhlcvBar, parse_binance_kline
 from market_data.validation import (
     process_binance_basis_payload,
     process_binance_klines_payload,
+    process_binance_open_interest_payload,
     scan_bar_series_grid_gaps,
     theoretical_max_bars_in_window,
 )
@@ -272,6 +273,71 @@ def test_process_basis_payload_non_monotonic() -> None:
         process_binance_basis_payload(
             [a, b],
             pair="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def _open_interest_row(ts: int, *, symbol: str = "BTCUSDT") -> dict:
+    return {
+        "symbol": symbol,
+        "contractType": "PERPETUAL",
+        "sumOpenInterest": "12345.6789",
+        "sumOpenInterestValue": "987654321.123456",
+        "CMCCirculatingSupply": "19500000.0",
+        "timestamp": ts,
+        "period": "1h",
+    }
+
+
+def test_process_open_interest_payload_rejects_non_list() -> None:
+    with pytest.raises(ValueError, match="JSON array"):
+        process_binance_open_interest_payload(
+            {},
+            symbol="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_open_interest_payload_row_not_object() -> None:
+    with pytest.raises(ValueError, match=r"row\[0\]"):
+        process_binance_open_interest_payload(
+            [123],
+            symbol="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_open_interest_payload_empty_ok() -> None:
+    out = process_binance_open_interest_payload(
+        [],
+        symbol="BTCUSDT",
+        contract_type="PERPETUAL",
+        period="1h",
+    )
+    assert out == []
+
+
+def test_process_open_interest_payload_duplicate_sample_time() -> None:
+    r = _open_interest_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_open_interest_payload(
+            [r, r],
+            symbol="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_open_interest_payload_non_monotonic() -> None:
+    a = _open_interest_row(1_640_995_200_000)
+    b = _open_interest_row(1_640_995_100_000)
+    with pytest.raises(ValueError, match="non-increasing"):
+        process_binance_open_interest_payload(
+            [a, b],
+            symbol="BTCUSDT",
             contract_type="PERPETUAL",
             period="1h",
         )

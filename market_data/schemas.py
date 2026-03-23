@@ -247,3 +247,116 @@ def parse_binance_basis_rows(
         )
         for r in rows
     ]
+
+
+class OpenInterestPoint(BaseModel):
+    """One persisted open-interest row (matches ``open_interest`` table, excluding ingested_at)."""
+
+    model_config = {"frozen": True}
+
+    symbol: str = Field(..., min_length=1)
+    contract_type: str = Field(..., min_length=1)
+    period: str = Field(..., min_length=1)
+    sample_time: datetime
+    sum_open_interest: Decimal
+    sum_open_interest_value: Decimal
+    cmc_circulating_supply: Decimal | None = None
+
+    @field_validator("symbol")
+    @classmethod
+    def upper_symbol(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("contract_type")
+    @classmethod
+    def normalize_contract_type(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("period")
+    @classmethod
+    def strip_period(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def open_interest_sanity(self) -> OpenInterestPoint:
+        if self.sum_open_interest < 0:
+            raise ValueError("sum_open_interest must be >= 0")
+        if self.sum_open_interest_value < 0:
+            raise ValueError("sum_open_interest_value must be >= 0")
+        if self.cmc_circulating_supply is not None and self.cmc_circulating_supply < 0:
+            raise ValueError("cmc_circulating_supply must be >= 0 when set")
+        return self
+
+
+def parse_binance_open_interest_row(
+    row: Mapping[str, Any],
+    *,
+    symbol: str | None = None,
+    contract_type: str | None = None,
+    period: str | None = None,
+) -> OpenInterestPoint:
+    """Parse one Binance `/futures/data/openInterestHist` object into ``OpenInterestPoint``."""
+    if not isinstance(row, Mapping):
+        raise ValueError("Binance open interest row must be an object")
+
+    def _get_required(key: str) -> Any:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(f"missing or empty open interest field '{key}'")
+        return v
+
+    def _dec_required(key: str) -> Decimal:
+        try:
+            return Decimal(str(_get_required(key)))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {row.get(key)!r}") from e
+
+    def _dec_optional(key: str) -> Decimal | None:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        try:
+            return Decimal(str(v))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {v!r}") from e
+
+    ts_raw = _get_required("timestamp")
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid timestamp: {ts_raw!r}") from e
+
+    resolved_symbol = (symbol or str(_get_required("symbol"))).strip().upper()
+    resolved_contract = (
+        contract_type or str(_get_required("contractType"))
+    ).strip().upper()
+    resolved_period = (period or str(_get_required("period"))).strip()
+
+    return OpenInterestPoint(
+        symbol=resolved_symbol,
+        contract_type=resolved_contract,
+        period=resolved_period,
+        sample_time=_ms_to_utc_aware(ts_ms),
+        sum_open_interest=_dec_required("sumOpenInterest"),
+        sum_open_interest_value=_dec_required("sumOpenInterestValue"),
+        cmc_circulating_supply=_dec_optional("CMCCirculatingSupply"),
+    )
+
+
+def parse_binance_open_interest_rows(
+    rows: list[Mapping[str, Any]],
+    *,
+    symbol: str | None = None,
+    contract_type: str | None = None,
+    period: str | None = None,
+) -> list[OpenInterestPoint]:
+    """Parse a list of open-interest objects (e.g. full API response)."""
+    return [
+        parse_binance_open_interest_row(
+            r,
+            symbol=symbol,
+            contract_type=contract_type,
+            period=period,
+        )
+        for r in rows
+    ]

@@ -19,6 +19,16 @@ _BASIS_ROW = {
     "period": "1h",
 }
 
+_OPEN_INTEREST_ROW = {
+    "symbol": "BTCUSDT",
+    "contractType": "PERPETUAL",
+    "sumOpenInterest": "12345.6789",
+    "sumOpenInterestValue": "987654321.123456",
+    "CMCCirculatingSupply": "19500000.0",
+    "timestamp": 1640995200000,
+    "period": "1h",
+}
+
 
 def _mock_response(payload: list) -> MagicMock:
     r = MagicMock()
@@ -150,5 +160,105 @@ def test_fetch_retries_after_invalid_payload_then_succeeds() -> None:
     )
     with patch("market_data.providers.binance_perps.time.sleep"):
         rows = prov.fetch_basis("BTCUSDT", "PERPETUAL", "1h", start_time_ms=1)
+    assert len(rows) == 1
+    assert session.get.call_count == 2
+
+
+def test_fetch_open_interest_parses_and_calls_get() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response([_OPEN_INTEREST_ROW])
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        rate_limiter=ProviderRateLimiter(None),
+        open_interest_fetch_max_attempts=1,
+    )
+    rows = prov.fetch_open_interest_hist(
+        "btcusdt",
+        "perpetual",
+        "1h",
+        start_time_ms=1640995200000,
+        limit=100,
+    )
+    assert len(rows) == 1
+    assert rows[0].symbol == "BTCUSDT"
+    assert rows[0].contract_type == "PERPETUAL"
+    session.get.assert_called_once()
+    url = session.get.call_args[0][0]
+    assert "symbol=BTCUSDT" in url
+    assert "contractType=PERPETUAL" in url
+    assert "period=1h" in url
+    assert "startTime=1640995200000" in url
+    assert "limit=100" in url
+
+
+def test_fetch_open_interest_includes_end_time() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response([])
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        open_interest_fetch_max_attempts=1,
+    )
+    prov.fetch_open_interest_hist(
+        "BTCUSDT",
+        "PERPETUAL",
+        "1h",
+        start_time_ms=100,
+        end_time_ms=200,
+        limit=10,
+    )
+    url = session.get.call_args[0][0]
+    assert "endTime=200" in url
+
+
+def test_open_interest_limit_out_of_range() -> None:
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=MagicMock(),
+        open_interest_fetch_max_attempts=1,
+    )
+    with pytest.raises(ValueError, match="500"):
+        prov.fetch_open_interest_hist("BTCUSDT", "PERPETUAL", "1h", start_time_ms=1, limit=0)
+    with pytest.raises(ValueError, match="500"):
+        prov.fetch_open_interest_hist("BTCUSDT", "PERPETUAL", "1h", start_time_ms=1, limit=501)
+
+
+def test_open_interest_http_400_no_retry_returns_empty() -> None:
+    session = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.text = '{"code":-1121,"msg":"Invalid symbol."}'
+    session.get.return_value = resp
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        open_interest_fetch_max_attempts=5,
+        open_interest_fetch_retry_base_sleep_sec=0.0,
+    )
+    with patch("market_data.providers.binance_perps.time.sleep") as sl:
+        rows = prov.fetch_open_interest_hist("BADUSDT", "PERPETUAL", "1h", start_time_ms=1)
+    sl.assert_not_called()
+    session.get.assert_called_once()
+    assert rows == []
+    assert len(prov.fetch_give_ups) == 1
+    assert "400" in prov.fetch_give_ups[0]
+
+
+def test_fetch_open_interest_retries_after_invalid_payload_then_succeeds() -> None:
+    session = MagicMock()
+    session.get.side_effect = [
+        _mock_response(["not-an-object"]),
+        _mock_response([_OPEN_INTEREST_ROW]),
+    ]
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        rate_limiter=ProviderRateLimiter(None),
+        open_interest_fetch_max_attempts=3,
+        open_interest_fetch_retry_base_sleep_sec=0.0,
+    )
+    with patch("market_data.providers.binance_perps.time.sleep"):
+        rows = prov.fetch_open_interest_hist("BTCUSDT", "PERPETUAL", "1h", start_time_ms=1)
     assert len(rows) == 1
     assert session.get.call_count == 2
