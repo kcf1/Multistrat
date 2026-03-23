@@ -1,122 +1,177 @@
-# Standard steps for adding a new dataset (ingestion service)
+# Dataset Ingestion Steps (Market Data)
 
-Reusable checklist when extending **market data** or any **ingest → Postgres** (and optionally Redis) pipeline. Aligns with [PHASE4_DETAILED_PLAN.md](../PHASE4_DETAILED_PLAN.md) for OHLCV; the same pattern applies to other tables (e.g. trades, funding).
-
-### How this fits the `market_data` process
-
-Implement a **supervisor / scheduler** that runs **job types** (ingest, correction, repair, QC). Each job calls **shared** storage (upsert, cursors); **venue-specific** code lives behind a **provider interface** (OMS-style broker adapters, but read-only). **Rate limits** apply **per API identity** (base URL + key): use **one limiter or queue per provider** so all datasets/jobs for that provider **share** the budget—**sequential** or **very low concurrency** by default; **different providers** may run in parallel. See [PHASE4_DETAILED_PLAN.md](../PHASE4_DETAILED_PLAN.md) **§6.0**.
+Reusable execution guide for adding a new dataset to `market_data`, aligned with the standard blueprint:
+`config -> provider -> validation/parser -> storage upsert -> cursor/watermark -> jobs -> scheduler`.
 
 ---
 
-## 1. Define the grain and identity
+## 1) Define dataset contract first
 
-- **Natural key** — e.g. `(symbol, interval, open_time)` for bars, or `(symbol, trade_id)` for ticks.
-- **Time rules** — UTC; bar **open** time as stored key; venue rules for inclusive/exclusive window edges.
-- **Row semantics** — closed bar only vs including partials; where partials live (e.g. Redis only).
-
----
-
-## 2. Schema
-
-- **Postgres** — table, column types, **`UNIQUE` or `PRIMARY KEY`** on the natural key.
-- **Indexes** — match read paths (e.g. `(symbol, interval, open_time DESC)`).
-- **Alembic** — one revision; no ad-hoc DDL in production.
+- Set the dataset grain and natural key (for example `(exchange, symbol, event_time)`).
+- Define time semantics (UTC, inclusive/exclusive range behavior, closed vs partial rows).
+- Define row semantics (what one row means and what updates are allowed).
 
 ---
 
-## 3. Config
+## 2) Add schema and migration
 
-- **Macro** (`.env`): DB/Redis URLs, API keys, **per-service** venue URLs (e.g. `MARKET_DATA_BINANCE_BASE_URL`) so each service stays isolated and configurable. See `.cursor/rules/env-and-config.mdc`.
-- **Micro** (Python constants in `config.py`): symbol lists, intervals, rate-limit *defaults*, feature flags—not a new `.env` line per tunable.
-
----
-
-## 4. Internal model + parser
-
-- Map raw API/WebSocket payloads → **one internal shape** (e.g. Pydantic/dataclass); avoid scattering raw dicts.
-- **Unit tests** — fixture JSON: valid payloads, edge cases, malformed input.
+- Create Postgres table with the natural key as `PRIMARY KEY` or `UNIQUE`.
+- Add only query-critical indexes.
+- Add one Alembic revision for the dataset (no ad-hoc DDL).
 
 ---
 
-## 5. API client
+## 3) Add config (macro vs micro)
 
-- REST and/or WebSocket: timeouts, retries with **backoff**, **respect provider rate limits** (weights, connections).
-- Centralize auth/signature if the endpoint requires it.
-
----
-
-## 6. Upsert writer (idempotent)
-
-- **`INSERT … ON CONFLICT … DO UPDATE`** (or equivalent) on the natural key.
-- **Tests** — duplicate ingest → one row; “vendor correction” payload → row updates as expected.
-
----
-
-## 7. Cursor / watermark
-
-- **Derived** — e.g. `MAX(open_time)` per `(symbol, interval)`; simple, but a failed partial batch can hide gaps.
-- **Explicit** — e.g. `ingestion_cursor` table updated **after** successful commits; easier to **rewind** for repair.
-- Document **restart behavior** — how the next REST `startTime` or WS resume is chosen.
+- Macro env values:
+  - service DB URL (`MARKET_DATA_DATABASE_URL`)
+  - provider endpoint URL(s) (service-prefixed)
+  - API credentials only if required
+- Micro code constants in `market_data/config.py`:
+  - symbols, intervals/periods
+  - backfill window, chunk limit
+  - retry/backoff defaults
+  - scheduler cadences
 
 ---
 
-## 8. Backfill / initialization
+## 4) Implement internal model and parser
 
-- **Cold start** — pull history in **chunks** with throttling; persist cursor per chunk (or transactionally with batches).
-- **Smoke / integration** — small symbol, short window, verify rows in DB.
-
----
-
-## 9. Real-time path (if needed)
-
-- WebSocket or poll → **same parser and upsert** as backfill where possible.
-- Decide when Postgres is written (e.g. **closed** bar only) vs hot cache (e.g. Redis) for open bars.
+- Add one canonical internal row model in `market_data/schemas.py`.
+- Parse raw payloads into that model in `market_data/validation.py` (or dataset parser module).
+- Validate field invariants, timestamp normalization, and ordering assumptions.
+- Add parser unit tests for valid, malformed, and edge-case payloads.
 
 ---
 
-## 10. Correction + repair
+## 5) Implement provider interface and adapter
 
-- **Correction** — scheduled re-fetch of a **rolling window** (last *N* bars or *H* hours) → upsert; optional **alert** if any stored field changed beyond a threshold (vendor drift).
-- **Repair** — on **gap detection** or after outage, fetch only `[t0, t1]` → upsert → **advance cursor** past the repaired range.
-- Share one **“fetch range → parse → upsert”** code path with backfill and correction.
-
----
-
-## 11. Observability
-
-- **Logs** — HTTP/WS errors, parse failures, upsert failures, correction stats (“*k* rows updated”).
-- **Staleness** — alert if ingest does not succeed or cursor does not advance within *X* minutes (outage signal, separate from correction drift).
+- Add dataset-facing provider protocol in `market_data/providers`.
+- Add venue adapter module (for example `binance_spot.py` or `binance_perps.py`).
+- Enforce timeouts, retries with backoff, and non-retryable client error handling.
+- Use one shared `ProviderRateLimiter` per provider instance.
 
 ---
 
-## 12. Service runner + deploy
+## 6) Implement storage upsert and cursor helpers
 
-- Register the new **job** in the process `main` / scheduler (same pattern as other jobs for that provider; see PHASE4 §6.0).
-- **Docker / Compose** — env vars, `depends_on` for Postgres/Redis as needed.
+- Add idempotent upsert:
+  - `INSERT ... ON CONFLICT ... DO UPDATE`
+- Keep storage functions transaction-agnostic (caller commits).
+- Add cursor helpers:
+  - `get_cursor`
+  - `upsert_cursor`
+  - `max_stored_time`
+- Ensure startup resume uses `max(cursor, max(stored_time))`.
 
 ---
 
-## 13. Tests (usual)
+## 7) Implement runtime jobs
 
-- Parser unit tests, upsert/idempotency tests, optional integration against Postgres (testcontainer or transactional rollback).
+- `ingest_<dataset>`:
+  - cold start backfill + incremental catch-up
+  - chunked fetch -> parse -> upsert -> cursor update -> commit per chunk
+- `correct_window_<dataset>`:
+  - rolling recent-window refetch
+  - drift detection and correction upserts
+- `repair_gap_<dataset>`:
+  - detect missing spans in policy window
+  - targeted range refetch and cursor advancement
 
 ---
 
-## Suggested build order
+## 8) Wire scheduler and operational commands
 
-Maps to [PHASE4_DETAILED_PLAN.md](../PHASE4_DETAILED_PLAN.md) **§9** REST tranche (**§9.1–9.6**). Below, **§N** means **section N of this file** (the numbered headings).
+- Register jobs in `market_data/main.py`.
+- Keep same runtime behavior:
+  - first run immediate
+  - next runs UTC-aligned
+  - loop survives per-job exceptions
+- Keep one-shot operation support (`--once`, optional repair pass).
 
-1. **§§2–3** — schema, config → PHASE4 **§9.1**
-2. **§§4–5** — internal model + API client → PHASE4 **§9.2** (parse) and **§9.3** (provider + rate limit)
-3. **§§6–7** — upsert + cursor → PHASE4 **§9.4**
-4. **§8** — backfill implemented as **`ingest_ohlcv`** (and friends) → PHASE4 **§9.5**
-5. **§§10–11** — correction, repair, observability → PHASE4 **§9.5–9.6** (scheduled jobs + logging/alerts)
-6. **§§12–13** — register jobs in `main`, Docker, tests → PHASE4 **§9.6**
-7. **§9** (real-time) — after deferral: PHASE4 **§9.7** (Redis) then **§9.8** (WebSocket), if needed
+---
+
+## 9) Apply retry/failure policy
+
+- Retry transient provider/network failures with exponential backoff.
+- Treat obvious client input errors as non-retryable.
+- Log parse failures and count them in job summaries.
+- Commit per chunk so progress survives restarts.
+
+---
+
+## 10) Add data-quality checks
+
+- Ordering and duplicate-key checks per batch.
+- Window coverage and span diagnostics.
+- Drift metrics from correct-window runs.
+- Gap statistics from repair runs.
+- Freshness checks (latest stored timestamp lag).
+
+---
+
+## 11) Add observability and runbook
+
+- Structured logs per job:
+  - series count
+  - rows fetched/upserted
+  - retries/give-ups
+  - drift and gap counts
+- Add staleness monitoring guidance.
+- Update service README with run commands and env expectations.
+
+---
+
+## 12) Test plan
+
+- Unit tests:
+  - parser/model validation
+  - provider request/retry behavior
+  - storage upsert idempotency and cursor updates
+  - window/gap helper logic
+- Job tests:
+  - cold start
+  - incremental resume
+  - no-op up-to-date path
+  - partial failure and checkpoint recovery
+  - correct-window and repair semantics
+- Integration tests:
+  - one-shot end-to-end ingest
+  - scheduler cadence and restart from persisted cursor
+
+---
+
+## 13) Ordered implementation checklist
+
+- [ ] Define natural key, schema, indexes, migration.
+- [ ] Add macro env fields and micro config constants.
+- [ ] Implement internal model + parser + parser tests.
+- [ ] Implement provider protocol + venue adapter + limiter/retry behavior.
+- [ ] Implement upsert + cursor helpers + storage tests.
+- [ ] Implement `ingest_<dataset>`.
+- [ ] Implement `correct_window_<dataset>`.
+- [ ] Implement `repair_gap_<dataset>` (or explicitly defer).
+- [ ] Wire jobs into scheduler runner.
+- [ ] Update docs and runbook.
+- [ ] Add job/integration coverage and run smoke test.
+
+---
+
+## Reference mapping (OHLCV baseline)
+
+- Scheduler orchestration: `market_data/main.py`
+- Ingest baseline: `market_data/jobs/ingest_ohlcv.py`
+- Correction baseline: `market_data/jobs/correct_window.py`
+- Gap repair baseline: `market_data/jobs/repair_gap.py`
+- Provider baseline: `market_data/providers/binance_spot.py`
+- Validation baseline: `market_data/validation.py`, `market_data/schemas.py`
+- Storage baseline: `market_data/storage.py`
+- Settings baseline: `market_data/config.py`
 
 ---
 
 ## See also
 
-- [PHASE4_DETAILED_PLAN.md](../PHASE4_DETAILED_PLAN.md) — §6.0 runner (providers + jobs + rate limits), `ohlcv`, REST, deferred Redis/WebSocket
-- [ARCHITECTURE.md](../ARCHITECTURE.md) — Postgres tables and Redis namespaces
+- [STANDARD_DATA_PIPELINE.md](./STANDARD_DATA_PIPELINE.md)
+- [PHASE4_DETAILED_PLAN.md](../PHASE4_DETAILED_PLAN.md)
+- [ARCHITECTURE.md](../ARCHITECTURE.md)
