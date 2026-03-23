@@ -25,17 +25,18 @@ Planned source endpoint:
 
 Expected request fields:
 
-- `pair` (for example `BTCUSDT` or venue-specific pair format)
+- `symbol` (for example `BTCUSDT`)
 - `contractType` (`ALL`, `CURRENT_QUARTER`, `NEXT_QUARTER`, `PERPETUAL`)
 - `period` (`1h` for this tranche)
 - optional pagination controls (`startTime`, `endTime`, `limit`)
 
 Expected response fields (dataset payload):
 
-- `pair`
+- `symbol`
 - `contractType`
 - `sumOpenInterest`
 - `sumOpenInterestValue`
+- `CMCCirculatingSupply`
 - `timestamp`
 
 Key constraints to encode in plan:
@@ -53,7 +54,7 @@ Key constraints to encode in plan:
   - `MARKET_DATA_DATABASE_URL` (or `DATABASE_URL` fallback)
   - `MARKET_DATA_BINANCE_PERPS_BASE_URL`
 - **Micro/code constants** in `market_data/config.py`
-  - `OPEN_INTEREST_PAIRS`
+  - `OPEN_INTEREST_SYMBOLS`
   - `OPEN_INTEREST_CONTRACT_TYPES`
   - `OPEN_INTEREST_PERIODS` (initially `("1h",)`)
   - `OPEN_INTEREST_INITIAL_BACKFILL_DAYS`
@@ -70,30 +71,31 @@ Key constraints to encode in plan:
   - `fetch_open_interest_hist(...) -> list[OpenInterestPoint]`
 - Implement Binance adapter in `market_data/providers/binance_perps.py`.
 - Use one shared `ProviderRateLimiter` per provider instance across basis/funding/open-interest calls.
-- Preserve no-retry behavior for obvious client errors (invalid pair/params).
+- Preserve no-retry behavior for obvious client errors (invalid symbol/params).
 
 ### 3.3 Validation and parse
 
 - Add `OpenInterestPoint` model in `market_data/schemas.py`.
 - Parse payload to typed model:
-  - uppercase `pair`
+  - uppercase `symbol`
   - strict `contract_type`
   - UTC-aware `timestamp` mapped to `sample_time`
-  - decimals for `sumOpenInterest` and `sumOpenInterestValue`
-- Validate ordering and duplicate timestamp handling per series key `(pair, contract_type, period)`.
+  - decimals for `sumOpenInterest`, `sumOpenInterestValue`, and `CMCCirculatingSupply`
+- Validate ordering and duplicate timestamp handling per series key `(symbol, contract_type, period)`.
 
 ### 3.4 Storage
 
 - Add table `open_interest`:
-  - `pair` TEXT
+  - `symbol` TEXT
   - `contract_type` TEXT
   - `period` TEXT
   - `sample_time` TIMESTAMPTZ
   - `sum_open_interest` NUMERIC(36,18)
   - `sum_open_interest_value` NUMERIC(36,18)
+  - `cmc_circulating_supply` NUMERIC(36,18) NULL
   - `ingested_at` TIMESTAMPTZ DEFAULT now()
-- Natural key: `(pair, contract_type, period, sample_time)`.
-- Read index: `(pair, contract_type, period, sample_time DESC)`.
+- Natural key: `(symbol, contract_type, period, sample_time)`.
+- Read index: `(symbol, contract_type, period, sample_time DESC)`.
 - Upsert semantics: `ON CONFLICT ... DO UPDATE`.
 
 ### 3.5 Cursor / watermark
@@ -104,7 +106,7 @@ Key constraints to encode in plan:
   - `max_open_interest_sample_time(...)`
 - Start-point recovery:
   - `max(cursor, max(sample_time))`
-- Cursor rows keyed by `(pair, contract_type, period)`.
+- Cursor rows keyed by `(symbol, contract_type, period)`.
 - Cursor advances only after successful per-chunk commit.
 
 ---
@@ -116,7 +118,7 @@ Key constraints to encode in plan:
 ### Ordered flow
 
 1. Load settings, build perps provider, open DB connection.
-2. Enumerate series by `(pair, contract_type, period)`.
+2. Enumerate series by `(symbol, contract_type, period)`.
 3. Resolve start:
    - default from `max(cursor, max(sample_time))`
    - cold start from `now - OPEN_INTEREST_INITIAL_BACKFILL_DAYS`
@@ -147,8 +149,8 @@ Key constraints to encode in plan:
 ## 5) Retry and failure policy
 
 - Retry transient transport/server errors with exponential backoff.
-- Do not retry clear client errors (invalid params/pair contract).
-- Log parse failures and provider give-ups with `(pair, contract_type, period)` and time range.
+- Do not retry clear client errors (invalid params/symbol contract).
+- Log parse failures and provider give-ups with `(symbol, contract_type, period)` and time range.
 - Commit per chunk so partial progress persists across crashes.
 - Respect source retention limits (if request asks older than available window, clamp + log once per series).
 
@@ -156,7 +158,7 @@ Key constraints to encode in plan:
 
 ## 6) Data quality controls
 
-- Ordering/duplicate checks by `(pair, contract_type, period, sample_time)`.
+- Ordering/duplicate checks by `(symbol, contract_type, period, sample_time)`.
 - Span checks for requested windows (head slack/tail shortfall diagnostics).
 - Drift checks in correction window for OI fields.
 - Gap detection over policy window and targeted repair.
@@ -167,7 +169,7 @@ Key constraints to encode in plan:
 ## 7) Observability and operations
 
 - Structured logs per job:
-  - series processed (`pair`, `contract_type`, `period`)
+  - series processed (`symbol`, `contract_type`, `period`)
   - rows fetched/upserted
   - retries/give-ups
   - corrected rows
@@ -175,7 +177,7 @@ Key constraints to encode in plan:
 - Health:
   - scheduler liveness
   - cursor advancement
-  - staleness alerts per `(pair, contract_type, period)`
+  - staleness alerts per `(symbol, contract_type, period)`
 - Ops modes:
   - one-shot ingest
   - one-shot ingest + repair
