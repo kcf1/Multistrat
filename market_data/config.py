@@ -63,6 +63,17 @@ OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS: int = 3600
 # ``0`` disables scheduled policy-window gap repair (use ``scripts/backfill_ohlcv.py`` / ``--with-repair``).
 OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS: int = 0
 
+# Basis (Binance futures basis endpoint) micro constants.
+BASIS_PAIRS: tuple[str, ...] = DATA_COLLECTION_SYMBOLS
+BASIS_CONTRACT_TYPES: tuple[str, ...] = ("PERPETUAL",)
+BASIS_PERIODS: tuple[str, ...] = ("1h",)
+BASIS_INITIAL_BACKFILL_DAYS: int = 30
+BASIS_FETCH_CHUNK_LIMIT: int = 500
+BASIS_CORRECT_WINDOW_POINTS: int = 48
+BASIS_SCHEDULER_INGEST_INTERVAL_SECONDS: int = 300
+BASIS_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS: int = 3600
+BASIS_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS: int = 0
+
 
 class MarketDataSettings(BaseSettings):
     """
@@ -70,6 +81,7 @@ class MarketDataSettings(BaseSettings):
 
     - **DATABASE_URL** or **MARKET_DATA_DATABASE_URL** (latter wins if both set).
     - Optional **MARKET_DATA_BINANCE_BASE_URL** for public REST klines (testnet vs mainnet).
+    - Optional **MARKET_DATA_BINANCE_PERPS_BASE_URL** for basis/funding futures data.
 
     Micro: OHLCV_SYMBOLS, OHLCV_INTERVALS, OHLCV_SCHEDULER_* cadence, DEFAULT_BINANCE_REST_URL in this file.
     """
@@ -92,10 +104,22 @@ class MarketDataSettings(BaseSettings):
         description="REST base for Binance public endpoints used by market_data.",
     )
 
+    market_data_binance_perps_base_url: str | None = Field(
+        default=None,
+        validation_alias="MARKET_DATA_BINANCE_PERPS_BASE_URL",
+        description="REST base for Binance perps public endpoints used by market_data.",
+    )
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def binance_rest_url(self) -> str:
         u = (self.market_data_binance_base_url or "").strip().rstrip("/")
+        return u if u else DEFAULT_BINANCE_REST_URL
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def binance_perps_rest_url(self) -> str:
+        u = (self.market_data_binance_perps_base_url or "").strip().rstrip("/")
         return u if u else DEFAULT_BINANCE_REST_URL
 
     @computed_field  # type: ignore[prop-decorator]

@@ -75,6 +75,29 @@ def test_binance_rest_url_from_market_data_binance_base_url(
     assert s.binance_rest_url == "https://testnet.binance.vision"
 
 
+def test_binance_perps_rest_url_default_when_unset(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MARKET_DATA_BINANCE_PERPS_BASE_URL", raising=False)
+
+    class NoDotEnv(MarketDataSettings):
+        model_config = SettingsConfigDict(env_file=None, extra="ignore")
+
+    s = NoDotEnv()
+    assert s.binance_perps_rest_url == DEFAULT_BINANCE_REST_URL
+
+
+def test_binance_perps_rest_url_from_market_data_binance_perps_base_url(
+    minimal_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "MARKET_DATA_BINANCE_PERPS_BASE_URL",
+        "https://fapi.binance.com/",
+    )
+    s = MarketDataSettings()
+    assert s.binance_perps_rest_url == "https://fapi.binance.com"
+
+
 def test_scheduler_cadence_is_module_constants() -> None:
     assert OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS == 300
     assert OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS == 3600

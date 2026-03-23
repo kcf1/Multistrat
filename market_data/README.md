@@ -41,6 +41,7 @@ python scripts/backfill_ohlcv.py
 | `DATABASE_URL` | Postgres (fallback) |
 | `MARKET_DATA_DATABASE_URL` | Overrides `DATABASE_URL` when set |
 | `MARKET_DATA_BINANCE_BASE_URL` | Public REST base (e.g. testnet) |
+| `MARKET_DATA_BINANCE_PERPS_BASE_URL` | Perps REST base for basis/funding datasets |
 
 Scheduler timing is **not** env — edit `OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS`, `OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS`, and `OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS` in [`config.py`](config.py).
 
