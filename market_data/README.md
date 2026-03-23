@@ -44,7 +44,7 @@ python scripts/backfill_ohlcv.py
 
 Scheduler timing is **not** env — edit `OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS`, `OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS`, and `OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS` in [`config.py`](config.py).
 
-See [docs/PHASE4_DETAILED_PLAN.md](../docs/PHASE4_DETAILED_PLAN.md) §9 and [docs/BINANCE_API_RULES.md](../docs/BINANCE_API_RULES.md).
+See [docs/PHASE4_DETAILED_PLAN.md](../docs/PHASE4_DETAILED_PLAN.md) §9 and [docs/oms/BINANCE_API_RULES.md](../docs/oms/BINANCE_API_RULES.md).
 
 ## Shutdown
 

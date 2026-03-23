@@ -29,8 +29,9 @@ This doc summarizes Binance Spot API rules that affect integration and tests (te
 **Issue:** `balanceUpdate` events cannot be easily triggered on Binance testnet.
 
 **Rule:** The `balanceUpdate` WebSocket event is triggered by:
+
 - Deposits to the account
-- Withdrawals from the account  
+- Withdrawals from the account
 - Transfers between account types (e.g., Spot ↔ Margin)
 
 **Testnet Limitations:**
@@ -114,21 +115,26 @@ Endpoints **POST/PUT/DELETE /api/v3/userDataStream** (create/keepalive/close lis
 
 When using **userDataStream.subscribe.signature** over the WebSocket API (`wss://ws-api.testnet.binance.vision/ws-api/v3` or mainnet), the client opens the socket then sends a signed subscribe message. `stream_connected` becomes true only after the server responds with `result.subscriptionId`. If that never happens, the connection is considered failed. Possible reasons:
 
-1. **Timestamp out of sync (same as REST -1021)**  
-   The subscribe message includes `timestamp` and `signature`. Binance requires the timestamp to be within a small window of server time. If the machine clock is ahead or behind, the server may reject the subscribe (e.g. error response or no `result`) and the client never receives `subscriptionId`.  
+1. **Timestamp out of sync (same as REST -1021)**
+   The subscribe message includes `timestamp` and `signature`. Binance requires the timestamp to be within a small window of server time. If the machine clock is ahead or behind, the server may reject the subscribe (e.g. error response or no `result`) and the client never receives `subscriptionId`.
+
    **Fix:** Use the same server-time sync as for REST: before sending the subscribe message, call the API client’s time sync (e.g. GET `/api/v3/time`), compute offset, and use `timestamp = local_ms + offset` in the subscribe params.
 
-2. **Network / TLS / firewall**  
-   The WebSocket connection to `ws-api.testnet.binance.vision` (or mainnet) may fail due to DNS, TCP, TLS, or corporate firewall blocking outbound wss.  
+2. **Network / TLS / firewall**
+   The WebSocket connection to `ws-api.testnet.binance.vision` (or mainnet) may fail due to DNS, TCP, TLS, or corporate firewall blocking outbound wss.
+
    **Check:** Can you open the REST base URL (e.g. https://testnet.binance.vision)? If REST works but ws-api does not, the network may allow HTTPS but block WebSocket.
 
-3. **Testnet availability**  
-   Testnet ws-api can be slower or less stable than mainnet. The socket may open but the server may take a long time to respond with `subscriptionId`, or the endpoint may be temporarily unavailable.  
+3. **Testnet availability**
+   Testnet ws-api can be slower or less stable than mainnet. The socket may open but the server may take a long time to respond with `subscriptionId`, or the endpoint may be temporarily unavailable.
+
    **Mitigation:** Use a longer connect/subscribe timeout in tests; retry or fall back to the classic listenKey stream if needed.
 
-4. **Invalid API key or signature**  
-   Wrong key, secret, or signature (e.g. wrong parameter order or encoding for the subscribe params) can cause the server to return an error payload instead of `result`. The client then never sets `stream_connected`.  
+4. **Invalid API key or signature**
+   Wrong key, secret, or signature (e.g. wrong parameter order or encoding for the subscribe params) can cause the server to return an error payload instead of `result`. The client then never sets `stream_connected`.
+
    **Check:** Ensure the same API key/secret work for REST (e.g. GET `/api/v3/account`). Ensure the subscribe params are signed in the same way as REST (e.g. alphabetical order, same timestamp used in signature).
 
-5. **recvWindow**  
+5. **recvWindow**
    The subscribe message may include `recvWindow` (e.g. 5000 ms). If latency is high, the server might reject the request. Increasing `recvWindow` (max 60000) can help on slow networks.
+

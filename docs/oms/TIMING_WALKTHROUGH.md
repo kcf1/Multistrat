@@ -56,7 +56,7 @@ step_times["2b_inject_to_oms_start"] = oms_processing_start_monotonic - inject_t
 ```
 **What it measures:** Time from injection to when we **first detect** the order in Redis store.
 
-**⚠️ Limitation:** OMS actually started processing earlier (could be 0-500ms before we detected it, due to polling).
+⚠️ Limitation:** OMS actually started processing earlier (could be 0-500ms before we detected it, due to polling).
 
 ### 3. OMS Processing Time (Estimated)
 ```python
@@ -65,7 +65,7 @@ step_times["2a_oms_processing_time"] = oms_processing_end_monotonic - oms_proces
 ```
 **What it measures:** Estimated time between OMS starting and fill completing.
 
-**⚠️ Problem:** This can be negative because:
+⚠️ Problem:** This can be negative because:
 - We detect the fill at T=0.5s
 - We estimate fill happened at T=0.25s (detection - 0.25s)
 - We detect order staging at T=0.5s
@@ -80,7 +80,7 @@ step_times["2c_polling_overhead"] = detection_time - oms_processing_end_monotoni
 ```
 **What it measures:** Time between fill completion (estimated) and detection.
 
-**What it represents:** Half the polling interval (0.5s / 2 = 0.25s), because fill could have happened anywhere in the last 0.5s.
+What it represents:** Half the polling interval (0.5s / 2 = 0.25s), because fill could have happened anywhere in the last 0.5s.
 
 ## The Problem: Polling-Based Detection
 

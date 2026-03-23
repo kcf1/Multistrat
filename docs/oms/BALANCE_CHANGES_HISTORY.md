@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `balance_changes` table provides **historical tracking** of balance modifications from **deposits, withdrawals, transfers, and adjustments** only. It is **not** populated from trade-related broker events: per Binance API (see **docs/BINANCE_API_RULES.md** §1.1), **balanceUpdate** is triggered by deposits, withdrawals, and transfers — **not** by trades (trades trigger `outboundAccountPosition`). So `balance_changes` contains only non-trade movements; PMS uses it together with **orders** to build cash (no double-counting). When balance sync is disabled, current **cash** is derived in **PMS** from orders + balance_changes; the `balances` table may be unused.
+The `balance_changes` table provides **historical tracking** of balance modifications from **deposits, withdrawals, transfers, and adjustments** only. It is **not** populated from trade-related broker events: per Binance API (see **docs/oms/BINANCE_API_RULES.md** §1.1), **balanceUpdate** is triggered by deposits, withdrawals, and transfers — **not** by trades (trades trigger `outboundAccountPosition`). So `balance_changes` contains only non-trade movements; PMS uses it together with **orders** to build cash (no double-counting). When balance sync is disabled, current **cash** is derived in **PMS** from orders + balance_changes; the `balances` table may be unused.
 
 **Cash is multi-asset.** Neither `balance_changes` nor PMS cash (e.g. `book_cash`) assume a single “cash” asset (e.g. USDT). Each row has an **asset** (BTC, USDT, ETH, BNB, etc.); Binance `balanceUpdate` events carry one asset per event. PMS builds cash at grain (account_id, book, **asset**) across all assets.
 
@@ -179,4 +179,4 @@ The **schema has always been multi-asset** (`balance_changes.asset`). The only U
 
 - **Schema definition:** `docs/PHASE2_DETAILED_PLAN.md` §3.3
 - **Account sync implementation:** `oms/account_sync.py` (task 12.2.7)
-- **Binance events:** `docs/BINANCE_API_RULES.md` (balanceUpdate event structure)
+- **Binance events:** `docs/oms/BINANCE_API_RULES.md` (balanceUpdate event structure)

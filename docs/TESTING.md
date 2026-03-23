@@ -802,4 +802,4 @@ stages:
 
 - [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md#165-test-classification-and-file-mapping) - Detailed test classification
 - [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md#testing-corresponding-to-each-phase) - Overall test matrix
-- [BINANCE_API_RULES.md](BINANCE_API_RULES.md) - Binance API testnet rules and requirements
+- [BINANCE_API_RULES.md](oms/BINANCE_API_RULES.md) - Binance API testnet rules and requirements

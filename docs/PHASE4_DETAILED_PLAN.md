@@ -4,7 +4,7 @@
 
 **Current architecture:** [docs/ARCHITECTURE.md](ARCHITECTURE.md). Phase 2 PMS today uses **`PMS_MARK_PRICE_SOURCE=binance`** for mark prices; Phase 4 adds a path where PMS (or strategies) reads **Redis/Postgres** fed by this service—see [docs/pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md) §11 and `PMS_MARK_PRICE_SOURCE`.
 
-**Adding datasets:** Reusable ingest checklist (grain, schema, cursor, correction/repair, tests): [DATASET_INGESTION_STEPS.md](DATASET_INGESTION_STEPS.md).
+**Adding datasets:** Reusable ingest checklist (grain, schema, cursor, correction/repair, tests): [DATASET_INGESTION_STEPS.md](market_data/DATASET_INGESTION_STEPS.md).
 
 ## 0. Implementation priority (defer §9.7–9.8)
 
@@ -25,7 +25,7 @@
 
 | Item | Choice |
 |------|--------|
-| **Venue (v1)** | **Binance** public REST + WebSocket (spot and/or USDT-M futures—pick one product line per deployment; document which). Testnet vs mainnet via existing URL/env patterns; see [docs/BINANCE_API_RULES.md](BINANCE_API_RULES.md) for limits and connection behavior. |
+| **Venue (v1)** | **Binance** public REST + WebSocket (spot and/or USDT-M futures—pick one product line per deployment; document which). Testnet vs mainnet via existing URL/env patterns; see [docs/oms/BINANCE_API_RULES.md](oms/BINANCE_API_RULES.md) for limits and connection behavior. |
 | **Postgres role** | **Durable history:** **`ohlcv`** table (required for Phase 4 acceptance); optional **trades** or **agg_trades** table if strategies need tick granularity later. |
 | **Redis role** | **(Deferred — §0.)** Planned: low-latency hot state per §5. **Until then:** no required `market:*` keys from `market_data`; optional use of Redis only if you add an unrelated cache. |
 | **Process model** | **Now:** **scheduled REST** jobs (**§9.5**) → Postgres `ohlcv`. **Deferred:** WebSocket + Redis market keys (**§9.8**, **§9.7**). |
@@ -125,7 +125,7 @@ Document in code (e.g. `market_data/redis_keys.py`) and in this section. **Names
 | **Parallelism** | **Different providers** (different hosts/keys) may run **in parallel** (separate tasks). **Same provider:** jobs **take turns** through the shared limiter—do not run unbounded parallel REST per symbol. |
 | **Deferred (§0)** | **WebSocket** runners are optional later; same provider module can expose WS hooks while REST+scheduler stay the **first** tranche. |
 
-**Reference:** Ingest checklist for new tables/jobs — [DATASET_INGESTION_STEPS.md](DATASET_INGESTION_STEPS.md).
+**Reference:** Ingest checklist for new tables/jobs — [DATASET_INGESTION_STEPS.md](market_data/DATASET_INGESTION_STEPS.md).
 
 ### 6.1 Layout (suggested)
 
@@ -146,7 +146,7 @@ market_data/
   schemas.py         # optional Pydantic for ohlcv/ticker payloads
 ```
 
-Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoints added later—**public** endpoints may not need signing; still respect [BINANCE_API_RULES.md](BINANCE_API_RULES.md)).
+Reuse patterns from OMS where sensible (HTTP session, time sync if signed endpoints added later—**public** endpoints may not need signing; still respect [BINANCE_API_RULES.md](oms/BINANCE_API_RULES.md)).
 
 ### 6.2 REST (historical / gap fill)
 

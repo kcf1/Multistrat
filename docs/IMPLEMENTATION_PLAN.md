@@ -92,7 +92,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 - **Spot vs Futures:** Decide one first (e.g. futures for margin/leverage). Implement order types used (market, limit, reduce-only if futures).
 - **Auth:** Use API key + secret; sign REST requests; support testnet and production base URLs.
-- **Time sync:** Binance rejects requests if timestamp is outside server-time window (-1021). The API client syncs via GET `/api/v3/time` and applies offset to all signed requests (REST and ws-api subscribe); on sync fetch failure the last good offset is preserved. See `docs/BINANCE_API_RULES.md` §6 for ws-api connection issues.
+- **Time sync:** Binance rejects requests if timestamp is outside server-time window (-1021). The API client syncs via GET `/api/v3/time` and applies offset to all signed requests (REST and ws-api subscribe); on sync fetch failure the last good offset is preserved. See `docs/oms/BINANCE_API_RULES.md` §6 for ws-api connection issues.
 - **Fills:** Prefer websocket for fills (e.g. user data stream via WebSocket API or listenKey) to reduce latency; fallback to REST poll. Fills listener uses same time sync for subscribe message.
 - **Ids:** Map Binance `clientOrderId` / `orderId` to internal order id in Redis (and Postgres via sync) for idempotency and reconciliation.
 
@@ -148,7 +148,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 **Implementation order:** [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) **§9** — **§9.1–9.6** REST tranche (schema → parser → provider + rate limit → storage → jobs → runner/Docker); **§9.7–9.8** Redis + WebSocket deferred (**§0**).
 
-**Ingest checklist (any new dataset):** [docs/DATASET_INGESTION_STEPS.md](DATASET_INGESTION_STEPS.md).
+**Ingest checklist (any new dataset):** [DATASET_INGESTION_STEPS.md](market_data/DATASET_INGESTION_STEPS.md).
 
 ### Dependencies
 

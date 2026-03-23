@@ -41,7 +41,7 @@ set RUN_BINANCE_TESTNET=1
 pytest oms/brokers/binance/tests/test_testnet.py -v
 ```
 
-Set `RUN_BINANCE_TESTNET=1` and `BINANCE_API_KEY` / `BINANCE_API_SECRET` (and optionally `BINANCE_BASE_URL`). If `python-dotenv` is installed, variables are loaded from the repo root `.env`. Fill listener uses WebSocket API (ws-api) by default; if ws-api does not connect on testnet, see `docs/BINANCE_API_RULES.md` §6 (timestamp sync, network, testnet availability).
+Set `RUN_BINANCE_TESTNET=1` and `BINANCE_API_KEY` / `BINANCE_API_SECRET` (and optionally `BINANCE_BASE_URL`). If `python-dotenv` is installed, variables are loaded from the repo root `.env`. Fill listener uses WebSocket API (ws-api) by default; if ws-api does not connect on testnet, see `docs/oms/BINANCE_API_RULES.md` §6 (timestamp sync, network, testnet availability).
 
 ## Redis Stream Schemas (task 12.1.5)
 

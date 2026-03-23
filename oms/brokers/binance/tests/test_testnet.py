@@ -11,7 +11,7 @@ Or load from .env (copy .env.example to .env and fill BINANCE_*).
 
 Important: Use keys from Binance *testnet* (https://testnet.binance.vision →
 API Management). Mainnet keys will get "API-key format invalid" (-2014).
-See docs/BINANCE_API_RULES.md for testnet/mainnet, signature, and filter rules.
+See docs/oms/BINANCE_API_RULES.md for testnet/mainnet, signature, and filter rules.
 
 What the tests do (no mocks):
 - test_user_data_stream_*: create listen key, keepalive, close (no order).
@@ -21,7 +21,7 @@ What the tests do (no mocks):
 - test_account_listener_*: connect account listener WebSocket, place market order, receive outboundAccountPosition events.
 
 Note: balanceUpdate events (from deposits/withdrawals) cannot be easily triggered on testnet.
-These events should be tested on production. See docs/BINANCE_API_RULES.md §1.1 for details.
+These events should be tested on production. See docs/oms/BINANCE_API_RULES.md §1.1 for details.
 """
 
 import os

@@ -1,10 +1,10 @@
 # Standard steps for adding a new dataset (ingestion service)
 
-Reusable checklist when extending **market data** or any **ingest → Postgres** (and optionally Redis) pipeline. Aligns with [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) for OHLCV; the same pattern applies to other tables (e.g. trades, funding).
+Reusable checklist when extending **market data** or any **ingest → Postgres** (and optionally Redis) pipeline. Aligns with [PHASE4_DETAILED_PLAN.md](../PHASE4_DETAILED_PLAN.md) for OHLCV; the same pattern applies to other tables (e.g. trades, funding).
 
 ### How this fits the `market_data` process
 
-Implement a **supervisor / scheduler** that runs **job types** (ingest, correction, repair, QC). Each job calls **shared** storage (upsert, cursors); **venue-specific** code lives behind a **provider interface** (OMS-style broker adapters, but read-only). **Rate limits** apply **per API identity** (base URL + key): use **one limiter or queue per provider** so all datasets/jobs for that provider **share** the budget—**sequential** or **very low concurrency** by default; **different providers** may run in parallel. See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) **§6.0**.
+Implement a **supervisor / scheduler** that runs **job types** (ingest, correction, repair, QC). Each job calls **shared** storage (upsert, cursors); **venue-specific** code lives behind a **provider interface** (OMS-style broker adapters, but read-only). **Rate limits** apply **per API identity** (base URL + key): use **one limiter or queue per provider** so all datasets/jobs for that provider **share** the budget—**sequential** or **very low concurrency** by default; **different providers** may run in parallel. See [PHASE4_DETAILED_PLAN.md](../PHASE4_DETAILED_PLAN.md) **§6.0**.
 
 ---
 
@@ -104,7 +104,7 @@ Implement a **supervisor / scheduler** that runs **job types** (ingest, correcti
 
 ## Suggested build order
 
-Maps to [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) **§9** REST tranche (**§9.1–9.6**). Below, **§N** means **section N of this file** (the numbered headings).
+Maps to [PHASE4_DETAILED_PLAN.md](../PHASE4_DETAILED_PLAN.md) **§9** REST tranche (**§9.1–9.6**). Below, **§N** means **section N of this file** (the numbered headings).
 
 1. **§§2–3** — schema, config → PHASE4 **§9.1**
 2. **§§4–5** — internal model + API client → PHASE4 **§9.2** (parse) and **§9.3** (provider + rate limit)
@@ -118,5 +118,5 @@ Maps to [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) **§9** REST tranche 
 
 ## See also
 
-- [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) — §6.0 runner (providers + jobs + rate limits), `ohlcv`, REST, deferred Redis/WebSocket
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Postgres tables and Redis namespaces
+- [PHASE4_DETAILED_PLAN.md](../PHASE4_DETAILED_PLAN.md) — §6.0 runner (providers + jobs + rate limits), `ohlcv`, REST, deferred Redis/WebSocket
+- [ARCHITECTURE.md](../ARCHITECTURE.md) — Postgres tables and Redis namespaces
