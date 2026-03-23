@@ -170,6 +170,16 @@ def chunk_fetch_basis_forward(
     return out
 
 
+def filter_open_interest_in_ms_window(
+    points: list[OpenInterestPoint],
+    start_ms: int,
+    end_ms: int,
+) -> list[OpenInterestPoint]:
+    start_dt = datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
+    return [p for p in points if start_dt <= p.sample_time <= end_dt]
+
+
 def iter_open_interest_batches_forward(
     provider: OpenInterestProvider,
     symbol: str,
@@ -181,34 +191,48 @@ def iter_open_interest_batches_forward(
     chunk_limit: int = 500,
 ) -> Iterator[list[OpenInterestPoint]]:
     """
-    Yield each ``fetch_open_interest_hist`` page from ``start_ms`` toward ``end_ms``.
-    Stops when page empty or next ``startTime`` would be past ``end_ms``.
+    Yield each ``fetch_open_interest_hist`` page covering ``[start_ms, end_ms]``, **oldest
+    chunk first** (chronological ingest / cursor checkpoints).
 
-    Each page is expected **oldest → newest** after parsing (payload processing sorts by
-    ``sample_time``). The next request uses ``startTime`` after the **newest** point in the
-    page (``batch[-1]`` + one period).
+    Unlike ``/basis`` (klines-style paging), Binance ``openInterestHist`` with both
+    ``startTime`` and ``endTime`` returns the **latest** ``limit`` rows in that window, not
+    the earliest from ``startTime``. We therefore page **backward** by lowering ``endTime`` to
+    just before the current page's oldest timestamp, then :func:`reversed` the fetch stack
+    so callers still receive batches from oldest wall-clock segment to newest.
     """
     pd_ms = interval_to_millis(period)
-    cur = start_ms
+    lo = int(start_ms)
+    hi = int(end_ms)
+    if lo >= hi:
+        return
+
+    stack: list[list[OpenInterestPoint]] = []
+    cur_end = hi
     safety = 0
-    while cur < end_ms and safety < 100_000:
+    while cur_end > lo and safety < 100_000:
         safety += 1
         batch = provider.fetch_open_interest_hist(
             symbol,
             contract_type,
             period,
-            start_time_ms=cur,
-            end_time_ms=end_ms,
+            start_time_ms=lo,
+            end_time_ms=cur_end,
             limit=chunk_limit,
         )
         if not batch:
             break
-        batch = filter_open_interest_not_after_ms(batch, end_ms)
+        batch = filter_open_interest_in_ms_window(batch, lo, hi)
         if not batch:
             break
+        stack.append(batch)
+        first_ms = int(batch[0].sample_time.timestamp() * 1000)
+        next_end = first_ms - pd_ms
+        if next_end < lo:
+            break
+        cur_end = next_end
+
+    for batch in reversed(stack):
         yield batch
-        last = batch[-1]
-        cur = open_time_plus_interval_ms(last.sample_time, pd_ms)
 
 
 def filter_open_interest_not_after_ms(

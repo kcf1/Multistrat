@@ -535,19 +535,17 @@ def test_ingest_open_interest_series_commits_per_chunk() -> None:
     cur.__exit__ = MagicMock(return_value=False)
     conn.cursor.return_value = cur
 
-    p1 = [_open_interest_point(60_000), _open_interest_point(3_660_000)]
-    p2 = [_open_interest_point(7_260_000)]
+    # openInterestHist returns newest segment first; older page uses lower endTime.
+    p_tail = [_open_interest_point(7_260_000)]
+    p_head = [_open_interest_point(60_000), _open_interest_point(3_660_000)]
 
     class P:
-        def __init__(self) -> None:
-            self.n = 0
-
         def fetch_open_interest_hist(self, *args, **kwargs):
-            self.n += 1
-            if self.n == 1:
-                return p1
-            if self.n == 2:
-                return p2
+            end_time_ms = kwargs["end_time_ms"]
+            if end_time_ms == 10_000_000:
+                return p_tail
+            if end_time_ms == 3_660_000:
+                return p_head
             return []
 
     with (
