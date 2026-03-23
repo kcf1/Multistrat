@@ -14,6 +14,19 @@ def utc_now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def floor_align_ms_to_interval(ms: int, interval: str) -> int:
+    """
+    Floor ``ms`` to a multiple of the bar length for a Binance-style ``interval`` string.
+
+    Some Binance futures history endpoints reject ``startTime`` values that are not on the
+    series grid (e.g. ``openInterestHist`` with ``period=1h``).
+    """
+    iv_ms = interval_to_millis(interval)
+    if iv_ms <= 0:
+        return ms
+    return (ms // iv_ms) * iv_ms
+
+
 def expected_ohlcv_slots(start_ms: int, end_ms: int, iv_ms: int) -> int:
     """Approximate number of interval buckets in ``[start_ms, end_ms]`` (inclusive-style)."""
     if end_ms <= start_ms or iv_ms <= 0:

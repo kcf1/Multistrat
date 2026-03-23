@@ -128,6 +128,8 @@ def main() -> int:
         parser.error("--skip-existing requires --no-watermark")
     use_watermark = not args.no_watermark
     skip_existing = args.skip_existing
+    # Same horizon as ``ingest_open_interest_series(..., backfill_days=...)`` / config default.
+    backfill_days = OPEN_INTEREST_INITIAL_BACKFILL_DAYS
 
     os.chdir(_root)
     settings = load_settings()
@@ -136,7 +138,7 @@ def main() -> int:
         OPEN_INTEREST_SYMBOLS,
         OPEN_INTEREST_CONTRACT_TYPES,
         OPEN_INTEREST_PERIODS,
-        OPEN_INTEREST_INITIAL_BACKFILL_DAYS,
+        backfill_days,
         use_watermark,
         skip_existing,
     )
@@ -154,7 +156,7 @@ def main() -> int:
                         contract_type,
                         period,
                         end_ms=end_ms,
-                        backfill_days=OPEN_INTEREST_INITIAL_BACKFILL_DAYS,
+                        backfill_days=backfill_days,
                         use_watermark=use_watermark,
                     )
                     desc = f"{symbol} {contract_type} {period}"
@@ -166,6 +168,7 @@ def main() -> int:
                             contract_type,
                             period,
                             now_ms=end_ms,
+                            backfill_days=backfill_days,
                             use_watermark=use_watermark,
                             skip_existing_when_no_watermark=skip_existing,
                         )
@@ -191,6 +194,7 @@ def main() -> int:
                                 contract_type,
                                 period,
                                 now_ms=end_ms,
+                                backfill_days=backfill_days,
                                 chunk_progress=on_chunk,
                                 use_watermark=use_watermark,
                                 skip_existing_when_no_watermark=skip_existing,
@@ -209,7 +213,7 @@ def main() -> int:
         _log_summary(
             conn,
             end_ms=utc_now_ms(),
-            backfill_days=OPEN_INTEREST_INITIAL_BACKFILL_DAYS,
+            backfill_days=backfill_days,
             results=results,
         )
     finally:

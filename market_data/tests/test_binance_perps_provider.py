@@ -262,3 +262,35 @@ def test_fetch_open_interest_retries_after_invalid_payload_then_succeeds() -> No
         rows = prov.fetch_open_interest_hist("BTCUSDT", "PERPETUAL", "1h", start_time_ms=1)
     assert len(rows) == 1
     assert session.get.call_count == 2
+
+
+def test_open_interest_invalid_start_time_http_400_returns_empty() -> None:
+    """Invalid startTime is a client error: one GET, no retries, no follow-up probes."""
+    session = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.text = "{\"msg\":\"parameter 'startTime' is invalid.\",\"code\":-1130}"
+    session.get.return_value = resp
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        rate_limiter=ProviderRateLimiter(None),
+        open_interest_fetch_max_attempts=5,
+        open_interest_fetch_retry_base_sleep_sec=0.0,
+    )
+    with patch("market_data.providers.binance_perps.time.sleep") as sl:
+        rows = prov.fetch_open_interest_hist(
+            "TRUMPUSDT",
+            "PERPETUAL",
+            "1h",
+            start_time_ms=1,
+            end_time_ms=2_000_000,
+            limit=10,
+        )
+    sl.assert_not_called()
+    session.get.assert_called_once()
+    assert rows == []
+    assert len(prov.fetch_give_ups) == 1
+    assert "400" in prov.fetch_give_ups[0]
+    url = session.get.call_args[0][0]
+    assert "startTime=1" in url

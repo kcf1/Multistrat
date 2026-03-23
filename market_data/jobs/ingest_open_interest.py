@@ -19,6 +19,7 @@ from market_data.config import (
 )
 from market_data.intervals import interval_to_millis
 from market_data.jobs.common import (
+    floor_align_ms_to_interval,
     iter_open_interest_batches_forward,
     open_time_plus_interval_ms,
     utc_now_ms,
@@ -57,6 +58,7 @@ def resolve_open_interest_ingest_start_ms(
 ) -> int:
     pd_ms = interval_to_millis(period)
     horizon_ms = now_ms - backfill_days * 86_400_000
+    horizon_ms = floor_align_ms_to_interval(horizon_ms, period)
     if not use_watermark:
         return horizon_ms
     c = get_open_interest_cursor(conn, symbol, contract_type, period)
@@ -124,6 +126,7 @@ def _ingest_open_interest_skip_existing_gap_mode(
 ) -> IngestOpenInterestSeriesResult:
     pd_ms = interval_to_millis(period)
     horizon_ms = end_ms - backfill_days * 86_400_000
+    horizon_ms = floor_align_ms_to_interval(horizon_ms, period)
     if horizon_ms >= end_ms:
         give_msgs = tuple(getattr(provider, "fetch_give_ups", [])[give_before:])
         return IngestOpenInterestSeriesResult(symbol, contract_type, period, 0, 0, give_msgs)
@@ -262,6 +265,7 @@ def run_ingest_open_interest(
                             symbol,
                             contract_type,
                             period,
+                            backfill_days=OPEN_INTEREST_INITIAL_BACKFILL_DAYS,
                             use_watermark=use_watermark,
                             skip_existing_when_no_watermark=skip_existing_when_no_watermark,
                         )

@@ -18,7 +18,11 @@ from market_data.config import (
     MarketDataSettings,
 )
 from market_data.intervals import interval_to_millis
-from market_data.jobs.common import iter_open_interest_batches_forward, utc_now_ms
+from market_data.jobs.common import (
+    floor_align_ms_to_interval,
+    iter_open_interest_batches_forward,
+    utc_now_ms,
+)
 from market_data.providers.base import OpenInterestProvider
 from market_data.providers.binance_perps import build_binance_perps_provider
 from market_data.storage import upsert_open_interest_points
@@ -159,8 +163,6 @@ def run_repair_open_interest_gaps_policy_window_all_series(
     days = OPEN_INTEREST_INITIAL_BACKFILL_DAYS if backfill_days is None else backfill_days
     gm = OHLCV_SKIP_EXISTING_GAP_MULTIPLE if gap_multiple is None else gap_multiple
     end_ms = utc_now_ms()
-    start_ms = end_ms - days * 86_400_000
-    range_start = datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc)
     range_end = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
 
     prov = provider if provider is not None else build_binance_perps_provider(settings)
@@ -170,6 +172,9 @@ def run_repair_open_interest_gaps_policy_window_all_series(
         for symbol in OPEN_INTEREST_SYMBOLS:
             for contract_type in OPEN_INTEREST_CONTRACT_TYPES:
                 for period in OPEN_INTEREST_PERIODS:
+                    start_ms = end_ms - days * 86_400_000
+                    start_ms = floor_align_ms_to_interval(start_ms, period)
+                    range_start = datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc)
                     gaps = detect_open_interest_time_gaps(
                         conn,
                         symbol,

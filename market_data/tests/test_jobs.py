@@ -511,7 +511,9 @@ def test_resolve_open_interest_ingest_start_backfill_when_empty() -> None:
             now_ms=now_ms,
             backfill_days=7,
         )
-    assert start == now_ms - 7 * 86_400_000
+    raw_horizon = now_ms - 7 * 86_400_000
+    pd_ms = 3_600_000
+    assert start == (raw_horizon // pd_ms) * pd_ms
 
 
 def test_ingest_open_interest_series_commits_per_chunk() -> None:
