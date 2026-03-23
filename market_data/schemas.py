@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, List, Union
+from typing import Any, List, Mapping, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -143,3 +143,109 @@ def parse_binance_klines(
 ) -> list[OhlcvBar]:
     """Parse a list of kline arrays (e.g. full API response)."""
     return [parse_binance_kline(r, symbol=symbol, interval=interval) for r in rows]
+
+
+class BasisPoint(BaseModel):
+    """One persisted basis row (matches ``basis_rate`` table, excluding ingested_at)."""
+
+    model_config = {"frozen": True}
+
+    pair: str = Field(..., min_length=1)
+    contract_type: str = Field(..., min_length=1)
+    period: str = Field(..., min_length=1)
+    sample_time: datetime
+    basis: Decimal
+    basis_rate: Decimal
+    annualized_basis_rate: Decimal
+    futures_price: Decimal
+    index_price: Decimal
+
+    @field_validator("pair")
+    @classmethod
+    def upper_pair(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("contract_type")
+    @classmethod
+    def normalize_contract_type(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("period")
+    @classmethod
+    def strip_period(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def basis_sanity(self) -> BasisPoint:
+        if self.futures_price <= 0:
+            raise ValueError("futures_price must be > 0")
+        if self.index_price <= 0:
+            raise ValueError("index_price must be > 0")
+        return self
+
+
+def parse_binance_basis_row(
+    row: Mapping[str, Any],
+    *,
+    pair: str | None = None,
+    contract_type: str | None = None,
+    period: str | None = None,
+) -> BasisPoint:
+    """Parse one Binance `/futures/data/basis` object into ``BasisPoint``."""
+    if not isinstance(row, Mapping):
+        raise ValueError("Binance basis row must be an object")
+
+    def _get_required(key: str) -> Any:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(f"missing or empty basis field '{key}'")
+        return v
+
+    def _dec(key: str) -> Decimal:
+        try:
+            return Decimal(str(_get_required(key)))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {row.get(key)!r}") from e
+
+    ts_raw = _get_required("timestamp")
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid timestamp: {ts_raw!r}") from e
+
+    resolved_pair = (pair or str(_get_required("pair"))).strip().upper()
+    resolved_contract = (
+        contract_type or str(_get_required("contractType"))
+    ).strip().upper()
+    resolved_period = (period or str(_get_required("period"))).strip()
+
+    return BasisPoint(
+        pair=resolved_pair,
+        contract_type=resolved_contract,
+        period=resolved_period,
+        sample_time=_ms_to_utc_aware(ts_ms),
+        basis=_dec("basis"),
+        basis_rate=_dec("basisRate"),
+        annualized_basis_rate=_dec("annualizedBasisRate"),
+        futures_price=_dec("futuresPrice"),
+        index_price=_dec("indexPrice"),
+    )
+
+
+def parse_binance_basis_rows(
+    rows: list[Mapping[str, Any]],
+    *,
+    pair: str | None = None,
+    contract_type: str | None = None,
+    period: str | None = None,
+) -> list[BasisPoint]:
+    """Parse a list of basis objects (e.g. full API response)."""
+    return [
+        parse_binance_basis_row(
+            r,
+            pair=pair,
+            contract_type=contract_type,
+            period=period,
+        )
+        for r in rows
+    ]

@@ -8,6 +8,7 @@ import pytest
 
 from market_data.schemas import OhlcvBar, parse_binance_kline
 from market_data.validation import (
+    process_binance_basis_payload,
     process_binance_klines_payload,
     scan_bar_series_grid_gaps,
     theoretical_max_bars_in_window,
@@ -208,3 +209,70 @@ def test_scan_bar_series_grid_gaps_detects() -> None:
     ]
     g = scan_bar_series_grid_gaps(bars, "1m")
     assert g and "gap" in g[0].lower()
+
+
+def _basis_row(ts: int, *, pair: str = "BTCUSDT") -> dict:
+    return {
+        "indexPrice": "46317.16333333",
+        "contractType": "PERPETUAL",
+        "basisRate": "0.00295565",
+        "futuresPrice": "46454.22",
+        "annualizedBasisRate": "1.07731205",
+        "basis": "137.05666667",
+        "pair": pair,
+        "timestamp": ts,
+        "period": "1h",
+    }
+
+
+def test_process_basis_payload_rejects_non_list() -> None:
+    with pytest.raises(ValueError, match="JSON array"):
+        process_binance_basis_payload(
+            {},
+            pair="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_basis_payload_row_not_object() -> None:
+    with pytest.raises(ValueError, match=r"row\[0\]"):
+        process_binance_basis_payload(
+            [123],
+            pair="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_basis_payload_empty_ok() -> None:
+    out = process_binance_basis_payload(
+        [],
+        pair="BTCUSDT",
+        contract_type="PERPETUAL",
+        period="1h",
+    )
+    assert out == []
+
+
+def test_process_basis_payload_duplicate_sample_time() -> None:
+    r = _basis_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_basis_payload(
+            [r, r],
+            pair="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_basis_payload_non_monotonic() -> None:
+    a = _basis_row(1_640_995_200_000)
+    b = _basis_row(1_640_995_100_000)
+    with pytest.raises(ValueError, match="non-increasing"):
+        process_binance_basis_payload(
+            [a, b],
+            pair="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )

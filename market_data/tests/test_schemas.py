@@ -5,7 +5,14 @@ from decimal import Decimal
 
 import pytest
 
-from market_data.schemas import OhlcvBar, parse_binance_kline, parse_binance_klines
+from market_data.schemas import (
+    BasisPoint,
+    OhlcvBar,
+    parse_binance_basis_row,
+    parse_binance_basis_rows,
+    parse_binance_kline,
+    parse_binance_klines,
+)
 
 
 # Sample shape from Binance klines API (strings as returned by JSON).
@@ -67,3 +74,56 @@ def test_ohlcv_bar_frozen() -> None:
     bar = parse_binance_kline(list(_SAMPLE), symbol="BTCUSDT", interval="1m")
     with pytest.raises(ValidationError):
         bar.symbol = "OTHER"  # type: ignore[misc]
+
+
+_BASIS_SAMPLE = {
+    "indexPrice": "46317.16333333",
+    "contractType": "PERPETUAL",
+    "basisRate": "0.00295565",
+    "futuresPrice": "46454.22",
+    "annualizedBasisRate": "1.07731205",
+    "basis": "137.05666667",
+    "pair": "BTCUSDT",
+    "timestamp": 1640995200000,
+    "period": "1h",
+}
+
+
+def test_parse_binance_basis_row_full() -> None:
+    p = parse_binance_basis_row(_BASIS_SAMPLE)
+    assert p.pair == "BTCUSDT"
+    assert p.contract_type == "PERPETUAL"
+    assert p.period == "1h"
+    assert p.basis_rate == Decimal("0.00295565")
+    assert p.annualized_basis_rate == Decimal("1.07731205")
+    assert p.sample_time == datetime(2022, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_binance_basis_row_with_explicit_context() -> None:
+    row = dict(_BASIS_SAMPLE)
+    row["pair"] = "IGNORED"
+    row["contractType"] = "CURRENT_QUARTER"
+    row["period"] = "5m"
+    p = parse_binance_basis_row(
+        row,
+        pair="ethusdt",
+        contract_type="perpetual",
+        period="1h",
+    )
+    assert p.pair == "ETHUSDT"
+    assert p.contract_type == "PERPETUAL"
+    assert p.period == "1h"
+
+
+def test_parse_binance_basis_rows_multiple() -> None:
+    points = parse_binance_basis_rows([_BASIS_SAMPLE, _BASIS_SAMPLE])
+    assert len(points) == 2
+    assert all(isinstance(p, BasisPoint) for p in points)
+
+
+def test_basis_point_frozen() -> None:
+    from pydantic import ValidationError
+
+    p = parse_binance_basis_row(_BASIS_SAMPLE)
+    with pytest.raises(ValidationError):
+        p.period = "4h"  # type: ignore[misc]

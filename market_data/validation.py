@@ -23,7 +23,7 @@ from market_data.config import (
     OHLCV_KLINES_WARN_OPEN_TIME_GAP_BARS,
 )
 from market_data.intervals import interval_to_millis
-from market_data.schemas import OhlcvBar, parse_binance_kline
+from market_data.schemas import BasisPoint, OhlcvBar, parse_binance_basis_row, parse_binance_kline
 
 
 def theoretical_max_bars_in_window(
@@ -137,6 +137,54 @@ def process_binance_klines_payload(
             raise ValueError("klines span/coverage: " + "; ".join(fatal))
 
     return bars
+
+
+def process_binance_basis_payload(
+    raw: Any,
+    *,
+    pair: str,
+    contract_type: str,
+    period: str,
+) -> list[BasisPoint]:
+    """
+    Validate and parse Binance basis payload.
+
+    Returns empty list for empty payload. Raises ``ValueError`` on malformed rows,
+    non-increasing timestamps, or duplicate timestamps in the same batch.
+    """
+    if not isinstance(raw, list):
+        raise ValueError("Binance basis response must be a JSON array")
+
+    row_errors: list[str] = []
+    points: list[BasisPoint] = []
+    p = pair.strip().upper()
+    ct = contract_type.strip().upper()
+    pd = period.strip()
+    for i, row in enumerate(raw):
+        if not isinstance(row, dict):
+            row_errors.append(f"row[{i}] is not an object")
+            continue
+        try:
+            points.append(
+                parse_binance_basis_row(
+                    row,
+                    pair=p,
+                    contract_type=ct,
+                    period=pd,
+                )
+            )
+        except Exception as e:
+            row_errors.append(f"row[{i}]: {e}")
+
+    if row_errors:
+        head = "; ".join(row_errors[:15])
+        more = f" … (+{len(row_errors) - 15} more)" if len(row_errors) > 15 else ""
+        raise ValueError(f"basis row errors ({len(row_errors)}): {head}{more}")
+
+    issues = _basis_batch_integrity_issues(points)
+    if issues:
+        raise ValueError("basis batch integrity: " + "; ".join(issues))
+    return points
 
 
 def _interior_overlap_issues(bars: list[OhlcvBar], iv_ms: int) -> list[str]:
@@ -263,5 +311,23 @@ def _batch_integrity_issues(bars: list[OhlcvBar]) -> list[str]:
         if i > 0 and bars[i - 1].open_time >= ot:
             issues.append(
                 f"non-increasing open_time at index {i}: {bars[i - 1].open_time} then {ot}"
+            )
+    return issues
+
+
+def _basis_batch_integrity_issues(points: list[BasisPoint]) -> list[str]:
+    if len(points) <= 1:
+        return []
+    issues: list[str] = []
+    seen: set = set()
+    for i, p in enumerate(points):
+        st = p.sample_time
+        if st in seen:
+            issues.append(f"duplicate sample_time at index {i}: {st}")
+        seen.add(st)
+        if i > 0 and points[i - 1].sample_time >= st:
+            issues.append(
+                f"non-increasing sample_time at index {i}: "
+                f"{points[i - 1].sample_time} then {st}"
             )
     return issues
