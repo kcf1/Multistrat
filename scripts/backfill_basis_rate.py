@@ -76,15 +76,15 @@ def _log_summary(conn, *, end_ms: int, backfill_days: int, results: list) -> Non
     rows: list[dict[str, object]] = []
     for pair in BASIS_PAIRS:
         for ct in BASIS_CONTRACT_TYPES:
-            for pd in BASIS_PERIODS:
-                r = by_key[(pair, ct, pd)]
-                pd_ms = interval_to_millis(pd)
+            for period in BASIS_PERIODS:
+                r = by_key[(pair, ct, period)]
+                pd_ms = interval_to_millis(period)
                 exp_pol = expected_ohlcv_slots(horizon_ms, end_ms, pd_ms)
                 stored, oldest, _ = basis_window_stats(
                     conn,
                     pair,
                     ct,
-                    pd,
+                    period,
                     sample_time_ge=start_dt,
                     sample_time_le=end_dt,
                 )
@@ -93,7 +93,7 @@ def _log_summary(conn, *, end_ms: int, backfill_days: int, results: list) -> Non
                     {
                         "pair": pair,
                         "contract_type": ct,
-                        "period": pd,
+                        "period": period,
                         "stored": stored,
                         "exp_pol": exp_pol,
                         "pct_pol": round(pct_pol, 2),
@@ -146,25 +146,25 @@ def main() -> int:
     try:
         for pair in BASIS_PAIRS:
             for ct in BASIS_CONTRACT_TYPES:
-                for pd in BASIS_PERIODS:
+                for period in BASIS_PERIODS:
                     end_ms = utc_now_ms()
                     total_est = _expected_total(
                         conn,
                         pair,
                         ct,
-                        pd,
+                        period,
                         end_ms=end_ms,
                         backfill_days=BASIS_INITIAL_BACKFILL_DAYS,
                         use_watermark=use_watermark,
                     )
-                    desc = f"{pair} {ct} {pd}"
+                    desc = f"{pair} {ct} {period}"
                     if total_est <= 0:
                         r = ingest_basis_series(
                             conn,
                             prov,
                             pair,
                             ct,
-                            pd,
+                            period,
                             now_ms=end_ms,
                             use_watermark=use_watermark,
                             skip_existing_when_no_watermark=skip_existing,
@@ -189,7 +189,7 @@ def main() -> int:
                                 prov,
                                 pair,
                                 ct,
-                                pd,
+                                period,
                                 now_ms=end_ms,
                                 chunk_progress=on_chunk,
                                 use_watermark=use_watermark,
