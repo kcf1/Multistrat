@@ -156,7 +156,6 @@ class BasisPoint(BaseModel):
     sample_time: datetime
     basis: Decimal
     basis_rate: Decimal
-    annualized_basis_rate: Decimal
     futures_price: Decimal
     index_price: Decimal
 
@@ -226,7 +225,6 @@ def parse_binance_basis_row(
         sample_time=_ms_to_utc_aware(ts_ms),
         basis=_dec("basis"),
         basis_rate=_dec("basisRate"),
-        annualized_basis_rate=_dec("annualizedBasisRate"),
         futures_price=_dec("futuresPrice"),
         index_price=_dec("indexPrice"),
     )

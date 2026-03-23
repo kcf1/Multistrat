@@ -217,7 +217,6 @@ def _basis_row(ts: int, *, pair: str = "BTCUSDT") -> dict:
         "contractType": "PERPETUAL",
         "basisRate": "0.00295565",
         "futuresPrice": "46454.22",
-        "annualizedBasisRate": "1.07731205",
         "basis": "137.05666667",
         "pair": pair,
         "timestamp": ts,

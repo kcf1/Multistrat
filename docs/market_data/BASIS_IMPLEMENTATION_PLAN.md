@@ -37,7 +37,6 @@ Expected response fields (dataset payload):
 - `timestamp`
 - `basis`
 - `basisRate`
-- `annualizedBasisRate`
 - `futuresPrice`
 - `indexPrice`
 
@@ -95,7 +94,6 @@ Key constraints to encode in plan:
   - `sample_time` TIMESTAMPTZ
   - `basis` NUMERIC(28,12)
   - `basis_rate` NUMERIC(18,10)
-  - `annualized_basis_rate` NUMERIC(18,10)
   - `futures_price` NUMERIC(20,10)
   - `index_price` NUMERIC(20,10)
   - `ingested_at` TIMESTAMPTZ DEFAULT now()

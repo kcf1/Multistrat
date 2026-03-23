@@ -57,7 +57,6 @@ def _basis_point(sample_ms: int, *, pair: str = "BTCUSDT") -> BasisPoint:
         sample_time=st,
         basis=Decimal("100"),
         basis_rate=Decimal("0.001"),
-        annualized_basis_rate=Decimal("0.876"),
         futures_price=Decimal("50100"),
         index_price=Decimal("50000"),
     )
@@ -434,7 +433,7 @@ def test_detect_basis_time_gaps_interior() -> None:
 def test_log_basis_drifts_warns_on_mismatch() -> None:
     st = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
     row = _basis_point(int(st.timestamp() * 1000))
-    existing = {st: (Decimal("99"), Decimal("0.001"), Decimal("0.876"), Decimal("50100"), Decimal("50000"))}
+    existing = {st: (Decimal("99"), Decimal("0.001"), Decimal("50100"), Decimal("50000"))}
     with patch("market_data.jobs.correct_window_basis_rate.logger.warning") as w:
         n = _log_basis_drifts(existing, [row])
     assert n == 1

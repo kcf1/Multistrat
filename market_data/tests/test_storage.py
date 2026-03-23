@@ -65,7 +65,6 @@ def _basis_point(
         sample_time=st,
         basis=Decimal("100"),
         basis_rate=basis_rate,
-        annualized_basis_rate=Decimal("0.876"),
         futures_price=Decimal("50100"),
         index_price=Decimal("50000"),
     )
@@ -308,7 +307,6 @@ def test_fetch_basis_rates_by_sample_times_executes() -> None:
             st,
             Decimal("100"),
             Decimal("0.001"),
-            Decimal("0.876"),
             Decimal("50100"),
             Decimal("50000"),
         )

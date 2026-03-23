@@ -36,7 +36,7 @@ class CorrectBasisWindowResult:
 
 
 def _log_basis_drifts(
-    existing: Mapping[datetime, tuple[Decimal, Decimal, Decimal, Decimal, Decimal]],
+    existing: Mapping[datetime, tuple[Decimal, Decimal, Decimal, Decimal]],
     rows: list[BasisPoint],
 ) -> int:
     n = 0
@@ -47,7 +47,6 @@ def _log_basis_drifts(
         same = old == (
             r.basis,
             r.basis_rate,
-            r.annualized_basis_rate,
             r.futures_price,
             r.index_price,
         )
@@ -55,7 +54,7 @@ def _log_basis_drifts(
             n += 1
             logger.warning(
                 "market_data basis drift pair={} contract_type={} period={} sample_time={} "
-                "db=({}, {}, {}, {}, {}) api=({}, {}, {}, {}, {})",
+                "db=({}, {}, {}, {}) api=({}, {}, {}, {})",
                 r.pair,
                 r.contract_type,
                 r.period,
@@ -64,10 +63,8 @@ def _log_basis_drifts(
                 old[1],
                 old[2],
                 old[3],
-                old[4],
                 r.basis,
                 r.basis_rate,
-                r.annualized_basis_rate,
                 r.futures_price,
                 r.index_price,
             )

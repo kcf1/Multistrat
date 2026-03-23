@@ -41,12 +41,11 @@ ON CONFLICT (symbol, interval, open_time) DO UPDATE SET
 _BASIS_UPSERT_SQL = """
 INSERT INTO basis_rate (
     pair, contract_type, period, sample_time,
-    basis, basis_rate, annualized_basis_rate, futures_price, index_price
+    basis, basis_rate, futures_price, index_price
 ) VALUES %s
 ON CONFLICT (pair, contract_type, period, sample_time) DO UPDATE SET
     basis = EXCLUDED.basis,
     basis_rate = EXCLUDED.basis_rate,
-    annualized_basis_rate = EXCLUDED.annualized_basis_rate,
     futures_price = EXCLUDED.futures_price,
     index_price = EXCLUDED.index_price,
     ingested_at = now()
@@ -77,7 +76,6 @@ def _basis_row(p: BasisPoint) -> tuple[Any, ...]:
         p.sample_time,
         p.basis,
         p.basis_rate,
-        p.annualized_basis_rate,
         p.futures_price,
         p.index_price,
     )
@@ -117,7 +115,7 @@ def upsert_basis_points(conn: PsycopgConnection, points: Sequence[BasisPoint]) -
             cur,
             _BASIS_UPSERT_SQL,
             rows,
-            template="(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            template="(%s, %s, %s, %s, %s, %s, %s, %s)",
             page_size=min(500, len(rows)),
         )
     return len(rows)
@@ -348,9 +346,9 @@ def fetch_basis_rates_by_sample_times(
     contract_type: str,
     period: str,
     sample_times: Sequence[datetime],
-) -> Mapping[datetime, tuple[Decimal, Decimal, Decimal, Decimal, Decimal]]:
+) -> Mapping[datetime, tuple[Decimal, Decimal, Decimal, Decimal]]:
     """
-    Return ``sample_time -> (basis, basis_rate, annualized_basis_rate, futures_price, index_price)``
+    Return ``sample_time -> (basis, basis_rate, futures_price, index_price)``
     for rows that exist. Missing keys are omitted.
     """
     if not sample_times:
@@ -361,19 +359,18 @@ def fetch_basis_rates_by_sample_times(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT sample_time, basis, basis_rate, annualized_basis_rate, futures_price, index_price
+            SELECT sample_time, basis, basis_rate, futures_price, index_price
             FROM basis_rate
             WHERE pair = %s AND contract_type = %s AND period = %s AND sample_time = ANY(%s)
             """,
             (p, ct, pd, list(sample_times)),
         )
         rows = cur.fetchall()
-    out: dict[datetime, tuple[Decimal, Decimal, Decimal, Decimal, Decimal]] = {}
-    for sample_time, basis, basis_rate, annualized_basis_rate, futures_price, index_price in rows:
+    out: dict[datetime, tuple[Decimal, Decimal, Decimal, Decimal]] = {}
+    for sample_time, basis, basis_rate, futures_price, index_price in rows:
         out[sample_time] = (
             basis,
             basis_rate,
-            annualized_basis_rate,
             futures_price,
             index_price,
         )

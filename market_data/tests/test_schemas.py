@@ -81,7 +81,6 @@ _BASIS_SAMPLE = {
     "contractType": "PERPETUAL",
     "basisRate": "0.00295565",
     "futuresPrice": "46454.22",
-    "annualizedBasisRate": "1.07731205",
     "basis": "137.05666667",
     "pair": "BTCUSDT",
     "timestamp": 1640995200000,
@@ -95,7 +94,6 @@ def test_parse_binance_basis_row_full() -> None:
     assert p.contract_type == "PERPETUAL"
     assert p.period == "1h"
     assert p.basis_rate == Decimal("0.00295565")
-    assert p.annualized_basis_rate == Decimal("1.07731205")
     assert p.sample_time == datetime(2022, 1, 1, 0, 0, tzinfo=timezone.utc)
 
 
