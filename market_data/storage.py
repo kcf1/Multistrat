@@ -19,7 +19,7 @@ from typing import Any, Mapping, Sequence
 from psycopg2.extensions import connection as PsycopgConnection
 from psycopg2.extras import execute_values
 
-from market_data.schemas import BasisPoint, OhlcvBar
+from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint
 
 _OHLCV_UPSERT_SQL = """
 INSERT INTO ohlcv (
@@ -51,6 +51,18 @@ ON CONFLICT (pair, contract_type, period, sample_time) DO UPDATE SET
     ingested_at = now()
 """
 
+_OPEN_INTEREST_UPSERT_SQL = """
+INSERT INTO open_interest (
+    symbol, contract_type, period, sample_time,
+    sum_open_interest, sum_open_interest_value, cmc_circulating_supply
+) VALUES %s
+ON CONFLICT (symbol, contract_type, period, sample_time) DO UPDATE SET
+    sum_open_interest = EXCLUDED.sum_open_interest,
+    sum_open_interest_value = EXCLUDED.sum_open_interest_value,
+    cmc_circulating_supply = EXCLUDED.cmc_circulating_supply,
+    ingested_at = now()
+"""
+
 
 def _bar_row(b: OhlcvBar) -> tuple[Any, ...]:
     return (
@@ -78,6 +90,18 @@ def _basis_row(p: BasisPoint) -> tuple[Any, ...]:
         p.basis_rate,
         p.futures_price,
         p.index_price,
+    )
+
+
+def _open_interest_row(p: OpenInterestPoint) -> tuple[Any, ...]:
+    return (
+        p.symbol,
+        p.contract_type,
+        p.period,
+        p.sample_time,
+        p.sum_open_interest,
+        p.sum_open_interest_value,
+        p.cmc_circulating_supply,
     )
 
 
@@ -116,6 +140,29 @@ def upsert_basis_points(conn: PsycopgConnection, points: Sequence[BasisPoint]) -
             _BASIS_UPSERT_SQL,
             rows,
             template="(%s, %s, %s, %s, %s, %s, %s, %s)",
+            page_size=min(500, len(rows)),
+        )
+    return len(rows)
+
+
+def upsert_open_interest_points(
+    conn: PsycopgConnection,
+    points: Sequence[OpenInterestPoint],
+) -> int:
+    """
+    Bulk upsert open-interest rows. Does not commit.
+
+    Returns the number of rows passed.
+    """
+    if not points:
+        return 0
+    rows = [_open_interest_row(p) for p in points]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            _OPEN_INTEREST_UPSERT_SQL,
+            rows,
+            template="(%s, %s, %s, %s, %s, %s, %s)",
             page_size=min(500, len(rows)),
         )
     return len(rows)
@@ -240,6 +287,30 @@ def max_sample_time_basis(
     return row[0]
 
 
+def max_sample_time_open_interest(
+    conn: PsycopgConnection,
+    symbol: str,
+    contract_type: str,
+    period: str,
+) -> datetime | None:
+    """Latest ``sample_time`` in ``open_interest`` for the series, or ``None`` if empty."""
+    sym = symbol.strip().upper()
+    ct = contract_type.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT MAX(sample_time) FROM open_interest
+            WHERE symbol = %s AND contract_type = %s AND period = %s
+            """,
+            (sym, ct, pd),
+        )
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    return row[0]
+
+
 def get_ingestion_cursor(conn: PsycopgConnection, symbol: str, interval: str) -> datetime | None:
     """Return stored ``last_open_time`` for the series, or ``None`` if no row."""
     sym = symbol.strip().upper()
@@ -275,6 +346,30 @@ def get_basis_cursor(
             WHERE pair = %s AND contract_type = %s AND period = %s
             """,
             (p, ct, pd),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return row[0]
+
+
+def get_open_interest_cursor(
+    conn: PsycopgConnection,
+    symbol: str,
+    contract_type: str,
+    period: str,
+) -> datetime | None:
+    """Return stored ``last_sample_time`` for open-interest series, or ``None`` if no row."""
+    sym = symbol.strip().upper()
+    ct = contract_type.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT last_sample_time FROM open_interest_cursor
+            WHERE symbol = %s AND contract_type = %s AND period = %s
+            """,
+            (sym, ct, pd),
         )
         row = cur.fetchone()
     if not row:
@@ -337,6 +432,38 @@ def upsert_basis_cursor(
                 updated_at = now()
             """,
             (p, ct, pd, last_sample_time.astimezone(timezone.utc)),
+        )
+
+
+def upsert_open_interest_cursor(
+    conn: PsycopgConnection,
+    symbol: str,
+    contract_type: str,
+    period: str,
+    last_sample_time: datetime,
+) -> None:
+    """
+    Set or update open-interest ingestion high-water mark. Does not commit.
+
+    ``last_sample_time`` must be timezone-aware (UTC recommended).
+    """
+    if last_sample_time.tzinfo is None:
+        raise ValueError("last_sample_time must be timezone-aware")
+    sym = symbol.strip().upper()
+    ct = contract_type.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO open_interest_cursor (
+                symbol, contract_type, period, last_sample_time, updated_at
+            )
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (symbol, contract_type, period) DO UPDATE SET
+                last_sample_time = EXCLUDED.last_sample_time,
+                updated_at = now()
+            """,
+            (sym, ct, pd, last_sample_time.astimezone(timezone.utc)),
         )
 
 
@@ -406,6 +533,75 @@ def basis_window_stats(
               AND sample_time >= %s AND sample_time <= %s
             """,
             (p, ct, pd, lo, hi),
+        )
+        row = cur.fetchone()
+    if not row:
+        return 0, None, None
+    n = int(row[0]) if row[0] is not None else 0
+    return n, row[1], row[2]
+
+
+def fetch_open_interest_by_sample_times(
+    conn: PsycopgConnection,
+    symbol: str,
+    contract_type: str,
+    period: str,
+    sample_times: Sequence[datetime],
+) -> Mapping[datetime, tuple[Decimal, Decimal, Decimal | None]]:
+    """
+    Return ``sample_time -> (sum_open_interest, sum_open_interest_value, cmc_circulating_supply)``
+    for rows that exist. Missing keys are omitted.
+    """
+    if not sample_times:
+        return {}
+    sym = symbol.strip().upper()
+    ct = contract_type.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sample_time, sum_open_interest, sum_open_interest_value, cmc_circulating_supply
+            FROM open_interest
+            WHERE symbol = %s AND contract_type = %s AND period = %s AND sample_time = ANY(%s)
+            """,
+            (sym, ct, pd, list(sample_times)),
+        )
+        rows = cur.fetchall()
+    out: dict[datetime, tuple[Decimal, Decimal, Decimal | None]] = {}
+    for sample_time, oi, oi_value, supply in rows:
+        out[sample_time] = (oi, oi_value, supply)
+    return out
+
+
+def open_interest_window_stats(
+    conn: PsycopgConnection,
+    symbol: str,
+    contract_type: str,
+    period: str,
+    *,
+    sample_time_ge: datetime,
+    sample_time_le: datetime,
+) -> tuple[int, datetime | None, datetime | None]:
+    """
+    Return ``(row_count, min_sample_time, max_sample_time)`` for open-interest rows in window.
+
+    ``min`` / ``max`` are ``None`` when the count is zero.
+    """
+    sym = symbol.strip().upper()
+    ct = contract_type.strip().upper()
+    pd = period.strip()
+    if sample_time_ge.tzinfo is None or sample_time_le.tzinfo is None:
+        raise ValueError("sample_time bounds must be timezone-aware")
+    lo = sample_time_ge.astimezone(timezone.utc)
+    hi = sample_time_le.astimezone(timezone.utc)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*), MIN(sample_time), MAX(sample_time) FROM open_interest
+            WHERE symbol = %s AND contract_type = %s AND period = %s
+              AND sample_time >= %s AND sample_time <= %s
+            """,
+            (sym, ct, pd, lo, hi),
         )
         row = cur.fetchone()
     if not row:

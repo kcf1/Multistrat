@@ -218,7 +218,7 @@ Key constraints to encode in plan:
 - [x] Add/confirm perps base URL setting and docs.
 - [x] Add `OpenInterestPoint` model + parser + tests.
 - [x] Add/extend perps provider with `fetch_open_interest_hist`.
-- [ ] Add open-interest upsert + cursor helpers + tests.
+- [x] Add open-interest upsert + cursor helpers + tests.
 - [ ] Implement `ingest_open_interest`.
 - [ ] Implement `correct_window_open_interest`.
 - [ ] Implement `repair_gap_open_interest`.
