@@ -6,8 +6,8 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 from market_data.intervals import interval_to_millis
-from market_data.providers.base import BasisProvider, KlinesProvider
-from market_data.schemas import BasisPoint, OhlcvBar
+from market_data.providers.base import BasisProvider, KlinesProvider, OpenInterestProvider
+from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint
 
 
 def utc_now_ms() -> int:
@@ -147,6 +147,76 @@ def chunk_fetch_basis_forward(
     for batch in iter_basis_batches_forward(
         provider,
         pair,
+        contract_type,
+        period,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        chunk_limit=chunk_limit,
+    ):
+        out.extend(batch)
+    return out
+
+
+def iter_open_interest_batches_forward(
+    provider: OpenInterestProvider,
+    symbol: str,
+    contract_type: str,
+    period: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    chunk_limit: int = 500,
+) -> Iterator[list[OpenInterestPoint]]:
+    """
+    Yield each ``fetch_open_interest_hist`` page from ``start_ms`` toward ``end_ms``.
+    Stops when page empty or next ``startTime`` would be past ``end_ms``.
+    """
+    pd_ms = interval_to_millis(period)
+    cur = start_ms
+    safety = 0
+    while cur < end_ms and safety < 100_000:
+        safety += 1
+        batch = provider.fetch_open_interest_hist(
+            symbol,
+            contract_type,
+            period,
+            start_time_ms=cur,
+            end_time_ms=end_ms,
+            limit=chunk_limit,
+        )
+        if not batch:
+            break
+        batch = filter_open_interest_not_after_ms(batch, end_ms)
+        if not batch:
+            break
+        yield batch
+        last = batch[-1]
+        cur = open_time_plus_interval_ms(last.sample_time, pd_ms)
+
+
+def filter_open_interest_not_after_ms(
+    points: list[OpenInterestPoint],
+    end_ms: int,
+) -> list[OpenInterestPoint]:
+    end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
+    return [p for p in points if p.sample_time <= end_dt]
+
+
+def chunk_fetch_open_interest_forward(
+    provider: OpenInterestProvider,
+    symbol: str,
+    contract_type: str,
+    period: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    chunk_limit: int = 500,
+) -> list[OpenInterestPoint]:
+    """Concatenate all batches from :func:`iter_open_interest_batches_forward`."""
+    out: list[OpenInterestPoint] = []
+    for batch in iter_open_interest_batches_forward(
+        provider,
+        symbol,
         contract_type,
         period,
         start_ms=start_ms,

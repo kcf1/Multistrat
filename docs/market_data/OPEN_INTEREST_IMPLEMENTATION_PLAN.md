@@ -219,11 +219,11 @@ Key constraints to encode in plan:
 - [x] Add `OpenInterestPoint` model + parser + tests.
 - [x] Add/extend perps provider with `fetch_open_interest_hist`.
 - [x] Add open-interest upsert + cursor helpers + tests.
-- [ ] Implement `ingest_open_interest`.
-- [ ] Implement `correct_window_open_interest`.
-- [ ] Implement `repair_gap_open_interest`.
+- [x] Implement `ingest_open_interest`.
+- [x] Implement `correct_window_open_interest`.
+- [x] Implement `repair_gap_open_interest`.
 - [ ] Wire open-interest jobs into `market_data/main.py`.
-- [ ] Add one-shot/backfill CLI for open interest.
+- [x] Add one-shot/backfill CLI for open interest.
 - [ ] Update README and dataset docs.
 - [ ] Add unit/job/integration coverage.
 

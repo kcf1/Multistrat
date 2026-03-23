@@ -18,14 +18,23 @@ from market_data.jobs.correct_window_basis_rate import (
     _log_basis_drifts,
     run_correct_window_basis_series,
 )
+from market_data.jobs.correct_window_open_interest import (
+    _log_open_interest_drifts,
+    run_correct_window_open_interest_series,
+)
 from market_data.jobs.ingest_basis_rate import ingest_basis_series
+from market_data.jobs.ingest_open_interest import ingest_open_interest_series
 from market_data.jobs.ingest_ohlcv import ingest_ohlcv_series
+from market_data.jobs.repair_gap_open_interest import (
+    detect_open_interest_time_gaps,
+    run_repair_open_interest_gap,
+)
 from market_data.jobs.repair_gap_basis_rate import (
     detect_basis_time_gaps,
     run_repair_basis_gap,
 )
 from market_data.jobs.repair_gap import detect_ohlcv_time_gaps, run_repair_gap
-from market_data.schemas import BasisPoint, OhlcvBar
+from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint
 
 
 def _bar(
@@ -59,6 +68,19 @@ def _basis_point(sample_ms: int, *, pair: str = "BTCUSDT") -> BasisPoint:
         basis_rate=Decimal("0.001"),
         futures_price=Decimal("50100"),
         index_price=Decimal("50000"),
+    )
+
+
+def _open_interest_point(sample_ms: int, *, symbol: str = "BTCUSDT") -> OpenInterestPoint:
+    st = datetime.fromtimestamp(sample_ms / 1000.0, tz=timezone.utc)
+    return OpenInterestPoint(
+        symbol=symbol,
+        contract_type="PERPETUAL",
+        period="1h",
+        sample_time=st,
+        sum_open_interest=Decimal("12345.6789"),
+        sum_open_interest_value=Decimal("987654321.123456"),
+        cmc_circulating_supply=Decimal("19500000.0"),
     )
 
 
@@ -458,6 +480,148 @@ def test_run_correct_window_basis_series_upserts() -> None:
         patch("market_data.jobs.correct_window_basis_rate.upsert_basis_points") as up,
     ):
         r = run_correct_window_basis_series(
+            conn,
+            P(),
+            "BTCUSDT",
+            "PERPETUAL",
+            "1h",
+            lookback_points=10,
+            now_ms=1_700_000_060_000,
+        )
+    assert r.rows_fetched == 1
+    assert r.drift_rows == 0
+    up.assert_called_once_with(conn, rows)
+    conn.commit.assert_called_once()
+
+
+def test_resolve_open_interest_ingest_start_backfill_when_empty() -> None:
+    conn = MagicMock()
+    now_ms = 1_000_000_000_000
+    with (
+        patch("market_data.jobs.ingest_open_interest.get_open_interest_cursor", return_value=None),
+        patch("market_data.jobs.ingest_open_interest.max_sample_time_open_interest", return_value=None),
+    ):
+        from market_data.jobs.ingest_open_interest import resolve_open_interest_ingest_start_ms
+
+        start = resolve_open_interest_ingest_start_ms(
+            conn,
+            "BTCUSDT",
+            "PERPETUAL",
+            "1h",
+            now_ms=now_ms,
+            backfill_days=7,
+        )
+    assert start == now_ms - 7 * 86_400_000
+
+
+def test_ingest_open_interest_series_commits_per_chunk() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+
+    p1 = [_open_interest_point(60_000), _open_interest_point(3_660_000)]
+    p2 = [_open_interest_point(7_260_000)]
+
+    class P:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def fetch_open_interest_hist(self, *args, **kwargs):
+            self.n += 1
+            if self.n == 1:
+                return p1
+            if self.n == 2:
+                return p2
+            return []
+
+    with (
+        patch(
+            "market_data.jobs.ingest_open_interest.resolve_open_interest_ingest_start_ms",
+            return_value=60_000,
+        ),
+        patch("market_data.jobs.ingest_open_interest.upsert_open_interest_points") as up,
+        patch("market_data.jobs.ingest_open_interest.upsert_open_interest_cursor") as uc,
+    ):
+        r = ingest_open_interest_series(
+            conn,
+            P(),
+            "BTCUSDT",
+            "PERPETUAL",
+            "1h",
+            now_ms=10_000_000,
+            chunk_limit=500,
+        )
+    assert r.rows_upserted == 3
+    assert r.chunks == 2
+    assert up.call_count == 2
+    assert uc.call_count == 2
+    assert conn.commit.call_count == 2
+
+
+def test_run_repair_open_interest_gap_noop_on_bad_range() -> None:
+    conn = MagicMock()
+    p = MagicMock()
+    assert (
+        run_repair_open_interest_gap(
+            conn,
+            p,
+            "BTCUSDT",
+            "PERPETUAL",
+            "1h",
+            start_time_ms=500,
+            end_time_ms=500,
+        )
+        == 0
+    )
+    p.fetch_open_interest_hist.assert_not_called()
+
+
+def test_detect_open_interest_time_gaps_interior() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t1 = datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc)
+    t3 = datetime(2024, 1, 1, 3, 0, tzinfo=timezone.utc)
+    cur.fetchall.return_value = [(t0,), (t1,), (t3,)]
+    conn.cursor.return_value = cur
+    rs = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    re_ = datetime(2024, 1, 1, 6, 0, tzinfo=timezone.utc)
+    gaps = detect_open_interest_time_gaps(conn, "BTCUSDT", "PERPETUAL", "1h", rs, re_)
+    assert any(g[0].hour == 2 or g[1].hour == 2 for g in gaps)
+
+
+def test_log_open_interest_drifts_warns_on_mismatch() -> None:
+    st = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    row = _open_interest_point(int(st.timestamp() * 1000))
+    existing = {st: (Decimal("1"), Decimal("2"), Decimal("3"))}
+    with patch("market_data.jobs.correct_window_open_interest.logger.warning") as w:
+        n = _log_open_interest_drifts(existing, [row])
+    assert n == 1
+    assert w.called
+
+
+def test_run_correct_window_open_interest_series_upserts() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    rows = [_open_interest_point(1_700_000_000_000)]
+
+    class P:
+        def fetch_open_interest_hist(self, *a, **k):
+            return rows
+
+    with (
+        patch("market_data.jobs.correct_window_open_interest.chunk_fetch_open_interest_forward", return_value=rows),
+        patch("market_data.jobs.correct_window_open_interest.fetch_open_interest_by_sample_times", return_value={}),
+        patch("market_data.jobs.correct_window_open_interest.upsert_open_interest_points") as up,
+    ):
+        r = run_correct_window_open_interest_series(
             conn,
             P(),
             "BTCUSDT",
