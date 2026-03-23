@@ -9,6 +9,9 @@ Runs until SIGINT/SIGTERM (Docker stop) or forever:
 - **ingest_basis_rate** — catch-up from basis cursor / ``max(sample_time)``.
 - **correct_window_basis_rate** — rolling basis drift check.
 - **repair_gap_basis_rate** — policy-window basis detect+refetch (**0 = off**).
+- **ingest_open_interest** — catch-up from open-interest cursor / ``max(sample_time)``.
+- **correct_window_open_interest** — rolling open-interest drift check.
+- **repair_gap_open_interest** — policy-window open-interest detect+refetch (**0 = off**).
 
 Each job **runs once immediately** on startup, then its **next** runs fall on **UTC-aligned** period
 boundaries (Unix epoch): e.g. default ingest every **300 s** then fires at **:00, :05, :10, … UTC**.
@@ -41,13 +44,21 @@ from market_data.config import (
     OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
     OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS,
     OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+    OPEN_INTEREST_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+    OPEN_INTEREST_SCHEDULER_INGEST_INTERVAL_SECONDS,
+    OPEN_INTEREST_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
     load_settings,
 )
 from market_data.jobs.correct_window_basis_rate import run_correct_window_basis_rate
+from market_data.jobs.correct_window_open_interest import run_correct_window_open_interest
 from market_data.jobs.correct_window import run_correct_window
 from market_data.jobs.ingest_basis_rate import run_ingest_basis_rate
+from market_data.jobs.ingest_open_interest import run_ingest_open_interest
 from market_data.jobs.ingest_ohlcv import run_ingest_ohlcv
 from market_data.jobs.repair_gap_basis_rate import run_repair_basis_gaps_policy_window_all_series
+from market_data.jobs.repair_gap_open_interest import (
+    run_repair_open_interest_gaps_policy_window_all_series,
+)
 from market_data.jobs.repair_gap import run_repair_gaps_policy_window_all_series
 
 
@@ -142,6 +153,41 @@ def _run_basis_repair_step() -> None:
     )
 
 
+def _run_open_interest_ingest_step() -> None:
+    settings = load_settings()
+    results = run_ingest_open_interest(settings)
+    n = sum(r.rows_upserted for r in results)
+    logger.info(
+        "ingest_open_interest: {} series, {} rows upserted",
+        len(results),
+        n,
+    )
+
+
+def _run_open_interest_correct_step() -> None:
+    settings = load_settings()
+    results = run_correct_window_open_interest(settings)
+    d = sum(r.drift_rows for r in results)
+    logger.info(
+        "correct_window_open_interest: {} series, {} drift row(s)",
+        len(results),
+        d,
+    )
+
+
+def _run_open_interest_repair_step() -> None:
+    settings = load_settings()
+    results = run_repair_open_interest_gaps_policy_window_all_series(settings)
+    with_gaps = sum(1 for r in results if r.gap_spans > 0)
+    rows = sum(r.rows_upserted for r in results)
+    logger.info(
+        "repair_gap_open_interest: {} series, {} had gaps, {} rows upserted",
+        len(results),
+        with_gaps,
+        rows,
+    )
+
+
 def run_scheduler_loop(
     *,
     ingest_interval_seconds: int,
@@ -150,6 +196,9 @@ def run_scheduler_loop(
     basis_ingest_interval_seconds: int,
     basis_correct_interval_seconds: int,
     basis_repair_interval_seconds: int,
+    open_interest_ingest_interval_seconds: int,
+    open_interest_correct_interval_seconds: int,
+    open_interest_repair_interval_seconds: int,
     stop_event: threading.Event,
 ) -> None:
     next_ingest: float | None = None
@@ -158,17 +207,29 @@ def run_scheduler_loop(
     next_basis_ingest: float | None = None
     next_basis_correct: float | None = None
     next_basis_repair: float | None = None if basis_repair_interval_seconds > 0 else float("inf")
+    next_oi_ingest: float | None = None
+    next_oi_correct: float | None = None
+    next_oi_repair: float | None = (
+        None if open_interest_repair_interval_seconds > 0 else float("inf")
+    )
 
     repair_cadence = (
         f"every {repair_interval_seconds}s"
         if repair_interval_seconds > 0
         else "off"
     )
+    oi_repair_cadence = (
+        f"every {open_interest_repair_interval_seconds}s"
+        if open_interest_repair_interval_seconds > 0
+        else "off"
+    )
     logger.info(
         "market_data scheduler: ingest every {}s (first run now, then UTC-aligned), "
         "correct_window every {}s, repair_gap {} ({}), "
         "ingest_basis_rate every {}s, correct_window_basis_rate every {}s, "
-        "repair_gap_basis_rate {} ({})",
+        "repair_gap_basis_rate {} ({}), "
+        "ingest_open_interest every {}s, correct_window_open_interest every {}s, "
+        "repair_gap_open_interest {} ({})",
         ingest_interval_seconds,
         correct_interval_seconds,
         repair_cadence,
@@ -181,6 +242,10 @@ def run_scheduler_loop(
             else "off"
         ),
         "enabled" if basis_repair_interval_seconds > 0 else "disabled",
+        open_interest_ingest_interval_seconds,
+        open_interest_correct_interval_seconds,
+        oi_repair_cadence,
+        "enabled" if open_interest_repair_interval_seconds > 0 else "disabled",
     )
 
     while not stop_event.is_set():
@@ -232,6 +297,36 @@ def run_scheduler_loop(
                 logger.exception("repair_gap_basis_rate step failed")
             next_basis_repair = _next_periodic_deadline_after(time.time(), basis_repair_interval_seconds)
 
+        now = time.time()
+        if _due(now, next_oi_ingest):
+            try:
+                _run_open_interest_ingest_step()
+            except Exception:
+                logger.exception("ingest_open_interest step failed")
+            next_oi_ingest = _next_periodic_deadline_after(
+                time.time(), open_interest_ingest_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_oi_correct):
+            try:
+                _run_open_interest_correct_step()
+            except Exception:
+                logger.exception("correct_window_open_interest step failed")
+            next_oi_correct = _next_periodic_deadline_after(
+                time.time(), open_interest_correct_interval_seconds
+            )
+
+        now = time.time()
+        if open_interest_repair_interval_seconds > 0 and _due(now, next_oi_repair):
+            try:
+                _run_open_interest_repair_step()
+            except Exception:
+                logger.exception("repair_gap_open_interest step failed")
+            next_oi_repair = _next_periodic_deadline_after(
+                time.time(), open_interest_repair_interval_seconds
+            )
+
         deadline = min(
             _sleep_deadline(next_ingest),
             _sleep_deadline(next_correct),
@@ -239,6 +334,9 @@ def run_scheduler_loop(
             _sleep_deadline(next_basis_ingest),
             _sleep_deadline(next_basis_correct),
             next_basis_repair,
+            _sleep_deadline(next_oi_ingest),
+            _sleep_deadline(next_oi_correct),
+            next_oi_repair,
         )
         sleep_for = max(0.0, min(1.0, deadline - time.time()))
         if sleep_for > 0:
@@ -249,7 +347,7 @@ def run_scheduler_loop(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Market data: scheduled OHLCV + basis jobs (REST -> Postgres)"
+        description="Market data: scheduled OHLCV + basis + open-interest jobs (REST -> Postgres)"
     )
     parser.add_argument(
         "--once",
@@ -274,9 +372,12 @@ def main() -> None:
             _run_correct_step()
             _run_basis_ingest_step()
             _run_basis_correct_step()
+            _run_open_interest_ingest_step()
+            _run_open_interest_correct_step()
             if args.with_repair:
                 _run_repair_step()
                 _run_basis_repair_step()
+                _run_open_interest_repair_step()
         except Exception:
             logger.exception("market_data --once failed")
             sys.exit(1)
@@ -299,6 +400,9 @@ def main() -> None:
         basis_ingest_interval_seconds=BASIS_SCHEDULER_INGEST_INTERVAL_SECONDS,
         basis_correct_interval_seconds=BASIS_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
         basis_repair_interval_seconds=BASIS_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+        open_interest_ingest_interval_seconds=OPEN_INTEREST_SCHEDULER_INGEST_INTERVAL_SECONDS,
+        open_interest_correct_interval_seconds=OPEN_INTEREST_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+        open_interest_repair_interval_seconds=OPEN_INTEREST_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
         stop_event=stop,
     )
 

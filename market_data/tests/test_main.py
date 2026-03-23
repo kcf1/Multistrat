@@ -47,9 +47,28 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
         "market_data.main.run_repair_basis_gaps_policy_window_all_series",
         lambda _s: calls.append("basis_repair") or [],
     )
+    monkeypatch.setattr(
+        "market_data.main.run_ingest_open_interest",
+        lambda _s: calls.append("oi_ingest") or [],
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_correct_window_open_interest",
+        lambda _s: calls.append("oi_correct") or [],
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_repair_open_interest_gaps_policy_window_all_series",
+        lambda _s: calls.append("oi_repair") or [],
+    )
     monkeypatch.setattr(sys, "argv", ["market_data.main", "--once"])
     main()
-    assert calls == ["ingest", "correct", "basis_ingest", "basis_correct"]
+    assert calls == [
+        "ingest",
+        "correct",
+        "basis_ingest",
+        "basis_correct",
+        "oi_ingest",
+        "oi_correct",
+    ]
 
 
 def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,6 +97,18 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
         "market_data.main.run_repair_basis_gaps_policy_window_all_series",
         lambda _s: calls.append("basis_repair") or [],
     )
+    monkeypatch.setattr(
+        "market_data.main.run_ingest_open_interest",
+        lambda _s: calls.append("oi_ingest") or [],
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_correct_window_open_interest",
+        lambda _s: calls.append("oi_correct") or [],
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_repair_open_interest_gaps_policy_window_all_series",
+        lambda _s: calls.append("oi_repair") or [],
+    )
     monkeypatch.setattr(sys, "argv", ["market_data.main", "--once", "--with-repair"])
     main()
     assert calls == [
@@ -85,8 +116,11 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
         "correct",
         "basis_ingest",
         "basis_correct",
+        "oi_ingest",
+        "oi_correct",
         "repair",
         "basis_repair",
+        "oi_repair",
     ]
 
 
@@ -110,6 +144,9 @@ def test_scheduler_loop_respects_immediate_stop(monkeypatch: pytest.MonkeyPatch)
         basis_ingest_interval_seconds=300,
         basis_correct_interval_seconds=3600,
         basis_repair_interval_seconds=0,
+        open_interest_ingest_interval_seconds=300,
+        open_interest_correct_interval_seconds=3600,
+        open_interest_repair_interval_seconds=0,
         stop_event=stop,
     )
     assert called == []
@@ -128,6 +165,9 @@ def test_scheduler_loop_runs_ingest_once(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr("market_data.main._run_basis_ingest_step", lambda: None)
     monkeypatch.setattr("market_data.main._run_basis_correct_step", lambda: None)
     monkeypatch.setattr("market_data.main._run_basis_repair_step", lambda: None)
+    monkeypatch.setattr("market_data.main._run_open_interest_ingest_step", lambda: None)
+    monkeypatch.setattr("market_data.main._run_open_interest_correct_step", lambda: None)
+    monkeypatch.setattr("market_data.main._run_open_interest_repair_step", lambda: None)
 
     run_scheduler_loop(
         ingest_interval_seconds=300,
@@ -136,6 +176,9 @@ def test_scheduler_loop_runs_ingest_once(monkeypatch: pytest.MonkeyPatch) -> Non
         basis_ingest_interval_seconds=300,
         basis_correct_interval_seconds=3600,
         basis_repair_interval_seconds=0,
+        open_interest_ingest_interval_seconds=300,
+        open_interest_correct_interval_seconds=3600,
+        open_interest_repair_interval_seconds=0,
         stop_event=stop,
     )
     assert stop.is_set()

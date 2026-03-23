@@ -222,7 +222,7 @@ Key constraints to encode in plan:
 - [x] Implement `ingest_open_interest`.
 - [x] Implement `correct_window_open_interest`.
 - [x] Implement `repair_gap_open_interest`.
-- [ ] Wire open-interest jobs into `market_data/main.py`.
+- [x] Wire open-interest jobs into `market_data/main.py`.
 - [x] Add one-shot/backfill CLI for open interest.
 - [ ] Update README and dataset docs.
 - [ ] Add unit/job/integration coverage.
