@@ -256,7 +256,7 @@ Retention handling:
 - [x] Confirm perps REST base URL setting exists and is documented (`MARKET_DATA_BINANCE_PERPS_BASE_URL`).
 - [x] Add `TakerBuySellVolumePoint` model + parser + tests.
 - [x] Add perps provider protocol + Binance adapter method for `/futures/data/takerlongshortRatio`.
-- [ ] Add taker-buy-sell-volume upsert storage + cursor helpers + tests.
+- [x] Add taker-buy-sell-volume upsert storage + cursor helpers + tests.
 - [ ] Implement `ingest_taker_buy_sell_volume`.
 - [ ] Implement `correct_window_taker_buy_sell_volume`.
 - [ ] Implement `repair_gap_taker_buy_sell_volume` (or explicitly defer with scheduler repair disabled).
