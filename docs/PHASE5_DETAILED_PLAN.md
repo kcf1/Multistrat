@@ -128,3 +128,65 @@ Order: **skeleton → config → runner/observability → persistence (optional)
 ## 7. Link to main plan
 
 Phase 5 corresponds to **docs/IMPLEMENTATION_PLAN.md** § Phase 5: Scheduler / batch jobs. Phase 6 covers strategy modules and full Risk gate.
+
+---
+
+## 8. Local stack on macOS (bootstrap and deploy)
+
+Use this when bringing up the **whole system** on a Mac after clone: infra, schema, minimal DB data, and app containers. The same flow works on Linux with Docker; commands assume **Docker Compose v2** (`docker compose`).
+
+### 8.1 What you need on the Mac
+
+| Item | Notes |
+|------|--------|
+| **Docker Desktop for Mac** (or Colima + compose plugin) | Enable **VirtioFS** or file sharing for the repo path if bind mounts feel slow. Give Docker enough **RAM** (e.g. 8 GB+) for Postgres + several Python services. **Apple Silicon:** images used here (`postgres:16-alpine`, `redis:7-alpine`, `python:3.12-slim`) are multi-arch; no extra setup required in normal cases. |
+| **Git** | To clone the repo. |
+| **`.env`** | Copy **`.env.example`** → **`.env`** and set secrets (Postgres password, Binance keys if you use live/testnet trading or **scheduler order recon**). Compose substitutes `POSTGRES_*` for the `postgres` service; app containers override `DATABASE_URL` / `REDIS_URL` to the compose network—keep **host-oriented** URLs in `.env` (`localhost`) for optional host-side tools and Alembic-style commands documented below. |
+| **Optional: Python 3.12 + venv on the host** | Only if you run tests or scripts outside Docker. Not required for the all-in-one deploy script. |
+
+### 8.2 Order of operations (mental model)
+
+1. **Docker Compose** — bring up (or build) images; Postgres and Redis must be healthy before apps rely on them.
+2. **DB schema (Alembic)** — run **after** Postgres is up: `alembic upgrade head` (project uses a single migration chain under `alembic/versions/`).
+3. **`.env`** — maintain manually; see `.env.example` and [env-and-config](../.cursor/rules/env-and-config.mdc).
+4. **Initial data (ingestion / seed)** — not automatic in Compose; run explicitly once per fresh DB (see §8.4).
+5. **App services** — `oms`, `pms`, `risk`, `market_data`, **`scheduler`** (Phase 5).
+
+### 8.3 One-shot deploy script (recommended)
+
+From the repo root (after `.env` exists):
+
+```bash
+chmod +x scripts/deploy_stack.sh   # once
+./scripts/deploy_stack.sh
+```
+
+Optional flags:
+
+- **`--no-build`** — skip image build (faster iteration if the image is already current).
+- **`--destructive-seed`** — run `scripts/reset_and_seed_assets.py` instead of `init_assets.py` (truncates **`assets`** and reloads stables + configured feed list; use for a clean dev DB).
+- **`--with-tools`** — also start **`pgadmin`** and **`redisinsight`** (see `docker-compose.yml` ports).
+
+The script: builds app images → **`docker compose run --rm oms python -m alembic upgrade head`** → seed → **`docker compose up -d`** for Postgres, Redis, and all app services.
+
+Windows equivalent for “rebuild apps + migrate” only: **`scripts/update_and_deploy.ps1`** (assumes Postgres already running). For a full first-time Windows bootstrap, mirror the same steps as the shell script (compose up infra, `run oms … alembic`, seed, compose up apps).
+
+### 8.4 Initial data (seed scripts)
+
+| Script | When | Command (host with `.env` and venv) | Same via Docker |
+|--------|------|--------------------------------------|-----------------|
+| **`scripts/init_assets.py`** | Idempotent: stables with USD peg | `python scripts/init_assets.py` | `docker compose run --rm oms python scripts/init_assets.py` |
+| **`scripts/reset_and_seed_assets.py`** | Fresh **`assets`** table (destructive) | `python scripts/reset_and_seed_assets.py` | `docker compose run --rm oms python scripts/reset_and_seed_assets.py` |
+
+Both require **`DATABASE_URL`**. Historical market or metrics backfills (OHLCV, open interest, etc.) are **optional** and use other `scripts/backfill_*.py` modules when you need that data— they are not part of the minimal bootstrap.
+
+### 8.5 Lighter “core stack only” (no migrate/seed)
+
+**`scripts/start_core_stack_mac.sh`** starts Postgres, Redis, and the app services (including **scheduler**) without running Alembic or seeds—useful when the DB is already prepared.
+
+### 8.6 Anything else?
+
+- **Scheduler reports path:** `scheduler` mounts **`./scheduler/reports_out`** on the host; ensure the directory exists or let Compose create it (first run).
+- **Binance / API keys:** OMS, market data, and scheduler recon jobs need appropriate **`.env`** entries (`BINANCE_*`, testnet flags); without them, some jobs log errors or skip—see service READMEs.
+- **Ports:** `5432`, `6379`, and any published app ports in `docker-compose.yml` must be free on the host.
+- **CI / integration tests:** Phase 5 checklist **§4.10** still tracks optional integration tests and compose smoke checks; local bootstrap is separate from CI.

@@ -26,9 +26,9 @@ Single reference for the Order Management System (OMS) codebase: data flow, Redi
            │  (Binance)        │              │                   │              │                   │
            │                   │              │  orders:*         │              │  orders           │
            │  REST API:         │              │  account:*        │              │  accounts         │
-           │  • place_order     │              │  balances:*       │              │  balances         │
-           │  • cancel_order    │              │  positions:*      │              │                   │
-           │  • get_account     │              │                   │              │  (no positions     │
+           │  • place_order     │              │  (+ :balances /   │              │  balances         │
+           │  • cancel_order    │              │    :positions)   │              │                   │
+           │  • account snapshot│              │                   │              │  (no positions     │
            │                    │              │                   │              │   table in P2)    │
            │                    │              └───────────────────┘              └───────────────────┘
            │  User data stream:  │
@@ -43,7 +43,7 @@ Single reference for the Order Management System (OMS) codebase: data flow, Redi
 ```
 
 - **Inbound (orders):** `risk_approved` (orders to execute), `cancel_requested` (cancel by order_id or broker_order_id+symbol).
-- **Inbound (account):** Broker user data stream events (`outboundAccountPosition`, `balanceUpdate`) + periodic REST (`get_account`, `get_futures_account`).
+- **Inbound (account):** Broker user data stream events (`outboundAccountPosition`, `balanceUpdate`) + periodic REST via adapter **`get_account_snapshot`** (same unified shape as listener snapshots; no separate `get_futures_account` in this codebase).
 - **Outbound:** `oms_fills` (fill/reject/cancelled/expired), Postgres `orders`, `accounts`, `balances` (when `sync_balances=True`), `balance_changes` (from balanceUpdate); **positions** in Redis only. PMS reads orders and balances; derives positions from orders. See **docs/pms/PMS_ARCHITECTURE.md**.
 - **Broker:** Binance REST (place/cancel, account snapshots) + user data stream (execution reports + account updates). Other brokers plug in via the same adapter interface.
 
@@ -76,7 +76,7 @@ Defined in `oms/storage/redis_order_store.py`:
 | `orders:by_broker_order_id:{id}`     | String| Maps broker_order_id → order_id (for fill callback and cancel resolution). |
 
 - **Pipelines:** All multi-key updates (stage, update_status, update_fill_status) use Redis pipelines for atomicity.
-- **Retry key:** `oms:retry:risk_approved:{entry_id}` used for place_order retry count (compared to `OMS_PLACE_ORDER_MAX_RETRIES`).
+- **Retry key:** `oms:retry:risk_approved:{entry_id}` used for place_order retry count (compared to constant **`OMS_PLACE_ORDER_MAX_RETRIES`** = 3 in `redis_flow.py`, not an environment variable).
 
 ### 3.2 Account Store
 
@@ -84,13 +84,13 @@ Defined in `oms/storage/redis_account_store.py`:
 
 | Key pattern                          | Type  | Purpose |
 |--------------------------------------|-------|--------|
-| `account:{broker}:{account_id}`      | Hash  | Account metadata: broker, account_id, env, updated_at, optional config. |
+| `account:{broker}:{account_id}`      | Hash  | Account metadata: broker, account_id, updated_at, optional `payload` (broker blob, JSON string). |
 | `account:{broker}:{account_id}:balances` | Hash | Asset → balance info (available, locked, etc.). Field = asset, value = JSON or structured string. |
-| `account:{broker}:{account_id}:positions` | Hash | Symbol (or symbol_side) → position info (quantity, entry_price_avg, etc.). |
+| `account:{broker}:{account_id}:positions` | Hash | Symbol (hash field) → position info JSON (quantity, side, entry price fields as emitted by the adapter). |
 | `accounts:by_broker:{broker}`         | Set   | Set of `account_id` for that broker (index). |
 
 - **Pipelines:** Multi-key updates (apply balance update + update account updated_at) use Redis pipelines for atomicity.
-- **TTL (optional):** After sync to Postgres, set TTL on Redis keys (e.g. `OMS_ACCOUNT_SYNC_TTL_AFTER_SECONDS`) to avoid unbounded growth; re-populate from REST or stream on next refresh.
+- **TTL:** In `main()`, account Redis keys get TTL from **`OMS_ACCOUNT_TTL_AFTER_BALANCE_CHANGE_SECONDS`** (fallback: same as order sync TTL) **after** `balanceUpdate` → `write_balance_change`, not from periodic account sync. `sync_accounts_to_postgres(..., ttl_after_sync_seconds=...)` accepts TTL in the signature but **does not apply it** today; periodic sync does not expire account keys.
 
 ---
 
@@ -142,10 +142,10 @@ Defined in `oms/storage/redis_account_store.py`:
 
 **Entrypoint:** `oms/main.py` — `main()` → `run_oms_loop()`.
 
-1. **Bootstrap:** Redis client, `RedisOrderStore`, `AdapterRegistry`, register Binance if `BINANCE_API_KEY` set. Start fill listeners with `make_fill_callback(redis, store, …)`; wait for listeners connected.
+1. **Bootstrap:** Redis client, `RedisOrderStore`, `AdapterRegistry`, register Binance if `BINANCE_API_KEY` set. Start fill listeners with `make_fill_callback(redis, store, …)` and **wait until fill listeners report connected**; start account listeners (and optional `on_balance_change` when `DATABASE_URL` is set) and **wait until account listeners report connected** (or timeout). One-time symbol sync when Postgres + Binance are configured.
 2. **Loop (each iteration):**
-   - **process_many:** Read up to `batch_size` from `risk_approved` (XREADGROUP BLOCK `block_ms`), then pending; for each: stage → place_order via registry → **write payload (and broker_order_id) to store immediately** so fill callback enrichment can see them even if the WebSocket fill arrives first (race); then update status to `sent` (or keep terminal if fill already ran) → produce oms_fill on reject → XACK. On terminal status, optional `on_terminal_sync(order_id)` (sync to Postgres + TTL).
-   - **process_many_cancel:** Read up to `batch_size` from `cancel_requested` (non-blocking); resolve order_id (from message or by broker_order_id); adapter.cancel_order; update store to cancelled; optionally produce cancelled to oms_fills; XACK.
+   - **process_many:** Read up to `batch_size` from `risk_approved` (XREADGROUP BLOCK `block_ms`); if no new messages, **re-read pending** (`id="0"`) so stuck deliveries are retried. For each valid parsed message: stage (only if order not already in store) → place_order → **write payload (and broker_order_id) to store immediately** (race with WebSocket) → update status to `sent` (or keep terminal if fill already ran) → produce oms_fill on reject → XACK. On terminal status, optional `on_terminal_sync(order_id)` (sync to Postgres + TTL).
+   - **process_many_cancel:** Read up to `batch_size` from `cancel_requested` (non-blocking, `id=">"` only); **no separate pending sweep** like `risk_approved`. Resolve order_id; adapter.cancel_order; update store to cancelled; optionally produce cancelled to oms_fills; XACK.
    - **Trim:** Every `trim_every_n` iterations, `trim_oms_streams(redis)` (risk_approved + oms_fills, MAXLEN 20000).
    - **Periodic sync:** If `pg_connect` and `sync_interval_seconds` set, `sync_terminal_orders(redis, store, pg_connect, …)` (sync terminal orders to Postgres, set TTL on Redis keys); then `run_all_repairs(pg_connect)` (fix flawed order fields from payload for Binance orders).
 
@@ -185,6 +185,8 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 
 **Account repairs:** `oms/account_repair.py` — `run_all_account_repairs(pg_connect)` after sync; fixes flawed fields from payload.
 
+**Account Redis TTL:** Periodic `sync_accounts_to_postgres` does **not** set key TTL. TTL is applied from **`cleanup.set_account_key_ttl`** when **`main()`** handles a balance-change event (see §3.2).
+
 ---
 
 ## 9. Cleanup and TTL
@@ -192,15 +194,15 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 **Module:** `oms/cleanup.py`.
 
 - **trim_oms_streams(redis):** XTRIM risk_approved and oms_fills to MAXLEN (default 20000). cancel_requested is **not** trimmed.
-- **set_order_key_ttl(redis, order_id, ttl_seconds):** Set TTL on `orders:{order_id}` after terminal status (e.g. after sync). Default TTL from `OMS_SYNC_TTL_AFTER_SECONDS` (default 300).
-- **set_account_key_ttl(redis, broker, account_id, ttl_seconds):** Set TTL on `account:{broker}:{account_id}` and related balance/position keys after sync. Default TTL from `OMS_ACCOUNT_SYNC_TTL_AFTER_SECONDS` (default 300; 0 = no TTL). Optional: only set TTL if periodic refresh will re-populate.
+- **set_order_key_ttl(redis, order_id, ttl_seconds):** Set TTL on `orders:{order_id}` after terminal status (e.g. after sync). Only applied when the key has no TTL yet. Defaults via `OMS_SYNC_TTL_AFTER_SECONDS` (default 300) in `main()` / `sync.py`.
+- **set_account_key_ttl(redis, broker, account_id, ttl_seconds):** Set TTL on `account:{broker}:{account_id}` and related `:balances` / `:positions` keys (only if the key exists and has no TTL yet). **`main()`** uses this after **`write_balance_change`**; **not** invoked from periodic account sync.
 
 ---
 
 ## 10. Retry and Error Handling
 
-- **place_order failure:** Retry count in `oms:retry:risk_approved:{entry_id}`; delivery count from XPENDING. After `OMS_PLACE_ORDER_MAX_RETRIES` (3): mark rejected, produce oms_fill reject, XACK, delete retry key, call `on_terminal_sync` if set.
-- **Parse errors:** risk_approved/cancel_requested parse failures log and skip message (no XACK for that entry when using consumer group — message stays pending; pending is re-read in next iteration with id `0`).
+- **place_order failure:** Retry count in `oms:retry:risk_approved:{entry_id}`; delivery count from XPENDING. After **`OMS_PLACE_ORDER_MAX_RETRIES`** (constant **3** in `redis_flow.py`): mark rejected, produce oms_fill reject, XACK, delete retry key, call `on_terminal_sync` if set.
+- **Parse errors:** Parse failures log and skip that entry (**no XACK** — message stays in the consumer group pending list). **`risk_approved`:** `process_many` also reads pending with `id="0"`, so poison messages keep retrying until handled (e.g. `XCLAIM`/trim). **`cancel_requested`:** batch reads use `id=">` only; there is **no** matching pending sweep — invalid entries stay pending until **`XCLAIM`**, another consumer, or operational cleanup.
 - **Fill callback validation:** Invalid or unknown event_type logs and skips; no store update.
 
 ---
@@ -212,15 +214,17 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 | REDIS_URL | Redis connection (default redis://localhost:6379). |
 | BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_BASE_URL | Binance adapter (testnet vs main). |
 | BINANCE_FILLS_STREAM | `wsapi` (default) or `listenkey` for user data stream (shared for fills + account events). |
-| DATABASE_URL | Postgres; enables sync and on_terminal_sync. |
-| OMS_SYNC_TTL_AFTER_SECONDS | TTL on Redis order key after sync (default 300). |
-| OMS_SYNC_INTERVAL_SECONDS | Periodic sync interval for orders and accounts (default from sync.py, e.g. 60). |
-| OMS_ACCOUNT_REFRESH_INTERVAL_SECONDS | Periodic REST account snapshot interval (default 60). |
-| OMS_ACCOUNT_SYNC_TTL_AFTER_SECONDS | TTL on Redis account keys after sync (default 300; 0 = no TTL). |
+| DATABASE_URL | Postgres; enables sync, `on_terminal_sync`, account listeners’ `on_balance_change`, symbol sync, and periodic loops below. |
+| OMS_SYNC_TTL_AFTER_SECONDS | TTL on Redis order keys after sync (default 300). Also the default fallback for account TTL after balance change when **`OMS_ACCOUNT_TTL_AFTER_BALANCE_CHANGE_SECONDS`** is unset. |
+| OMS_ACCOUNT_TTL_AFTER_BALANCE_CHANGE_SECONDS | TTL (seconds) on account Redis keys after **`balanceUpdate`** → `write_balance_change`. If unset, **`main()`** uses **`OMS_SYNC_TTL_AFTER_SECONDS`** (order sync TTL). |
 | OMS_BLOCK_MS | Block timeout for risk_approved read (default 100). |
 | OMS_POLL_SLEEP_SECONDS | Used only when block_ms=0. |
 | OMS_BATCH_SIZE | Max messages per process_many / process_many_cancel (default 50). |
 | LOG_LEVEL | e.g. DEBUG (default INFO). |
+
+**Intervals (code constants today, not environment variables):** When `DATABASE_URL` is set, `main()` passes **`DEFAULT_SYNC_INTERVAL_SECONDS`** (60, from `oms/sync.py`) for order **`sync_terminal_orders` + repairs**, and **`DEFAULT_ACCOUNT_REFRESH_INTERVAL_SECONDS` / `DEFAULT_ACCOUNT_SYNC_INTERVAL_SECONDS`** (60 each, in `main.py`) for REST account refresh and **`sync_accounts_to_postgres`**. To change these, edit `main()` / call **`run_oms_loop`** with different arguments (or add env wiring).
+
+**Not environment-driven:** **`OMS_PLACE_ORDER_MAX_RETRIES`** is **`3`** in **`redis_flow.py`** only.
 
 ---
 
@@ -252,8 +256,8 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 ## 13. Architecture Notes
 
 - **Single process:** One OMS process; one consumer group with one consumer name. Scaling would require multiple consumer names in the same group or separate groups (not currently designed).
-- **At-least-once:** risk_approved/cancel_requested are XACK’ed only after successful processing; on crash, pending messages are redelivered. Idempotency is by order_id (stage_order no-op if order already exists).
+- **At-least-once:** risk_approved/cancel_requested are XACK’ed only after successful processing; on crash, pending messages are redelivered. **Idempotency:** callers avoid duplicate **`stage_order`** by checking **`store.get_order(order_id)`** before staging; an existing Redis order short-circuits re-staging for the same id.
 - **Event-driven + batch:** Blocking read on risk_approved for low latency; batch size and trim interval tune throughput and stream growth.
-- **Fill listener before orders:** Main loop waits for fill listeners to report connected before processing, so user data stream is active before orders are placed.
+- **User-data streams before loop:** **`main()`** waits for **fill** listeners **and** **account** listeners to connect (subject to timeout), so subscriptions are up before the processing loop runs.
 
 For DB column sources see **docs/oms/OMS_ORDERS_DB_FIELDS.md**. Blocking: `process_many` uses XREADGROUP BLOCK when `block_ms > 0` for event-driven wake-up; cancel is non-blocking.

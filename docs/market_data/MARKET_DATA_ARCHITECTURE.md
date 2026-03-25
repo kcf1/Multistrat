@@ -39,15 +39,14 @@ Command: `python -m market_data.main`
 - **Later runs:** next deadlines are **UTC-aligned** to Unix-epoch multiples of the configured period (e.g. 300s → :00, :05, :10 UTC).
 - **Order within each loop tick:**
   1. **All ingests** (in this order): OHLCV → basis rate → open interest → top trader long/short → taker buy/sell volume.
-  2. **All `correct_window` jobs** in the same dataset order.
-  3. **All `repair_gap` jobs** only if the corresponding `*_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS` is **greater than zero** (defaults are **0 = disabled**).
+  2. **Per-dataset drift and gap repair** (same order): for OHLCV, then basis, then open interest, then top trader, then taker — run that dataset’s **`correct_window`** when due, then its **`repair_gap`** when due. Gap repair runs only if that dataset’s `*_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS` is **greater than zero** (defaults are **0 = disabled**).
 
 Steps log aggregate counts (e.g. bars/rows upserted, drift rows, gaps repaired). Failures in one step are logged and do not stop the loop (per-step `try/except` in `main.py`).
 
 ### 3.2 One-shot mode
 
-- `python -m market_data.main --once` — same ingest order, then correct-window passes, then exit.
-- `--with-repair` — also runs one policy-window gap repair pass per dataset family that supports it.
+- `python -m market_data.main --once` — same ingest order as §3.1, then the same **per-dataset** sequence: `correct_window` and (only with `--with-repair`) `repair_gap`, in OHLCV → basis → open interest → top trader → taker order, then exit.
+- `--with-repair` — after each dataset’s `correct_window`, runs one policy-window `repair_gap` pass for that family when supported.
 
 ### 3.3 Per-dataset job roles
 
@@ -60,7 +59,8 @@ Steps log aggregate counts (e.g. bars/rows upserted, drift rows, gaps repaired).
 ### 3.4 Provider and pagination notes
 
 - Spot klines: forward paging from `startTime` toward `endTime` with chunk limit (Binance cap 1000).
-- **Futures endpoints** `openInterestHist`, `takerlongshortRatio`, and `topLongShortPositionRatio`: when both `startTime` and `endTime` are set, the API returns the **latest** `limit` rows in the window. `market_data/jobs/common.py` uses **backward paging** with a stack, then yields batches **oldest-first** for stable cursors and ingest.
+- **Futures basis** (`/futures/data/basis`): **forward** paging from `startTime` toward `endTime`, same idea as klines (`iter_basis_batches_forward` in `market_data/jobs/common.py`).
+- **Futures endpoints** `openInterestHist`, `takerlongshortRatio`, and `topLongShortPositionRatio`: when both `startTime` and `endTime` are set, the API returns the **latest** `limit` rows in the window (not the earliest from `startTime`). `common.py` uses **backward paging** with a stack, then yields batches **oldest-first** for stable cursors and ingest.
 
 ---
 
@@ -170,7 +170,7 @@ Loaded from `.env` via pydantic-settings (`market_data/config.py`):
 
 | Env variable | Purpose |
 |----------------|---------|
-| `MARKET_DATA_DATABASE_URL` or `DATABASE_URL` | Postgres (**required**) |
+| `MARKET_DATA_DATABASE_URL` or `DATABASE_URL` | Postgres (**required**). If both are set, **`MARKET_DATA_DATABASE_URL` wins**. |
 | `MARKET_DATA_BINANCE_BASE_URL` | Spot REST base (optional) |
 | `MARKET_DATA_BINANCE_PERPS_BASE_URL` | USD-M futures public REST base (optional) |
 

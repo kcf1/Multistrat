@@ -52,7 +52,7 @@ Single reference for the multistrategy trading system: directory layout by modul
 | **risk/** | Risk | Pre-trade: consume `strategy_orders`, rule engine (optional), produce `risk_approved`. |
 | **market_data/** | (Phase 4) | Public market feeds → Postgres (`ohlcv`, …) + Redis hot keys (`market:{symbol}:…`). Default symbol universe: [`market_data/universe.py`](../market_data/universe.py) (`DATA_COLLECTION_SYMBOLS`, USDT spot only). See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md). |
 | **admin/** | (Phase 3) | Admin CLI/API: publish commands to streams, read-only views over Postgres/Redis. |
-| **scheduler/** | (Phase 5) | Scheduled **reports**, **reconciliation** (orders/positions vs venue), and **misc** batch jobs; not streaming OMS/PMS. See [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md). |
+| **scheduler/** | (Phase 5) | Scheduled **reports**, **reconciliation** (orders/positions vs venue), and **misc** batch jobs; not streaming OMS/PMS. See [scheduler/SCHEDULER_ARCHITECTURE.md](scheduler/SCHEDULER_ARCHITECTURE.md) and [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md). |
 | **alembic/** | Shared | Postgres migrations; schema owned by OMS (orders, accounts, balances, balance_changes) and PMS (symbols, assets, positions). |
 | **scripts/** | Shared | E2E tests, deploy, reset (e.g. `e2e_with_risk.py`, `update_and_deploy.ps1`, `reset_redis_postgres.ps1`). |
 | **docs/** | Shared | Architecture and phase plans; `docs/oms/`, `docs/pms/`, `docs/risk/` for module-specific docs. |
@@ -97,7 +97,7 @@ All tables are managed via **Alembic** under `alembic/versions/`. OMS writes ord
 |-------|---------|----------------------|
 | **scheduler_runs** | Audit log for each scheduled job invocation | `id` (PK), `job_id`, `started_at`, `finished_at`, `status` (`ok` / `error`), `error`, `payload` (JSONB). Written by `scheduler/run_history.py`. See [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md) §4.4. |
 
-**Reports / reconciliation (CSV, not in Postgres):** under **`scheduler/reports_out/`** (gitignored): `position_snapshot_hourly` writes **four** position files per run (§4.5); **`order_reconciliation_binance`** writes **`order_recon_summary_*.csv`** and **`order_recon_diff_*.csv`** (open **Postgres** `orders` vs Binance **`/api/v3/openOrders`**, §4.6).
+**Reports / reconciliation (CSV, not in Postgres):** under **`scheduler/reports_out/`** (gitignored): `position_snapshot_hourly` writes **four** position files per run; **`order_reconciliation_binance`** / **`position_reconciliation_binance`** emit summary and diff CSVs (filled **orders** vs Binance **`myTrades`**, and **positions** vs spot wallet balances). Details: [scheduler/SCHEDULER_ARCHITECTURE.md](scheduler/SCHEDULER_ARCHITECTURE.md) §8.
 
 ---
 

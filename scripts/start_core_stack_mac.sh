@@ -13,6 +13,7 @@ SERVICES=(
   pms
   risk
   market_data
+  scheduler
 )
 
 if ! command -v docker >/dev/null 2>&1; then
