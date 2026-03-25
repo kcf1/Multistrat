@@ -90,9 +90,9 @@ Order: **skeleton → config → runner/observability → persistence (optional)
 
 ### 4.8 Docker and Compose
 
-- [ ] **5.8.1** **`scheduler/Dockerfile`** or extend existing multi-stage pattern used by `pms` / `market_data`.
-- [ ] **5.8.2** **`docker-compose.yml`** service **`scheduler`**: same network as Postgres (and Redis if locks); `depends_on` health where applicable.
-- [ ] **5.8.3** Short **runbook** in `scheduler/README.md` (or root README section): command, required env, how to run a single job once for debugging.
+- [x] **5.8.1** **`scheduler/Dockerfile`** or extend existing multi-stage pattern used by `pms` / `market_data`. **Implemented:** root **`Dockerfile`** **`COPY scheduler/`** (single image for all Python services).
+- [x] **5.8.2** **`docker-compose.yml`** service **`scheduler`**: same network as Postgres (and Redis if locks); `depends_on` health where applicable.
+- [x] **5.8.3** Short **runbook** in `scheduler/README.md` (or root README section): command, required env, how to run a single job once for debugging.
 
 ### 4.9 Optional / follow-up (not required for Phase 5 acceptance)
 

@@ -119,6 +119,24 @@ services:
       postgres:
         condition: service_healthy
 
+  scheduler:
+    build: .
+    env_file: .env
+    environment:
+      # Override host-local .env so the container uses compose Postgres / Redis.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-multistrat}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-multistrat}
+      REDIS_URL: redis://redis:6379
+      # Binance recon jobs read BINANCE_* from .env (keys, BINANCE_BASE_URL, BINANCE_TESTNET)
+    command: ["python", "-m", "scheduler"]
+    restart: unless-stopped
+    networks:
+      - multistrat
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redisinsight_data:
