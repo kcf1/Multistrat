@@ -16,6 +16,7 @@ import sys
 
 from loguru import logger
 
+from scheduler.config import load_scheduler_settings
 from scheduler.registry import iter_registered_jobs
 from scheduler.runner import run_forever, run_job_isolated, run_job_once
 
@@ -97,8 +98,9 @@ def _run_all_once() -> None:
         logger.warning("No enabled jobs")
         return
     logger.info("--once: running {} enabled job(s)", len(jobs))
+    db_url = load_scheduler_settings().database_url
     for r in jobs:
-        run_job_isolated(r)
+        run_job_isolated(r, database_url=db_url)
 
 
 if __name__ == "__main__":

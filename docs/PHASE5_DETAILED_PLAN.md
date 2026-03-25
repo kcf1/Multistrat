@@ -68,8 +68,8 @@ Order: **skeleton → config → runner/observability → persistence (optional)
 
 ### 4.4 Run history (optional v1, recommended for ops)
 
-- [ ] **5.4.1** Alembic migration: **`scheduler_runs`** (name flexible): `job_id`, `started_at`, `finished_at`, `status` (`ok`/`error`), `error` (text), `payload` (JSONB for summary stats / diff counts).
-- [ ] **5.4.2** Shared helper: `record_run_start` / `record_run_end` (or single upsert) called from runner or each job.
+- [x] **5.4.1** Alembic migration: **`scheduler_runs`** (name flexible): `job_id`, `started_at`, `finished_at`, `status` (`ok`/`error`), `error` (text), `payload` (JSONB for summary stats / diff counts).
+- [x] **5.4.2** Shared helper: `record_run_start` / `record_run_end` (or single upsert) called from runner or each job.
 
 ### 4.5 Reports jobs (v1)
 

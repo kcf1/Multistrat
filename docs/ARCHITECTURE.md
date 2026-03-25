@@ -91,6 +91,12 @@ All tables are managed via **Alembic** under `alembic/versions/`. OMS writes ord
 |-------|---------|---------------------|
 | **ohlcv** | Historical OHLCV bars per symbol and interval | PK `(symbol, interval, open_time)`; columns `open`–`close`, `volume`, optional `quote_volume`, `trades`, `close_time`, `ingested_at`. See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §4. |
 
+### 3.5 Scheduler / batch jobs (Phase 5)
+
+| Table | Purpose | Key columns / grain |
+|-------|---------|----------------------|
+| **scheduler_runs** | Audit log for each scheduled job invocation | `id` (PK), `job_id`, `started_at`, `finished_at`, `status` (`ok` / `error`), `error`, `payload` (JSONB). Written by `scheduler/run_history.py`. See [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md) §4.4. |
+
 ---
 
 ## 4. Redis

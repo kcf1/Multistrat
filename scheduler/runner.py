@@ -13,9 +13,16 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 
 from loguru import logger
 
-from scheduler.config import DEFAULT_JOB_TIMEOUT_SECONDS, SCHEDULER_LOOP_POLL_SECONDS
+from scheduler.config import (
+    DEFAULT_JOB_TIMEOUT_SECONDS,
+    SCHEDULER_LOOP_POLL_SECONDS,
+    load_scheduler_settings,
+)
 from scheduler.registry import RegisteredJob, iter_registered_jobs
+from scheduler.run_history import RunStatus, record_run_end, record_run_start
 from scheduler.types import JobContext
+
+_ERROR_TEXT_MAX_LEN = 8000
 
 
 def _next_periodic_deadline_after(completed_at: float, period_seconds: int) -> float:
@@ -44,6 +51,46 @@ def _jobs_for_loop() -> list[RegisteredJob]:
     return out
 
 
+def _resolve_database_url(explicit: str | None) -> str | None:
+    """Return a non-empty DB URL from ``explicit`` or settings; ``None`` skips ``scheduler_runs``."""
+    if explicit is not None:
+        u = explicit.strip()
+        return u if u else None
+    u = load_scheduler_settings().database_url
+    if u is None:
+        return None
+    u = str(u).strip()
+    return u if u else None
+
+
+def _try_record_run_start(database_url: str | None, job_id: str) -> int | None:
+    if not database_url:
+        return None
+    try:
+        return record_run_start(database_url, job_id)
+    except Exception as e:
+        logger.warning("scheduler_runs record_run_start failed (job continues): {}", e)
+        return None
+
+
+def _try_record_run_end(
+    database_url: str | None,
+    run_id: int | None,
+    *,
+    status: RunStatus,
+    error: str | None = None,
+    payload: dict | None = None,
+) -> None:
+    if not database_url or run_id is None:
+        return
+    if error is not None and len(error) > _ERROR_TEXT_MAX_LEN:
+        error = error[: _ERROR_TEXT_MAX_LEN] + "…"
+    try:
+        record_run_end(database_url, run_id, status, error, payload)
+    except Exception as e:
+        logger.warning("scheduler_runs record_run_end failed: {}", e)
+
+
 def _wait_until(wall_deadline: float, stop: threading.Event) -> None:
     """Sleep until ``time.time() >= wall_deadline`` or ``stop`` is set (polls for responsive shutdown)."""
     while not stop.is_set():
@@ -58,6 +105,7 @@ def run_job_once(
     r: RegisteredJob,
     *,
     timeout_seconds: float | None = None,
+    database_url: str | None = None,
 ) -> None:
     """
     Run a single job with timeout and logging. Exceptions propagate after logging.
@@ -65,6 +113,9 @@ def run_job_once(
     Used by the loop and ``--dry-run-job`` (via ``main``).
     """
     job_id = r.spec.job_id
+    db_url = _resolve_database_url(database_url)
+    run_id = _try_record_run_start(db_url, job_id)
+
     timeout = timeout_seconds
     if timeout is None:
         timeout = r.spec.timeout_seconds if r.spec.timeout_seconds is not None else DEFAULT_JOB_TIMEOUT_SECONDS
@@ -72,22 +123,36 @@ def run_job_once(
     ctx = JobContext(job_id=job_id)
     started = time.perf_counter()
     logger.info("job_start job_id={}", job_id)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(r.job.run, ctx)
-        try:
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(r.job.run, ctx)
             future.result(timeout=timeout)
-        except FutureTimeoutError:
-            logger.error("job_timeout job_id={} timeout_s={}", job_id, timeout)
-            raise
+    except FutureTimeoutError:
+        logger.error("job_timeout job_id={} timeout_s={}", job_id, timeout)
+        _try_record_run_end(
+            db_url,
+            run_id,
+            status="error",
+            error=f"timeout after {timeout}s",
+        )
+        raise
+    except Exception as e:
+        _try_record_run_end(db_url, run_id, status="error", error=str(e))
+        raise
+    else:
+        _try_record_run_end(db_url, run_id, status="ok")
     elapsed = time.perf_counter() - started
     logger.info("job_end job_id={} duration_ms={:.1f}", job_id, elapsed * 1000.0)
 
 
-def run_job_isolated(r: RegisteredJob) -> None:
+def run_job_isolated(r: RegisteredJob, *, database_url: str | None = None) -> None:
     """
     Run one job; swallow exceptions and log with stack — does not re-raise (loop continues).
     """
     job_id = r.spec.job_id
+    db_url = _resolve_database_url(database_url)
+    run_id = _try_record_run_start(db_url, job_id)
+
     timeout = (
         r.spec.timeout_seconds if r.spec.timeout_seconds is not None else DEFAULT_JOB_TIMEOUT_SECONDS
     )
@@ -100,19 +165,29 @@ def run_job_isolated(r: RegisteredJob) -> None:
             future.result(timeout=timeout)
     except FutureTimeoutError:
         logger.error("job_timeout job_id={} timeout_s={}", job_id, timeout)
-    except Exception:
+        _try_record_run_end(
+            db_url,
+            run_id,
+            status="error",
+            error=f"timeout after {timeout}s",
+        )
+    except Exception as e:
         logger.exception("job_failed job_id={}", job_id)
+        _try_record_run_end(db_url, run_id, status="error", error=str(e))
     else:
+        _try_record_run_end(db_url, run_id, status="ok")
         elapsed = time.perf_counter() - started
         logger.info("job_end job_id={} duration_ms={:.1f}", job_id, elapsed * 1000.0)
 
 
-def run_scheduled_loop(stop: threading.Event) -> None:
+def run_scheduled_loop(stop: threading.Event, *, database_url: str | None = None) -> None:
     """
     Interval-based scheduler until ``stop`` is set. First fire for each job is immediate.
 
     Cron-only jobs (no ``interval_seconds``) are excluded; see logs at startup.
     """
+    db_url = _resolve_database_url(database_url)
+
     jobs = _jobs_for_loop()
     if not jobs:
         logger.warning("No jobs with interval_seconds > 0; idle until process exit")
@@ -136,7 +211,7 @@ def run_scheduled_loop(stop: threading.Event) -> None:
         for r in due:
             if stop.is_set():
                 break
-            run_job_isolated(r)
+            run_job_isolated(r, database_url=db_url)
             completed_at = time.time()
             interval = r.spec.interval_seconds
             assert interval is not None and interval > 0
@@ -167,7 +242,8 @@ def run_forever() -> None:
     """
     stop = threading.Event()
     install_signal_handlers(stop)
+    db_url = load_scheduler_settings().database_url
     try:
-        run_scheduled_loop(stop)
+        run_scheduled_loop(stop, database_url=db_url)
     finally:
         logger.info("Scheduler loop exited")
