@@ -61,14 +61,7 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
     )
     monkeypatch.setattr(sys, "argv", ["market_data.main", "--once"])
     main()
-    assert calls == [
-        "ingest",
-        "correct",
-        "basis_ingest",
-        "basis_correct",
-        "oi_ingest",
-        "oi_correct",
-    ]
+    assert calls == ["ingest", "basis_ingest", "oi_ingest", "correct", "basis_correct", "oi_correct"]
 
 
 def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,17 +104,7 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(sys, "argv", ["market_data.main", "--once", "--with-repair"])
     main()
-    assert calls == [
-        "ingest",
-        "correct",
-        "basis_ingest",
-        "basis_correct",
-        "oi_ingest",
-        "oi_correct",
-        "repair",
-        "basis_repair",
-        "oi_repair",
-    ]
+    assert calls == ["ingest", "basis_ingest", "oi_ingest", "correct", "repair", "basis_correct", "basis_repair", "oi_correct", "oi_repair"]
 
 
 def test_scheduler_loop_respects_immediate_stop(monkeypatch: pytest.MonkeyPatch) -> None:

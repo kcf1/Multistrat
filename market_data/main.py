@@ -249,6 +249,9 @@ def run_scheduler_loop(
     )
 
     while not stop_event.is_set():
+        # Process-by-process ordering:
+        # 1) run all due ingests (OHLCV -> basis -> open interest)
+        # 2) then run correct+repair per dataset in the same order.
         now = time.time()
         if _due(now, next_ingest):
             try:
@@ -256,6 +259,26 @@ def run_scheduler_loop(
             except Exception:
                 logger.exception("ingest_ohlcv step failed")
             next_ingest = _next_periodic_deadline_after(time.time(), ingest_interval_seconds)
+
+        now = time.time()
+        if _due(now, next_basis_ingest):
+            try:
+                _run_basis_ingest_step()
+            except Exception:
+                logger.exception("ingest_basis_rate step failed")
+            next_basis_ingest = _next_periodic_deadline_after(
+                time.time(), basis_ingest_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_oi_ingest):
+            try:
+                _run_open_interest_ingest_step()
+            except Exception:
+                logger.exception("ingest_open_interest step failed")
+            next_oi_ingest = _next_periodic_deadline_after(
+                time.time(), open_interest_ingest_interval_seconds
+            )
 
         now = time.time()
         if _due(now, next_correct):
@@ -274,20 +297,14 @@ def run_scheduler_loop(
             next_repair = _next_periodic_deadline_after(time.time(), repair_interval_seconds)
 
         now = time.time()
-        if _due(now, next_basis_ingest):
-            try:
-                _run_basis_ingest_step()
-            except Exception:
-                logger.exception("ingest_basis_rate step failed")
-            next_basis_ingest = _next_periodic_deadline_after(time.time(), basis_ingest_interval_seconds)
-
-        now = time.time()
         if _due(now, next_basis_correct):
             try:
                 _run_basis_correct_step()
             except Exception:
                 logger.exception("correct_window_basis_rate step failed")
-            next_basis_correct = _next_periodic_deadline_after(time.time(), basis_correct_interval_seconds)
+            next_basis_correct = _next_periodic_deadline_after(
+                time.time(), basis_correct_interval_seconds
+            )
 
         now = time.time()
         if basis_repair_interval_seconds > 0 and _due(now, next_basis_repair):
@@ -295,16 +312,8 @@ def run_scheduler_loop(
                 _run_basis_repair_step()
             except Exception:
                 logger.exception("repair_gap_basis_rate step failed")
-            next_basis_repair = _next_periodic_deadline_after(time.time(), basis_repair_interval_seconds)
-
-        now = time.time()
-        if _due(now, next_oi_ingest):
-            try:
-                _run_open_interest_ingest_step()
-            except Exception:
-                logger.exception("ingest_open_interest step failed")
-            next_oi_ingest = _next_periodic_deadline_after(
-                time.time(), open_interest_ingest_interval_seconds
+            next_basis_repair = _next_periodic_deadline_after(
+                time.time(), basis_repair_interval_seconds
             )
 
         now = time.time()
@@ -368,15 +377,23 @@ def main() -> None:
 
     if args.once:
         try:
+            # Process-by-process ordering for --once:
+            # 1) run all ingests
+            # 2) then run correct+repair per dataset in order.
             _run_ingest_step()
-            _run_correct_step()
             _run_basis_ingest_step()
-            _run_basis_correct_step()
             _run_open_interest_ingest_step()
-            _run_open_interest_correct_step()
+
+            _run_correct_step()
             if args.with_repair:
                 _run_repair_step()
+
+            _run_basis_correct_step()
+            if args.with_repair:
                 _run_basis_repair_step()
+
+            _run_open_interest_correct_step()
+            if args.with_repair:
                 _run_open_interest_repair_step()
         except Exception:
             logger.exception("market_data --once failed")
