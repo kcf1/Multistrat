@@ -79,10 +79,10 @@ Order: **skeleton → config → runner/observability → persistence (optional)
 
 ### 4.6 Reconciliation jobs (v1)
 
-- [ ] **5.6.1** **`scheduler/jobs/reconciliation/order_recon.py` (or similar):** compare **internal** order state (Postgres `orders` / counts / terminal statuses) vs **broker** truth via REST — start with **counts + sample diff**; expand to full key-by-key later. Prefer **reusing OMS** HTTP/signing helpers via import from `oms/` if the repo allows, or a thin shared client.
-- [ ] **5.6.2** **`scheduler/jobs/reconciliation/position_recon.py` (or similar):** compare **PMS/booking positions** vs **broker balances/positions**; persist **diff summary** in `scheduler_runs.payload` or a dedicated **`reconciliation_results`** table (optional).
-- [ ] **5.6.3** **Idempotency:** safe to re-run same calendar window; no duplicate alerts for same settled state (document strategy).
-- [ ] **5.6.4** **Unit tests:** mock broker responses and DB fixtures; assert diff detection logic.
+- [x] **5.6.1** **`scheduler/jobs/reconciliation/order_recon.py` (or similar):** compare **internal** order state (Postgres `orders` / counts / terminal statuses) vs **broker** truth via REST — start with **counts + sample diff**; expand to full key-by-key later. Prefer **reusing OMS** HTTP/signing helpers via import from `oms/` if the repo allows, or a thin shared client. **Implemented:** `order_reconciliation_binance` — **`BinanceAPIClient.get_open_orders`**, CSV **`order_recon_summary_*.csv`** + **`order_recon_diff_*.csv`** in `scheduler/reports_out/`; optional **`ORDER_RECON_ACCOUNT_ID`** in `scheduler/config.py`.
+- [ ] **5.6.2** **Position reconciliation:** **deferred** (same CSV style as orders; not implemented).
+- [x] **5.6.3** **Idempotency:** safe to re-run same calendar window; no duplicate alerts for same settled state (document strategy). **Same-hour report timestamp slug** → overwrite; diff reflects current drift.
+- [x] **5.6.4** **Unit tests:** mock broker responses and DB fixtures; assert diff detection logic. **`scheduler/tests/test_order_recon.py`** + **`oms/.../test_api_client.py`** (`get_open_orders`).
 
 ### 4.7 Miscellaneous jobs (example)
 

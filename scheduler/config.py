@@ -31,8 +31,23 @@ def scheduler_reports_csv_dir() -> Path:
     """Package-relative directory for scheduler CSV exports; created on first write."""
     return Path(__file__).resolve().parent / SCHEDULER_REPORTS_CSV_DIRNAME
 
+
+# Order reconciliation (Phase 5 §4.6): Binance spot open orders vs Postgres ``orders``.
+ORDER_RECON_BROKER: str = "binance"
+ORDER_RECON_INTERNAL_OPEN_STATUSES: tuple[str, ...] = ("pending", "sent", "partially_filled")
+# Restrict to one broker account id if set; ``None`` = all rows for ``ORDER_RECON_BROKER``.
+ORDER_RECON_ACCOUNT_ID: str | None = None
+ORDER_RECON_JOB_INTERVAL_SECONDS: int = 3600
+
 # Registry keys must match entries in ``scheduler.registry._JOB_FACTORIES``.
 JOB_SPECS: tuple[JobSpec, ...] = (
+    JobSpec(
+        job_id="order_reconciliation_binance",
+        enabled=True,
+        interval_seconds=ORDER_RECON_JOB_INTERVAL_SECONDS,
+        cron_expression=None,
+        timeout_seconds=DEFAULT_JOB_TIMEOUT_SECONDS,
+    ),
     JobSpec(
         job_id="position_snapshot_hourly",
         enabled=True,

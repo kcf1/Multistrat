@@ -326,6 +326,44 @@ class TestQueryOrder:
             api_client.query_order(symbol='BTCUSDT')
 
 
+class TestGetOpenOrders:
+    """Test get_open_orders endpoint."""
+
+    @responses.activate
+    def test_get_open_orders_all(self, api_client):
+        responses.add(
+            responses.GET,
+            "https://testnet.binance.vision/api/v3/openOrders",
+            json=[
+                {
+                    "symbol": "BTCUSDT",
+                    "orderId": 1,
+                    "clientOrderId": "cid-a",
+                    "status": "NEW",
+                    "executedQty": "0",
+                }
+            ],
+            status=200,
+        )
+        out = api_client.get_open_orders()
+        assert len(out) == 1
+        assert out[0]["clientOrderId"] == "cid-a"
+        req = responses.calls[0].request
+        assert "signature" in urlparse(req.url).query
+
+    @responses.activate
+    def test_get_open_orders_with_symbol(self, api_client):
+        responses.add(
+            responses.GET,
+            "https://testnet.binance.vision/api/v3/openOrders",
+            json=[],
+            status=200,
+        )
+        api_client.get_open_orders(symbol="ETHUSDT")
+        params = parse_qs(urlparse(responses.calls[0].request.url).query)
+        assert params["symbol"][0] == "ETHUSDT"
+
+
 class TestCancelOrder:
     """Test cancel_order endpoint."""
     

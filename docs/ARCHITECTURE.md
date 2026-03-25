@@ -97,7 +97,7 @@ All tables are managed via **Alembic** under `alembic/versions/`. OMS writes ord
 |-------|---------|----------------------|
 | **scheduler_runs** | Audit log for each scheduled job invocation | `id` (PK), `job_id`, `started_at`, `finished_at`, `status` (`ok` / `error`), `error`, `payload` (JSONB). Written by `scheduler/run_history.py`. See [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md) §4.4. |
 
-**Reports (CSV, not in Postgres):** `position_snapshot_hourly` writes **four** files per run (by **asset**, **broker**, **book**, **granular**) under **`scheduler/reports_out/`**, **gitignored**. See [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md) §4.5.
+**Reports / reconciliation (CSV, not in Postgres):** under **`scheduler/reports_out/`** (gitignored): `position_snapshot_hourly` writes **four** position files per run (§4.5); **`order_reconciliation_binance`** writes **`order_recon_summary_*.csv`** and **`order_recon_diff_*.csv`** (open **Postgres** `orders` vs Binance **`/api/v3/openOrders`**, §4.6).
 
 ---
 

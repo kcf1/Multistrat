@@ -9,7 +9,7 @@ Syncs request timestamp with Binance server time to avoid -1021 (timestamp ahead
 import hashlib
 import hmac
 import time
-from typing import Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlencode
 
 import requests
@@ -278,6 +278,44 @@ class BinanceAPIClient:
                     ) from e
                 except ValueError:
                     # Non-JSON error response; store text as error_data
+                    error_data = {"text": e.response.text}
+                    raise BinanceAPIError(
+                        f"Binance API error: {e.response.text}",
+                        error_data=error_data,
+                    ) from e
+            raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
+
+    def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        List open orders (signed GET /api/v3/openOrders).
+
+        If ``symbol`` is omitted, returns all open orders for the account (higher rate-limit weight).
+
+        Returns:
+            List of order dicts (Binance JSON shape).
+        """
+        endpoint = "/api/v3/openOrders"
+        url = f"{self.base_url}{endpoint}"
+        params: Dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+        params = self._prepare_params(params)
+        param_list = sorted(params.items())
+        try:
+            response = self.session.get(url, params=param_list, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, list) else []
+        except requests.exceptions.RequestException as e:
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    error_data = e.response.json()
+                    raise BinanceAPIError(
+                        f"Binance API error: {error_data.get('msg', 'Unknown error')} "
+                        f"(code: {error_data.get('code', 'N/A')})",
+                        error_data=error_data,
+                    ) from e
+                except ValueError:
                     error_data = {"text": e.response.text}
                     raise BinanceAPIError(
                         f"Binance API error: {e.response.text}",
