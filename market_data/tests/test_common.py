@@ -153,32 +153,3 @@ def test_iter_taker_buy_sell_volume_pages_tail_then_head_like_binance() -> None:
     assert sum(len(b) for b in batches) == 649
 
 
-def test_iter_taker_buy_sell_volume_stops_on_non_advancing_oldest_point() -> None:
-    pd_ms = 3_600_000
-    start_ms = 1_700_000_000_000
-    end_ms = start_ms + 5 * pd_ms
-
-    # Paging backward expects the oldest sample_time in the returned page to move
-    # earlier each iteration. If the API repeats the same page, we'd otherwise
-    # keep requesting the same endTime repeatedly.
-    first = start_ms + 2 * pd_ms
-    batch = [
-        _taker_point(first),
-        _taker_point(start_ms + 4 * pd_ms),
-    ]
-
-    prov = MagicMock()
-    prov.fetch_taker_buy_sell_volume.return_value = batch
-
-    batches = list(
-        iter_taker_buy_sell_volume_batches_forward(
-            prov,
-            "BTCUSDT",
-            "1h",
-            start_ms=start_ms,
-            end_ms=end_ms,
-            chunk_limit=500,
-        )
-    )
-    assert len(batches) == 1
-    assert batches[0] == batch

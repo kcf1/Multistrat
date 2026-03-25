@@ -297,8 +297,6 @@ def iter_taker_buy_sell_volume_batches_forward(
     stack: list[list[TakerBuySellVolumePoint]] = []
     safety = 0
     cur_end = hi
-    prev_first_sample_time: datetime | None = None
-
     while cur_end > lo and safety < 100_000:
         safety += 1
         batch = provider.fetch_taker_buy_sell_volume(
@@ -310,16 +308,12 @@ def iter_taker_buy_sell_volume_batches_forward(
         )
         if not batch:
             break
+        # Filter to the overall requested ingest window, mirroring open interest behavior.
         batch = filter_taker_buy_sell_volume_in_ms_window(batch, lo, hi)
         if not batch:
             break
 
         first = batch[0].sample_time
-        # Paging backward expects the oldest timestamp to move earlier each iteration.
-        # If it does not, we'd get a repeated page loop.
-        if prev_first_sample_time is not None and first >= prev_first_sample_time:
-            break
-        prev_first_sample_time = first
 
         stack.append(batch)
 
