@@ -64,6 +64,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql://${POSTGRES_USER:-multistrat}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-multistrat}
+      # Backfills and scripts using ``MarketDataSettings`` prefer MARKET_DATA_DATABASE_URL; .env often
+      # uses localhost for host dev — override so ``docker compose run oms`` matches ``market_data``.
+      MARKET_DATA_DATABASE_URL: postgresql://${POSTGRES_USER:-multistrat}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-multistrat}
     restart: unless-stopped
     networks:
       - multistrat
