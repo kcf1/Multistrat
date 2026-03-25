@@ -21,14 +21,17 @@ from market_data.config import (
     MARKET_DATA_MIN_REQUEST_INTERVAL_SEC,
     OPEN_INTEREST_FETCH_MAX_ATTEMPTS,
     OPEN_INTEREST_FETCH_RETRY_BASE_SLEEP_SEC,
+    TAKER_BUYSELL_VOLUME_FETCH_MAX_ATTEMPTS,
+    TAKER_BUYSELL_VOLUME_FETCH_RETRY_BASE_SLEEP_SEC,
     MarketDataSettings,
 )
 from market_data.intervals import floor_align_ms_to_interval, interval_to_millis
 from market_data.rate_limit import ProviderRateLimiter
-from market_data.schemas import BasisPoint, OpenInterestPoint
+from market_data.schemas import BasisPoint, OpenInterestPoint, TakerBuySellVolumePoint
 from market_data.validation import (
     process_binance_basis_payload,
     process_binance_open_interest_payload,
+    process_binance_taker_buy_sell_volume_payload,
 )
 
 
@@ -41,6 +44,7 @@ class BinancePerpsMarketDataProvider:
 
     BASIS_PATH = "/futures/data/basis"
     OPEN_INTEREST_PATH = "/futures/data/openInterestHist"
+    TAKER_BUYSELL_VOLUME_PATH = "/futures/data/takerlongshortRatio"
 
     def __init__(
         self,
@@ -53,6 +57,8 @@ class BinancePerpsMarketDataProvider:
         fetch_retry_base_sleep_sec: float | None = None,
         open_interest_fetch_max_attempts: int | None = None,
         open_interest_fetch_retry_base_sleep_sec: float | None = None,
+        taker_fetch_max_attempts: int | None = None,
+        taker_fetch_retry_base_sleep_sec: float | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._limiter = rate_limiter if rate_limiter is not None else ProviderRateLimiter()
@@ -77,6 +83,16 @@ class BinancePerpsMarketDataProvider:
             open_interest_fetch_retry_base_sleep_sec
             if open_interest_fetch_retry_base_sleep_sec is not None
             else OPEN_INTEREST_FETCH_RETRY_BASE_SLEEP_SEC
+        )
+        self._taker_fetch_max_attempts = (
+            taker_fetch_max_attempts
+            if taker_fetch_max_attempts is not None
+            else TAKER_BUYSELL_VOLUME_FETCH_MAX_ATTEMPTS
+        )
+        self._taker_fetch_retry_base = (
+            taker_fetch_retry_base_sleep_sec
+            if taker_fetch_retry_base_sleep_sec is not None
+            else TAKER_BUYSELL_VOLUME_FETCH_RETRY_BASE_SLEEP_SEC
         )
         self.fetch_give_ups: list[str] = []
 
@@ -247,6 +263,93 @@ class BinancePerpsMarketDataProvider:
         logger.error(
             "Binance open interest giving up after {} attempts — {}; returning empty page (ingest proceeds)",
             self._open_interest_fetch_max_attempts,
+            detail,
+        )
+        return []
+
+    def fetch_taker_buy_sell_volume(
+        self,
+        symbol: str,
+        period: str,
+        *,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+        limit: int = 500,
+    ) -> list[TakerBuySellVolumePoint]:
+        if limit < 1 or limit > 500:
+            raise ValueError("limit must be between 1 and 500 for Binance taker buy/sell volume")
+
+        pd = period.strip()
+        pd_ms = interval_to_millis(pd)
+
+        start_eff = floor_align_ms_to_interval(int(start_time_ms), pd)
+        end_eff: int | None
+        if end_time_ms is not None:
+            end_eff = floor_align_ms_to_interval(int(end_time_ms), pd)
+            if end_eff <= start_eff:
+                end_eff = start_eff + pd_ms
+        else:
+            end_eff = None
+
+        params: dict[str, Any] = {
+            "symbol": symbol.strip().upper(),
+            "period": pd,
+            "startTime": int(start_eff),
+            "limit": int(limit),
+        }
+        if end_eff is not None:
+            params["endTime"] = int(end_eff)
+
+        url = f"{self._base}{self.TAKER_BUYSELL_VOLUME_PATH}?{urlencode(params)}"
+        sym = params["symbol"]
+        pd = params["period"]
+
+        last_exc: Exception | None = None
+        for attempt in range(1, self._taker_fetch_max_attempts + 1):
+            try:
+                self._limiter.acquire()
+                resp = self._session.get(url, timeout=self._timeout)
+                if resp.status_code == 400:
+                    body = (resp.text or "").strip()
+                    snippet = body[:400] + ("…" if len(body) > 400 else "")
+                    detail = f"{sym} {pd}: HTTP 400 {snippet or '(no body)'}"
+                    self.fetch_give_ups.append(detail)
+                    logger.warning(
+                        "Binance taker buy/sell volume {} {} HTTP 400 — not retrying; {}",
+                        sym,
+                        pd,
+                        snippet or "(no body)",
+                    )
+                    return []
+                resp.raise_for_status()
+                raw = resp.json()
+                return process_binance_taker_buy_sell_volume_payload(
+                    raw,
+                    symbol=sym,
+                    period=pd,
+                )
+            except Exception as e:
+                last_exc = e
+                if attempt >= self._taker_fetch_max_attempts:
+                    break
+                sleep_s = self._taker_fetch_retry_base * (2 ** (attempt - 1))
+                logger.warning(
+                    "Binance taker buy/sell volume {} {} failed (attempt {}/{}): {}; retry in {:.2f}s",
+                    sym,
+                    pd,
+                    attempt,
+                    self._taker_fetch_max_attempts,
+                    e,
+                    sleep_s,
+                )
+                time.sleep(sleep_s)
+
+        assert last_exc is not None
+        detail = f"{sym} {pd}: {last_exc!s}"
+        self.fetch_give_ups.append(detail)
+        logger.error(
+            "Binance taker buy/sell volume giving up after {} attempts — {}; returning empty page (ingest proceeds)",
+            self._taker_fetch_max_attempts,
             detail,
         )
         return []

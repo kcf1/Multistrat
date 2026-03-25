@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint
+from market_data.schemas import (
+    BasisPoint,
+    OhlcvBar,
+    OpenInterestPoint,
+    TakerBuySellVolumePoint,
+)
 
 
 @runtime_checkable
@@ -68,5 +73,26 @@ class OpenInterestProvider(Protocol):
         Return parsed open-interest points (oldest first, Binance order).
 
         ``limit``: max rows per HTTP request (Binance cap 500 for /futures/data/openInterestHist).
+        """
+        ...
+
+
+@runtime_checkable
+class TakerBuySellVolumeProvider(Protocol):
+    """Fetch taker buy/sell volume statistics for a symbol and period."""
+
+    def fetch_taker_buy_sell_volume(
+        self,
+        symbol: str,
+        period: str,
+        *,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+        limit: int = 500,
+    ) -> list[TakerBuySellVolumePoint]:
+        """
+        Return parsed taker buy/sell volume points (oldest first, Binance order).
+
+        ``limit``: max rows per HTTP request (Binance cap 500 for /futures/data/takerlongshortRatio).
         """
         ...

@@ -360,3 +360,95 @@ def parse_binance_open_interest_rows(
         )
         for r in rows
     ]
+
+
+class TakerBuySellVolumePoint(BaseModel):
+    """One persisted taker buy/sell volume row (matches ``taker_buy_sell_volume`` table, excluding ingested_at)."""
+
+    model_config = {"frozen": True}
+
+    symbol: str = Field(..., min_length=1)
+    period: str = Field(..., min_length=1)
+    sample_time: datetime
+    buy_sell_ratio: Decimal
+    buy_vol: Decimal
+    sell_vol: Decimal
+
+    @field_validator("symbol")
+    @classmethod
+    def upper_symbol(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("period")
+    @classmethod
+    def strip_period(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def taker_buy_sell_volume_sanity(self) -> "TakerBuySellVolumePoint":
+        if self.buy_vol < 0:
+            raise ValueError("buy_vol must be >= 0")
+        if self.sell_vol < 0:
+            raise ValueError("sell_vol must be >= 0")
+        # ratio can be fractional; but should not be negative in normal Binance data
+        if self.buy_sell_ratio < 0:
+            raise ValueError("buy_sell_ratio must be >= 0")
+        return self
+
+
+def parse_binance_taker_buy_sell_volume_row(
+    row: Mapping[str, Any],
+    *,
+    symbol: str | None = None,
+    period: str | None = None,
+) -> TakerBuySellVolumePoint:
+    """Parse one Binance `/futures/data/takerlongshortRatio` object into ``TakerBuySellVolumePoint``."""
+    if not isinstance(row, Mapping):
+        raise ValueError("Binance taker buy/sell volume row must be an object")
+
+    def _get_required(key: str) -> Any:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(f"missing or empty taker volume field '{key}'")
+        return v
+
+    def _dec_required(key: str) -> Decimal:
+        try:
+            return Decimal(str(_get_required(key)))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {row.get(key)!r}") from e
+
+    ts_raw = _get_required("timestamp")
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid timestamp: {ts_raw!r}") from e
+
+    resolved_symbol = (symbol or str(_get_required("symbol"))).strip().upper()
+    resolved_period = (period or str(_get_required("period"))).strip()
+
+    return TakerBuySellVolumePoint(
+        symbol=resolved_symbol,
+        period=resolved_period,
+        sample_time=_ms_to_utc_aware(ts_ms),
+        buy_sell_ratio=_dec_required("buySellRatio"),
+        buy_vol=_dec_required("buyVol"),
+        sell_vol=_dec_required("sellVol"),
+    )
+
+
+def parse_binance_taker_buy_sell_volume_rows(
+    rows: list[Mapping[str, Any]],
+    *,
+    symbol: str | None = None,
+    period: str | None = None,
+) -> list[TakerBuySellVolumePoint]:
+    """Parse a list of taker buy/sell volume objects (e.g. full API response)."""
+    return [
+        parse_binance_taker_buy_sell_volume_row(
+            r,
+            symbol=symbol,
+            period=period,
+        )
+        for r in rows
+    ]

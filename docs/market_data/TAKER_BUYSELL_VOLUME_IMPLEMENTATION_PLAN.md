@@ -254,8 +254,8 @@ Retention handling:
 - [x] Add Alembic migration for `taker_buy_sell_volume` table + cursor table.
 - [x] Add taker-buy-sell-volume config constants in `market_data/config.py`.
 - [x] Confirm perps REST base URL setting exists and is documented (`MARKET_DATA_BINANCE_PERPS_BASE_URL`).
-- [ ] Add `TakerBuySellVolumePoint` model + parser + tests.
-- [ ] Add perps provider protocol + Binance adapter method for `/futures/data/takerlongshortRatio`.
+- [x] Add `TakerBuySellVolumePoint` model + parser + tests.
+- [x] Add perps provider protocol + Binance adapter method for `/futures/data/takerlongshortRatio`.
 - [ ] Add taker-buy-sell-volume upsert storage + cursor helpers + tests.
 - [ ] Implement `ingest_taker_buy_sell_volume`.
 - [ ] Implement `correct_window_taker_buy_sell_volume`.

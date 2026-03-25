@@ -9,12 +9,15 @@ from market_data.schemas import (
     BasisPoint,
     OhlcvBar,
     OpenInterestPoint,
+    TakerBuySellVolumePoint,
     parse_binance_basis_row,
     parse_binance_basis_rows,
     parse_binance_kline,
     parse_binance_klines,
     parse_binance_open_interest_row,
     parse_binance_open_interest_rows,
+    parse_binance_taker_buy_sell_volume_row,
+    parse_binance_taker_buy_sell_volume_rows,
 )
 
 
@@ -178,5 +181,54 @@ def test_open_interest_point_frozen() -> None:
     from pydantic import ValidationError
 
     p = parse_binance_open_interest_row(_OPEN_INTEREST_SAMPLE)
+    with pytest.raises(ValidationError):
+        p.period = "4h"  # type: ignore[misc]
+
+
+_TAKER_BUYSELL_VOLUME_SAMPLE = {
+    "buySellRatio": "1.5586",
+    "buyVol": "387.3300",
+    "sellVol": "248.5030",
+    "timestamp": 1640995200000,
+    "symbol": "BTCUSDT",
+    "period": "1h",
+}
+
+
+def test_parse_binance_taker_buy_sell_volume_row_full() -> None:
+    p = parse_binance_taker_buy_sell_volume_row(_TAKER_BUYSELL_VOLUME_SAMPLE)
+    assert p.symbol == "BTCUSDT"
+    assert p.period == "1h"
+    assert p.buy_sell_ratio == Decimal("1.5586")
+    assert p.buy_vol == Decimal("387.3300")
+    assert p.sell_vol == Decimal("248.5030")
+    assert p.sample_time == datetime(2022, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_binance_taker_buy_sell_volume_row_with_explicit_context() -> None:
+    row = dict(_TAKER_BUYSELL_VOLUME_SAMPLE)
+    row["symbol"] = "IGNORED"
+    row["period"] = "5m"
+    p = parse_binance_taker_buy_sell_volume_row(
+        row,
+        symbol="ethusdt",
+        period="1h",
+    )
+    assert p.symbol == "ETHUSDT"
+    assert p.period == "1h"
+
+
+def test_parse_binance_taker_buy_sell_volume_rows_multiple() -> None:
+    points = parse_binance_taker_buy_sell_volume_rows(
+        [_TAKER_BUYSELL_VOLUME_SAMPLE, _TAKER_BUYSELL_VOLUME_SAMPLE],
+    )
+    assert len(points) == 2
+    assert all(isinstance(p, TakerBuySellVolumePoint) for p in points)
+
+
+def test_taker_buy_sell_volume_point_frozen() -> None:
+    from pydantic import ValidationError
+
+    p = parse_binance_taker_buy_sell_volume_row(_TAKER_BUYSELL_VOLUME_SAMPLE)
     with pytest.raises(ValidationError):
         p.period = "4h"  # type: ignore[misc]

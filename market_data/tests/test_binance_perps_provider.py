@@ -29,6 +29,15 @@ _OPEN_INTEREST_ROW = {
     "period": "1h",
 }
 
+_TAKER_BUYSELL_VOLUME_ROW = {
+    "buySellRatio": "1.5586",
+    "buyVol": "387.3300",
+    "sellVol": "248.5030",
+    "timestamp": 1640995200000,
+    "symbol": "BTCUSDT",
+    "period": "1h",
+}
+
 
 def _mock_response(payload: list) -> MagicMock:
     r = MagicMock()
@@ -201,6 +210,89 @@ def test_fetch_open_interest_parses_and_calls_get() -> None:
     assert "period=1h" in url
     assert "startTime=1640995200000" in url
     assert "limit=100" in url
+
+
+def test_fetch_taker_buy_sell_volume_parses_and_calls_get() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response([_TAKER_BUYSELL_VOLUME_ROW])
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        rate_limiter=ProviderRateLimiter(None),
+        taker_fetch_max_attempts=1,
+    )
+    rows = prov.fetch_taker_buy_sell_volume(
+        "btcusdt",
+        "1h",
+        start_time_ms=1640995200000,
+        limit=100,
+    )
+    assert len(rows) == 1
+    assert rows[0].symbol == "BTCUSDT"
+    assert rows[0].period == "1h"
+    session.get.assert_called_once()
+    url = session.get.call_args[0][0]
+    assert "symbol=BTCUSDT" in url
+    assert "period=1h" in url
+    assert "startTime=1640995200000" in url
+    assert "limit=100" in url
+
+
+def test_fetch_taker_buy_sell_volume_includes_end_time() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response([])
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        taker_fetch_max_attempts=1,
+    )
+    prov.fetch_taker_buy_sell_volume(
+        "BTCUSDT",
+        "1h",
+        start_time_ms=3_600_000,
+        end_time_ms=7_200_000,
+        limit=10,
+    )
+    url = session.get.call_args[0][0]
+    assert "startTime=3600000" in url
+    assert "endTime=7200000" in url
+
+
+def test_taker_buy_sell_volume_limit_out_of_range() -> None:
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=MagicMock(),
+        taker_fetch_max_attempts=1,
+    )
+    with pytest.raises(ValueError, match="500"):
+        prov.fetch_taker_buy_sell_volume("BTCUSDT", "1h", start_time_ms=1, limit=0)
+    with pytest.raises(ValueError, match="500"):
+        prov.fetch_taker_buy_sell_volume("BTCUSDT", "1h", start_time_ms=1, limit=501)
+
+
+def test_taker_buy_sell_volume_http_400_no_retry_returns_empty() -> None:
+    session = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.text = '{"code":-1121,"msg":"Invalid symbol."}'
+    session.get.return_value = resp
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        taker_fetch_max_attempts=5,
+        taker_fetch_retry_base_sleep_sec=0.0,
+    )
+    with patch("market_data.providers.binance_perps.time.sleep") as sl:
+        rows = prov.fetch_taker_buy_sell_volume(
+            "BADUSDT",
+            "1h",
+            start_time_ms=1,
+        )
+    sl.assert_not_called()
+    session.get.assert_called_once()
+    assert rows == []
+    assert len(prov.fetch_give_ups) == 1
+    assert "400" in prov.fetch_give_ups[0]
 
 
 def test_fetch_open_interest_includes_end_time() -> None:
