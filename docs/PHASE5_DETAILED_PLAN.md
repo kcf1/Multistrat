@@ -150,7 +150,7 @@ Use this when bringing up the **whole system** on a Mac after clone: infra, sche
 2. **DB schema (Alembic)** — run **after** Postgres is up: `alembic upgrade head` (project uses a single migration chain under `alembic/versions/`).
 3. **`.env`** — maintain manually; see `.env.example` and [env-and-config](../.cursor/rules/env-and-config.mdc).
 4. **Initial data (ingestion / seed)** — not automatic in Compose; run explicitly once per fresh DB (see §8.4).
-5. **App services** — `oms`, `pms`, `risk`, `market_data`, **`scheduler`** (Phase 5).
+5. **App services** — `oms`, `pms`, `risk`, `market_data`, **`scheduler`** (Phase 5). The **`deploy_stack`** script starts **`oms`** first, then runs the history backfill, then **`market_data`**, then **`pms`**, **`risk`**, and **`scheduler`** so ingestion is up before those consumers.
 
 ### 8.3 One-shot deploy script (recommended)
 
@@ -166,16 +166,15 @@ Optional flags:
 - **`--no-build`** — skip image build (faster iteration if the image is already current).
 - **`--with-tools`** — also start **`pgadmin`** and **`redisinsight`** (see `docker-compose.yml` ports).
 - **`--skip-existing`** — only for backfill: attempt to skip contiguous existing history when possible.
-- **`--destructive-seed`** — run **`scripts/reset_and_seed_assets.py`** (truncates **`assets`**) instead of the default **`scripts/init_assets.py`** (stables only, idempotent).
 - **`--dry-run`** — print commands without running.
 
-The script: builds app images → **`docker compose up -d`** for `postgres` + `redis` → **`docker compose run --rm oms python -m alembic upgrade head`** → **asset seed** (`init_assets` or `reset_and_seed_assets` with `--destructive-seed`) → starts core apps (`oms`, `pms`, `risk`, `scheduler`) → runs **`scripts/backfill_all_no_watermarks.py`** → starts `market_data`.
+The script: builds app images → **`docker compose up -d`** for `postgres` + `redis` → **`docker compose run --rm oms python -m alembic upgrade head`** → starts **`oms`** only → runs **`scripts/backfill_all_no_watermarks.py`** → starts **`market_data`** → starts **`pms`**, **`risk`**, and **`scheduler`**. **Asset rows** (stables + `usd_symbol` from `symbols`) are initialized when **PMS** starts; use **`§8.4`** scripts manually if you need a full **`assets`** reset or a one-off without bringing up PMS.
 
-On Windows PowerShell, use **`.\scripts\deploy_stack.ps1`** with the same idea: **`-DestructiveSeed`** replaces the default **`init_assets`** step.
+On Windows PowerShell, use **`.\scripts\deploy_stack.ps1`** with the same flags (**`-NoBuild`**, **`-WithTools`**, **`-SkipExisting`**, **`-DryRun`**).
 
 Legacy behavior (seed + start *all* services immediately) is preserved as `scripts/deploy_stack_legacy_all_services.sh`.
 
-Windows equivalent for “rebuild apps + migrate” only: **`scripts/update_and_deploy.ps1`** (assumes Postgres already running). For a full first-time Windows bootstrap, mirror the same steps as the shell script (compose up infra, `run oms … alembic`, seed, compose up apps).
+Windows equivalent for “rebuild apps + migrate” only: **`scripts/update_and_deploy.ps1`** (assumes Postgres already running). For a full first-time Windows bootstrap, mirror the same steps as the shell script (compose up infra, `run oms … alembic`, compose up apps).
 
 ### 8.4 Initial data (seed scripts)
 

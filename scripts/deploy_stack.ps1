@@ -2,10 +2,10 @@
 #   1) (manual) set `.env`
 #   2) docker up (infra only: postgres, redis)
 #   3) run Alembic migrations
-#   4) seed assets (init_assets by default; -DestructiveSeed for reset_and_seed_assets)
-#   5) docker start core apps (oms, pms, risk, scheduler) (market_data still OFF)
-#   6) backfill market data with NO watermarks
-#   7) start `market_data`
+#   4) docker start `oms` only (symbol sync; backfill uses oms image)
+#   5) backfill market data with NO watermarks
+#   6) start `market_data`
+#   7) docker start `pms`, `risk`, `scheduler` (PMS seeds assets at startup)
 #
 # Usage (from repo root):
 #   .\scripts\deploy_stack.ps1
@@ -14,7 +14,6 @@
 #   -NoBuild        Skip rebuilding app images
 #   -WithTools      Also start pgadmin + redisinsight
 #   -SkipExisting   Only with backfill (attempt to skip contiguous existing history)
-#   -DestructiveSeed  Run reset_and_seed_assets.py (truncates assets) instead of init_assets.py
 #   -DryRun         Print what would run
 
 $ErrorActionPreference = "Stop"
@@ -27,7 +26,6 @@ param(
   [switch]$NoBuild,
   [switch]$WithTools,
   [switch]$SkipExisting,
-  [switch]$DestructiveSeed,
   [switch]$DryRun
 )
 
@@ -102,20 +100,9 @@ Write-Host "Running DB migrations (alembic upgrade head)..."
   RunCmd $cmd
 }
 
-if ($DestructiveSeed) {
-  Write-Host "Seeding assets (destructive: reset_and_seed_assets)..."
-  $seedCmd = @("docker", "compose") + $composeArgs + @("run", "--rm", "oms", "python", "scripts/reset_and_seed_assets.py")
-  RunCmd $seedCmd
-}
-else {
-  Write-Host "Seeding assets (init_assets)..."
-  $seedCmd = @("docker", "compose") + $composeArgs + @("run", "--rm", "oms", "python", "scripts/init_assets.py")
-  RunCmd $seedCmd
-}
-
-Write-Host "Starting core apps (market_data OFF): oms pms risk scheduler"
+Write-Host "Starting OMS only (symbol sync before backfill; pms/risk/scheduler after market_data)..."
 {
-  $cmd = @("docker", "compose") + $composeArgs + @("up", "-d") + @("oms", "pms", "risk", "scheduler")
+  $cmd = @("docker", "compose") + $composeArgs + @("up", "-d", "oms")
   RunCmd $cmd
 }
 
@@ -130,6 +117,12 @@ RunCmd $backfillCmd
 Write-Host "Starting market_data..."
 {
   $cmd = @("docker", "compose") + $composeArgs + @("up", "-d", "market_data")
+  RunCmd $cmd
+}
+
+Write-Host "Starting pms, risk, scheduler..."
+{
+  $cmd = @("docker", "compose") + $composeArgs + @("up", "-d") + @("pms", "risk", "scheduler")
   RunCmd $cmd
 }
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Deploy workflow for Phase 5 + Market Data (core-first + backfill before market_data):
+# Deploy workflow for Phase 5 + Market Data:
 #   1) (manual) set `.env`
 #   2) docker up (infra only: postgres, redis)
 #   3) run Alembic migrations
-#   4) seed assets (init_assets by default; --destructive-seed for reset_and_seed_assets)
-#   5) docker start core apps (oms, pms, risk, scheduler) (market_data still OFF)
-#   6) backfill market data with NO watermarks
-#   7) start `market_data`
+#   4) docker start `oms` only (symbol sync; backfill uses oms image)
+#   5) backfill market data with NO watermarks
+#   6) start `market_data`
+#   7) docker start `pms`, `risk`, `scheduler` (PMS seeds assets at startup after symbols exist)
 #
 # Run from repo root:
 #   ./scripts/deploy_stack.sh
@@ -16,7 +16,6 @@
 #   --no-build     Skip rebuilding app images
 #   --with-tools   Also start pgadmin + redisinsight
 #   --skip-existing Only with backfill (attempt to skip contiguous existing history)
-#   --destructive-seed  Run scripts/reset_and_seed_assets.py (truncates assets) instead of init_assets.py
 #   --dry-run       Print what would run
 
 set -euo pipefail
@@ -28,7 +27,6 @@ cd "${REPO_ROOT}"
 NO_BUILD=0
 WITH_TOOLS=0
 SKIP_EXISTING=0
-DESTRUCTIVE_SEED=0
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -42,14 +40,11 @@ while [[ $# -gt 0 ]]; do
     --skip-existing)
       SKIP_EXISTING=1
       ;;
-    --destructive-seed)
-      DESTRUCTIVE_SEED=1
-      ;;
     --dry-run)
       DRY_RUN=1
       ;;
     -h|--help)
-      echo "Usage: $0 [--no-build] [--with-tools] [--skip-existing] [--destructive-seed] [--dry-run]"
+      echo "Usage: $0 [--no-build] [--with-tools] [--skip-existing] [--dry-run]"
       exit 0
       ;;
     *)
@@ -131,16 +126,8 @@ wait_healthy redis
 echo "Running DB migrations (alembic upgrade head)..."
 run docker compose "${COMPOSE_ARGS[@]}" run --rm oms python -m alembic upgrade head
 
-if [[ "${DESTRUCTIVE_SEED}" -eq 1 ]]; then
-  echo "Seeding assets (destructive: reset_and_seed_assets)..."
-  run docker compose "${COMPOSE_ARGS[@]}" run --rm oms python scripts/reset_and_seed_assets.py
-else
-  echo "Seeding assets (init_assets)..."
-  run docker compose "${COMPOSE_ARGS[@]}" run --rm oms python scripts/init_assets.py
-fi
-
-echo "Starting core apps (market_data OFF): oms pms risk scheduler"
-run docker compose "${COMPOSE_ARGS[@]}" up -d oms pms risk scheduler
+echo "Starting OMS only (symbol sync before backfill; pms/risk/scheduler after market_data)..."
+run docker compose "${COMPOSE_ARGS[@]}" up -d oms
 
 BACKFILL_ARGS=(python scripts/backfill_all_no_watermarks.py)
 if [[ "${SKIP_EXISTING}" -eq 1 ]]; then
@@ -152,6 +139,9 @@ run docker compose "${COMPOSE_ARGS[@]}" run --rm oms "${BACKFILL_ARGS[@]}"
 
 echo "Starting market_data..."
 run docker compose "${COMPOSE_ARGS[@]}" up -d market_data
+
+echo "Starting pms, risk, scheduler..."
+run docker compose "${COMPOSE_ARGS[@]}" up -d pms risk scheduler
 
 echo "Done. Current status:"
 run docker compose "${COMPOSE_ARGS[@]}" ps

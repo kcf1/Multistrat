@@ -11,7 +11,7 @@ When ASSET_PRICE_FEED_SOURCE is set (e.g. binance), runs asset price feed before
 import argparse
 import sys
 
-from pms.asset_init import init_assets_stables
+from pms.asset_init import init_assets_stables, sync_assets_from_symbols
 from pms.asset_price_feed import run_asset_price_feed_step
 from pms.config import ASSET_PRICE_FEED_ASSETS, ASSET_PRICE_FEED_SOURCE
 from pms.asset_price_providers import get_asset_price_provider
@@ -42,6 +42,14 @@ def main() -> None:
             logger.info("Assets init: upserted {} stable(s) with usd_price=1", n)
     except Exception as e:
         logger.warning("Assets init at startup failed (continuing): {}", e)
+
+    # One-time: align assets.usd_symbol with symbols.base_asset (requires symbols populated by OMS or seed)
+    try:
+        m = sync_assets_from_symbols(settings.database_url, quote_asset="USDT")
+        if m:
+            logger.info("sync_assets_from_symbols at startup: upserted {} asset(s)", m)
+    except Exception as e:
+        logger.warning("sync_assets_from_symbols at startup failed (continuing): {}", e)
 
     mark_provider = get_mark_price_provider(
         settings.pms_mark_price_source,
