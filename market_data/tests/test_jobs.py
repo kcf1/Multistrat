@@ -13,6 +13,8 @@ from market_data.config import (
     OPEN_INTEREST_CONTRACT_TYPES,
     OPEN_INTEREST_PERIODS,
     OPEN_INTEREST_SYMBOLS,
+    TOP_TRADER_LONG_SHORT_PERIODS,
+    TOP_TRADER_LONG_SHORT_SYMBOLS,
     TAKER_BUYSELL_VOLUME_PERIODS,
     TAKER_BUYSELL_VOLUME_SYMBOLS,
 )
@@ -44,6 +46,12 @@ from market_data.jobs.ingest_taker_buy_sell_volume import (
     resolve_taker_buy_sell_volume_ingest_start_ms,
     run_ingest_taker_buy_sell_volume,
 )
+from market_data.jobs.ingest_top_trader_long_short import (
+    IngestTopTraderLongShortSeriesResult,
+    ingest_top_trader_long_short_series,
+    resolve_top_trader_long_short_ingest_start_ms,
+    run_ingest_top_trader_long_short,
+)
 from market_data.jobs.ingest_ohlcv import ingest_ohlcv_series
 from market_data.jobs.repair_gap_open_interest import (
     detect_open_interest_time_gaps,
@@ -64,7 +72,14 @@ from market_data.jobs.correct_window_taker_buy_sell_volume import (
     run_correct_window_taker_buy_sell_volume_series,
     run_correct_window_taker_buy_sell_volume,
 )
-from market_data.schemas import TakerBuySellVolumePoint
+from market_data.jobs.correct_window_top_trader_long_short import (
+    run_correct_window_top_trader_long_short_series,
+)
+from market_data.jobs.repair_gap_top_trader_long_short import (
+    detect_top_trader_long_short_time_gaps,
+    run_repair_top_trader_long_short_gap,
+)
+from market_data.schemas import TakerBuySellVolumePoint, TopTraderLongShortPoint
 
 
 def _bar(
@@ -123,6 +138,18 @@ def _taker_buy_sell_volume_point(sample_ms: int, *, symbol: str = "BTCUSDT") -> 
         buy_sell_ratio=Decimal("1.5586"),
         buy_vol=Decimal("387.3300"),
         sell_vol=Decimal("248.5030"),
+    )
+
+
+def _top_trader_long_short_point(sample_ms: int, *, symbol: str = "BTCUSDT") -> TopTraderLongShortPoint:
+    st = datetime.fromtimestamp(sample_ms / 1000.0, tz=timezone.utc)
+    return TopTraderLongShortPoint(
+        symbol=symbol,
+        period="1h",
+        sample_time=st,
+        long_short_ratio=Decimal("1.4342"),
+        long_account_ratio=Decimal("0.5891"),
+        short_account_ratio=Decimal("0.4108"),
     )
 
 
@@ -588,6 +615,36 @@ def test_resolve_taker_buy_sell_volume_ingest_start_backfill_when_empty() -> Non
     assert start == (raw_horizon // pd_ms) * pd_ms
 
 
+def test_resolve_top_trader_long_short_ingest_start_backfill_when_empty() -> None:
+    conn = MagicMock()
+    now_ms = 1_000_000_000_000
+    with (
+        patch(
+            "market_data.jobs.ingest_top_trader_long_short.get_top_trader_long_short_cursor",
+            return_value=None,
+        ),
+        patch(
+            "market_data.jobs.ingest_top_trader_long_short.max_sample_time_top_trader_long_short",
+            return_value=None,
+        ),
+    ):
+        from market_data.jobs.ingest_top_trader_long_short import (
+            resolve_top_trader_long_short_ingest_start_ms,
+        )
+
+        start = resolve_top_trader_long_short_ingest_start_ms(
+            conn,
+            "BTCUSDT",
+            "1h",
+            now_ms=now_ms,
+            backfill_days=7,
+        )
+
+    raw_horizon = now_ms - 7 * 86_400_000
+    pd_ms = 3_600_000
+    assert start == (raw_horizon // pd_ms) * pd_ms
+
+
 def test_ingest_taker_buy_sell_volume_series_commits_per_chunk() -> None:
     conn = MagicMock()
     cur = MagicMock()
@@ -620,6 +677,54 @@ def test_ingest_taker_buy_sell_volume_series_commits_per_chunk() -> None:
         ) as uc,
     ):
         r = ingest_taker_buy_sell_volume_series(
+            conn,
+            P(),
+            "BTCUSDT",
+            "1h",
+            now_ms=10_000_000,
+            chunk_limit=500,
+        )
+
+    assert r.rows_upserted == 3
+    assert r.chunks == 2
+    assert up.call_count == 2
+    assert uc.call_count == 2
+    assert conn.commit.call_count == 2
+
+
+def test_ingest_top_trader_long_short_series_commits_per_chunk() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+
+    p_tail = [_top_trader_long_short_point(7_260_000)]
+    p_head = [
+        _top_trader_long_short_point(60_000),
+        _top_trader_long_short_point(3_660_000),
+    ]
+
+    class P:
+        def fetch_top_trader_long_short_position_ratio(self, *args, **kwargs):
+            end_time_ms = kwargs["end_time_ms"]
+            if end_time_ms == 10_000_000:
+                return p_tail
+            if end_time_ms == 3_660_000:
+                return p_head
+            return []
+
+    with (
+        patch(
+            "market_data.jobs.ingest_top_trader_long_short.resolve_top_trader_long_short_ingest_start_ms",
+            return_value=60_000,
+        ),
+        patch("market_data.jobs.ingest_top_trader_long_short.upsert_top_trader_long_short_points") as up,
+        patch(
+            "market_data.jobs.ingest_top_trader_long_short.upsert_top_trader_long_short_cursor"
+        ) as uc,
+    ):
+        r = ingest_top_trader_long_short_series(
             conn,
             P(),
             "BTCUSDT",
@@ -670,6 +775,56 @@ def test_ingest_taker_buy_sell_volume_skip_existing_gap_mode_calls_detect_and_se
         ),
     ):
         r = ingest_taker_buy_sell_volume_series(
+            conn,
+            prov,
+            "BTCUSDT",
+            "1h",
+            now_ms=end_ms,
+            backfill_days=backfill_days,
+            use_watermark=False,
+            skip_existing_when_no_watermark=True,
+            chunk_limit=500,
+        )
+
+    assert r.rows_upserted == 2
+    assert r.chunks == 2
+    assert len(seg_calls) == 2
+
+
+def test_ingest_top_trader_long_short_skip_existing_gap_mode_calls_detect_and_segments() -> None:
+    end_ms = 2_000_000_000_000
+    backfill_days = 1
+    horizon_ms = end_ms - backfill_days * 86_400_000
+    horizon_dt = datetime.fromtimestamp(horizon_ms / 1000.0, tz=timezone.utc)
+    g1 = horizon_dt + timedelta(hours=2)
+
+    pd_ms = 3_600_000  # period=1h in this test
+    m_tail = datetime.fromtimestamp((end_ms - pd_ms - 300_000) / 1000.0, tz=timezone.utc)
+
+    seg_calls: list[tuple[int, int]] = []
+
+    def fake_seg(_conn, _prov, _sym, _period, *, start_ms, end_ms, chunk_limit, chunk_progress):
+        seg_calls.append((start_ms, end_ms))
+        return (1, 1)
+
+    conn = MagicMock()
+    prov = MagicMock()
+
+    with (
+        patch(
+            "market_data.jobs.ingest_top_trader_long_short.detect_top_trader_long_short_time_gaps",
+            return_value=[(horizon_dt, g1)],
+        ),
+        patch(
+            "market_data.jobs.ingest_top_trader_long_short._ingest_top_trader_long_short_forward_segment",
+            side_effect=fake_seg,
+        ),
+        patch(
+            "market_data.jobs.ingest_top_trader_long_short.max_sample_time_top_trader_long_short",
+            return_value=m_tail,
+        ),
+    ):
+        r = ingest_top_trader_long_short_series(
             conn,
             prov,
             "BTCUSDT",
@@ -765,6 +920,23 @@ def test_run_repair_taker_buy_sell_volume_gap_noop_on_bad_range() -> None:
     p.fetch_taker_buy_sell_volume.assert_not_called()
 
 
+def test_run_repair_top_trader_long_short_gap_noop_on_bad_range() -> None:
+    conn = MagicMock()
+    p = MagicMock()
+    assert (
+        run_repair_top_trader_long_short_gap(
+            conn,
+            p,
+            "BTCUSDT",
+            "1h",
+            start_time_ms=500,
+            end_time_ms=500,
+        )
+        == 0
+    )
+    p.fetch_top_trader_long_short_position_ratio.assert_not_called()
+
+
 def test_detect_open_interest_time_gaps_interior() -> None:
     conn = MagicMock()
     cur = MagicMock()
@@ -794,6 +966,22 @@ def test_detect_taker_buy_sell_volume_time_gaps_interior() -> None:
     rs = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
     re_ = datetime(2024, 1, 1, 6, 0, tzinfo=timezone.utc)
     gaps = detect_taker_buy_sell_volume_time_gaps(conn, "BTCUSDT", "1h", rs, re_)
+    assert any(g[0].hour == 2 or g[1].hour == 2 for g in gaps)
+
+
+def test_detect_top_trader_long_short_time_gaps_interior() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t1 = datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc)
+    t3 = datetime(2024, 1, 1, 3, 0, tzinfo=timezone.utc)
+    cur.fetchall.return_value = [(t0,), (t1,), (t3,)]
+    conn.cursor.return_value = cur
+    rs = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    re_ = datetime(2024, 1, 1, 6, 0, tzinfo=timezone.utc)
+    gaps = detect_top_trader_long_short_time_gaps(conn, "BTCUSDT", "1h", rs, re_)
     assert any(g[0].hour == 2 or g[1].hour == 2 for g in gaps)
 
 
@@ -880,6 +1068,47 @@ def test_run_correct_window_taker_buy_sell_volume_series_upserts() -> None:
     conn.commit.assert_called_once()
 
 
+def test_run_correct_window_top_trader_long_short_series_upserts() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+
+    rows = [_top_trader_long_short_point(1_700_000_000_000)]
+
+    class P:
+        def fetch_top_trader_long_short_position_ratio(self, *a, **k):
+            return rows
+
+    with (
+        patch(
+            "market_data.jobs.correct_window_top_trader_long_short.chunk_fetch_top_trader_long_short_forward",
+            return_value=rows,
+        ),
+        patch(
+            "market_data.jobs.correct_window_top_trader_long_short.fetch_top_trader_long_short_by_sample_times",
+            return_value={},
+        ),
+        patch(
+            "market_data.jobs.correct_window_top_trader_long_short.upsert_top_trader_long_short_points"
+        ) as up,
+    ):
+        r = run_correct_window_top_trader_long_short_series(
+            conn,
+            P(),
+            "BTCUSDT",
+            "1h",
+            lookback_points=10,
+            now_ms=1_700_000_060_000,
+        )
+
+    assert r.rows_fetched == 1
+    assert r.drift_rows == 0
+    up.assert_called_once_with(conn, rows)
+    conn.commit.assert_called_once()
+
+
 def test_run_ingest_taker_buy_sell_volume_calls_series_once_per_config_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -925,6 +1154,62 @@ def test_run_correct_window_taker_buy_sell_volume_calls_series_once_per_config_k
     run_correct_window_taker_buy_sell_volume(settings, provider=MagicMock())
 
     expected_n = len(TAKER_BUYSELL_VOLUME_SYMBOLS) * len(TAKER_BUYSELL_VOLUME_PERIODS)
+    assert len(calls) == expected_n
+
+
+def test_run_ingest_top_trader_long_short_calls_series_once_per_config_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_ingest(conn, prov, symbol, period, **kwargs):
+        calls.append((symbol, period))
+        return IngestTopTraderLongShortSeriesResult(symbol, period, 0, 0, ())
+
+    monkeypatch.setattr(
+        "market_data.jobs.ingest_top_trader_long_short.ingest_top_trader_long_short_series",
+        fake_ingest,
+    )
+    monkeypatch.setattr(
+        "market_data.jobs.ingest_top_trader_long_short.psycopg2.connect",
+        lambda _url: MagicMock(close=MagicMock()),
+    )
+    settings = SimpleNamespace(database_url="postgresql://test")
+    run_ingest_top_trader_long_short(settings, provider=MagicMock())
+
+    expected_n = len(TOP_TRADER_LONG_SHORT_SYMBOLS) * len(TOP_TRADER_LONG_SHORT_PERIODS)
+    assert len(calls) == expected_n
+
+
+def test_run_correct_window_top_trader_long_short_calls_series_once_per_config_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_series(conn, prov, symbol, period, **kwargs):
+        from market_data.jobs.correct_window_top_trader_long_short import (
+            CorrectTopTraderLongShortWindowResult,
+        )
+
+        calls.append((symbol, period))
+        return CorrectTopTraderLongShortWindowResult(symbol, period, 0, 0)
+
+    monkeypatch.setattr(
+        "market_data.jobs.correct_window_top_trader_long_short.run_correct_window_top_trader_long_short_series",
+        fake_series,
+    )
+    monkeypatch.setattr(
+        "market_data.jobs.correct_window_top_trader_long_short.psycopg2.connect",
+        lambda _url: MagicMock(close=MagicMock()),
+    )
+    settings = SimpleNamespace(database_url="postgresql://test")
+    from market_data.jobs.correct_window_top_trader_long_short import (
+        run_correct_window_top_trader_long_short,
+    )
+
+    run_correct_window_top_trader_long_short(settings, provider=MagicMock())
+
+    expected_n = len(TOP_TRADER_LONG_SHORT_SYMBOLS) * len(TOP_TRADER_LONG_SHORT_PERIODS)
     assert len(calls) == expected_n
 
 

@@ -8,8 +8,9 @@ from market_data.jobs.common import (
     floor_align_ms_to_interval,
     iter_open_interest_batches_forward,
     iter_taker_buy_sell_volume_batches_forward,
+    iter_top_trader_long_short_batches_forward,
 )
-from market_data.schemas import OpenInterestPoint, TakerBuySellVolumePoint
+from market_data.schemas import OpenInterestPoint, TakerBuySellVolumePoint, TopTraderLongShortPoint
 
 
 def _oi_at(ms: int) -> OpenInterestPoint:
@@ -99,6 +100,17 @@ def _taker_point(ms: int) -> TakerBuySellVolumePoint:
     )
 
 
+def _top_trader_long_short_point(ms: int) -> TopTraderLongShortPoint:
+    return TopTraderLongShortPoint(
+        symbol="BTCUSDT",
+        period="1h",
+        sample_time=datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc),
+        long_short_ratio=Decimal("1.0"),
+        long_account_ratio=Decimal("1.0"),
+        short_account_ratio=Decimal("0.0"),
+    )
+
+
 def test_iter_taker_buy_sell_volume_pages_tail_then_head_like_binance() -> None:
     """
     takerlongshortRatio returns the *latest* ``limit`` rows in [start,end].
@@ -147,6 +159,59 @@ def test_iter_taker_buy_sell_volume_pages_tail_then_head_like_binance() -> None:
             chunk_limit=500,
         )
     )
+    assert len(batches) == 2
+    assert batches[0] == head
+    assert batches[1] == tail
+    assert sum(len(b) for b in batches) == 649
+
+
+def test_iter_top_trader_long_short_pages_tail_then_head_like_binance() -> None:
+    """
+    topLongShortPositionRatio returns the *latest* ``limit`` rows in [start,end].
+
+    So two windows of 500 + 149 buckets require two HTTP calls with a lowered ``endTime``
+    on the second. Iterator must yield the older 149 rows before the newer 500
+    (chronological ingest).
+    """
+    pd_ms = 3_600_000
+    lo = 1_700_000_000_000
+    hi = lo + 649 * pd_ms
+
+    tail = [_top_trader_long_short_point(lo + (149 + i) * pd_ms) for i in range(500)]
+    head = [_top_trader_long_short_point(lo + i * pd_ms) for i in range(149)]
+    second_end = lo + 148 * pd_ms
+
+    prov = MagicMock()
+
+    def fetch(
+        _s: str,
+        _p: str,
+        *,
+        start_time_ms: int,
+        end_time_ms: int,
+        limit: int,
+    ) -> list[TopTraderLongShortPoint]:
+        assert start_time_ms == lo
+        assert limit == 500
+        if end_time_ms == hi:
+            return tail
+        if end_time_ms == second_end:
+            return head
+        raise AssertionError(f"unexpected end_time_ms={end_time_ms}")
+
+    prov.fetch_top_trader_long_short_position_ratio.side_effect = fetch
+
+    batches = list(
+        iter_top_trader_long_short_batches_forward(
+            prov,
+            "BTCUSDT",
+            "1h",
+            start_ms=lo,
+            end_ms=hi,
+            chunk_limit=500,
+        )
+    )
+
     assert len(batches) == 2
     assert batches[0] == head
     assert batches[1] == tail

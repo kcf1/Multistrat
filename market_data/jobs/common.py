@@ -10,9 +10,16 @@ from market_data.providers.base import (
     BasisProvider,
     KlinesProvider,
     OpenInterestProvider,
+    TopTraderLongShortPositionRatioProvider,
     TakerBuySellVolumeProvider,
 )
-from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint, TakerBuySellVolumePoint
+from market_data.schemas import (
+    BasisPoint,
+    OhlcvBar,
+    OpenInterestPoint,
+    TakerBuySellVolumePoint,
+    TopTraderLongShortPoint,
+)
 
 
 def utc_now_ms() -> int:
@@ -338,6 +345,93 @@ def chunk_fetch_taker_buy_sell_volume_forward(
     """Concatenate all batches from :func:`iter_taker_buy_sell_volume_batches_forward` (oldest first)."""
     out: list[TakerBuySellVolumePoint] = []
     for batch in iter_taker_buy_sell_volume_batches_forward(
+        provider,
+        symbol,
+        period,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        chunk_limit=chunk_limit,
+    ):
+        out.extend(batch)
+    return out
+
+
+def iter_top_trader_long_short_batches_forward(
+    provider: TopTraderLongShortPositionRatioProvider,
+    symbol: str,
+    period: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    chunk_limit: int = 500,
+) -> Iterator[list[TopTraderLongShortPoint]]:
+    """
+    Yield each ``fetch_top_trader_long_short_position_ratio`` page covering ``[start_ms, end_ms]``, **oldest
+    chunk first** (chronological ingest / cursor checkpoints).
+
+    Pagination strategy mirrors ``openInterestHist`` / ``takerlongshortRatio``-style limited retention
+    endpoints: when both ``startTime`` and ``endTime`` are provided, the response is effectively the
+    **latest** ``limit`` rows within that window, so we page backward by lowering ``endTime`` to just
+    before the current page's oldest timestamp and then reverse the fetch stack.
+    """
+    pd_ms = interval_to_millis(period)
+    lo = int(start_ms)
+    hi = int(end_ms)
+    if lo >= hi:
+        return
+
+    def filter_top_trader_long_short_in_ms_window(
+        points: list[TopTraderLongShortPoint],
+        start_ms: int,
+        end_ms: int,
+    ) -> list[TopTraderLongShortPoint]:
+        start_dt = datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
+        return [p for p in points if start_dt <= p.sample_time <= end_dt]
+
+    stack: list[list[TopTraderLongShortPoint]] = []
+    safety = 0
+    cur_end = hi
+    while cur_end > lo and safety < 100_000:
+        safety += 1
+        batch = provider.fetch_top_trader_long_short_position_ratio(
+            symbol,
+            period,
+            start_time_ms=lo,
+            end_time_ms=cur_end,
+            limit=chunk_limit,
+        )
+        if not batch:
+            break
+
+        batch = filter_top_trader_long_short_in_ms_window(batch, lo, hi)
+        if not batch:
+            break
+
+        first = batch[0].sample_time
+        stack.append(batch)
+
+        next_end = int(first.timestamp() * 1000) - pd_ms
+        if next_end < lo:
+            break
+        cur_end = next_end
+
+    for batch in reversed(stack):
+        yield batch
+
+
+def chunk_fetch_top_trader_long_short_forward(
+    provider: TopTraderLongShortPositionRatioProvider,
+    symbol: str,
+    period: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    chunk_limit: int = 500,
+) -> list[TopTraderLongShortPoint]:
+    """Concatenate all batches from :func:`iter_top_trader_long_short_batches_forward` (oldest first)."""
+    out: list[TopTraderLongShortPoint] = []
+    for batch in iter_top_trader_long_short_batches_forward(
         provider,
         symbol,
         period,
