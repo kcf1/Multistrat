@@ -49,6 +49,10 @@ from market_data.jobs.repair_gap_open_interest import (
     detect_open_interest_time_gaps,
     run_repair_open_interest_gap,
 )
+from market_data.jobs.repair_gap_taker_buy_sell_volume import (
+    detect_taker_buy_sell_volume_time_gaps,
+    run_repair_taker_buy_sell_volume_gap,
+)
 from market_data.jobs.repair_gap_basis_rate import (
     detect_basis_time_gaps,
     run_repair_basis_gap,
@@ -691,6 +695,23 @@ def test_run_repair_open_interest_gap_noop_on_bad_range() -> None:
     p.fetch_open_interest_hist.assert_not_called()
 
 
+def test_run_repair_taker_buy_sell_volume_gap_noop_on_bad_range() -> None:
+    conn = MagicMock()
+    p = MagicMock()
+    assert (
+        run_repair_taker_buy_sell_volume_gap(
+            conn,
+            p,
+            "BTCUSDT",
+            "1h",
+            start_time_ms=500,
+            end_time_ms=500,
+        )
+        == 0
+    )
+    p.fetch_taker_buy_sell_volume.assert_not_called()
+
+
 def test_detect_open_interest_time_gaps_interior() -> None:
     conn = MagicMock()
     cur = MagicMock()
@@ -704,6 +725,22 @@ def test_detect_open_interest_time_gaps_interior() -> None:
     rs = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
     re_ = datetime(2024, 1, 1, 6, 0, tzinfo=timezone.utc)
     gaps = detect_open_interest_time_gaps(conn, "BTCUSDT", "PERPETUAL", "1h", rs, re_)
+    assert any(g[0].hour == 2 or g[1].hour == 2 for g in gaps)
+
+
+def test_detect_taker_buy_sell_volume_time_gaps_interior() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t1 = datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc)
+    t3 = datetime(2024, 1, 1, 3, 0, tzinfo=timezone.utc)
+    cur.fetchall.return_value = [(t0,), (t1,), (t3,)]
+    conn.cursor.return_value = cur
+    rs = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    re_ = datetime(2024, 1, 1, 6, 0, tzinfo=timezone.utc)
+    gaps = detect_taker_buy_sell_volume_time_gaps(conn, "BTCUSDT", "1h", rs, re_)
     assert any(g[0].hour == 2 or g[1].hour == 2 for g in gaps)
 
 

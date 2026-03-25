@@ -259,7 +259,7 @@ Retention handling:
 - [x] Add taker-buy-sell-volume upsert storage + cursor helpers + tests.
 - [x] Implement `ingest_taker_buy_sell_volume`.
 - [x] Implement `correct_window_taker_buy_sell_volume`.
-- [ ] Implement `repair_gap_taker_buy_sell_volume` (or explicitly defer with scheduler repair disabled).
+- [x] Implement `repair_gap_taker_buy_sell_volume` (policy-window detect+refetch).
 - [x] Wire taker jobs into `market_data/main.py`.
 - [ ] Add one-shot/backfill CLI/script for this dataset.
 - [ ] Update README and dataset docs.

@@ -127,6 +127,10 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
         "market_data.main.run_correct_window_taker_buy_sell_volume",
         lambda _s: calls.append("taker_correct") or [],
     )
+    monkeypatch.setattr(
+        "market_data.main.run_repair_taker_buy_sell_volume_gaps_policy_window_all_series",
+        lambda _s: calls.append("taker_repair") or [],
+    )
     monkeypatch.setattr(sys, "argv", ["market_data.main", "--once", "--with-repair"])
     main()
     assert calls == [
@@ -141,6 +145,7 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
         "oi_correct",
         "oi_repair",
         "taker_correct",
+        "taker_repair",
     ]
 
 
@@ -154,6 +159,7 @@ def test_scheduler_loop_respects_immediate_stop(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("market_data.main._run_basis_repair_step", lambda: called.append("br"))
     monkeypatch.setattr("market_data.main._run_taker_ingest_step", lambda: called.append("ti"))
     monkeypatch.setattr("market_data.main._run_taker_correct_step", lambda: called.append("tc"))
+    monkeypatch.setattr("market_data.main._run_taker_repair_step", lambda: called.append("tr"))
 
     import threading
 
@@ -171,6 +177,7 @@ def test_scheduler_loop_respects_immediate_stop(monkeypatch: pytest.MonkeyPatch)
         open_interest_repair_interval_seconds=0,
         taker_ingest_interval_seconds=300,
         taker_correct_interval_seconds=3600,
+        taker_repair_interval_seconds=0,
         stop_event=stop,
     )
     assert called == []
@@ -194,6 +201,7 @@ def test_scheduler_loop_runs_ingest_once(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr("market_data.main._run_open_interest_repair_step", lambda: None)
     monkeypatch.setattr("market_data.main._run_taker_ingest_step", lambda: None)
     monkeypatch.setattr("market_data.main._run_taker_correct_step", lambda: None)
+    monkeypatch.setattr("market_data.main._run_taker_repair_step", lambda: None)
 
     run_scheduler_loop(
         ingest_interval_seconds=300,
@@ -207,6 +215,7 @@ def test_scheduler_loop_runs_ingest_once(monkeypatch: pytest.MonkeyPatch) -> Non
         open_interest_repair_interval_seconds=0,
         taker_ingest_interval_seconds=300,
         taker_correct_interval_seconds=3600,
+        taker_repair_interval_seconds=0,
         stop_event=stop,
     )
     assert stop.is_set()
@@ -278,5 +287,19 @@ def test_taker_correct_step_calls_run_correct(mock_settings: SimpleNamespace, mo
     from market_data.main import _run_taker_correct_step
 
     _run_taker_correct_step()
+    assert len(called) == 1
+    assert called[0] is mock_settings
+
+
+def test_taker_repair_step_calls_policy_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[object] = []
+    monkeypatch.setattr("market_data.main.load_settings", lambda: mock_settings)
+    monkeypatch.setattr(
+        "market_data.main.run_repair_taker_buy_sell_volume_gaps_policy_window_all_series",
+        lambda s: called.append(s) or [],
+    )
+    from market_data.main import _run_taker_repair_step
+
+    _run_taker_repair_step()
     assert len(called) == 1
     assert called[0] is mock_settings

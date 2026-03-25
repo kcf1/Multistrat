@@ -49,6 +49,7 @@ from market_data.config import (
     OPEN_INTEREST_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
     TAKER_BUYSELL_VOLUME_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
     TAKER_BUYSELL_VOLUME_SCHEDULER_INGEST_INTERVAL_SECONDS,
+    TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
     load_settings,
 )
 from market_data.jobs.correct_window_basis_rate import run_correct_window_basis_rate
@@ -66,6 +67,9 @@ from market_data.jobs.repair_gap_open_interest import (
     run_repair_open_interest_gaps_policy_window_all_series,
 )
 from market_data.jobs.repair_gap import run_repair_gaps_policy_window_all_series
+from market_data.jobs.repair_gap_taker_buy_sell_volume import (
+    run_repair_taker_buy_sell_volume_gaps_policy_window_all_series,
+)
 
 
 def _next_periodic_deadline_after(completed_at: float, period_seconds: int) -> float:
@@ -203,6 +207,19 @@ def _run_taker_correct_step() -> None:
     )
 
 
+def _run_taker_repair_step() -> None:
+    settings = load_settings()
+    results = run_repair_taker_buy_sell_volume_gaps_policy_window_all_series(settings)
+    with_gaps = sum(1 for r in results if r.gap_spans > 0)
+    rows = sum(r.rows_upserted for r in results)
+    logger.info(
+        "repair_gap_taker_buy_sell_volume: {} series, {} had gaps, {} rows upserted",
+        len(results),
+        with_gaps,
+        rows,
+    )
+
+
 def _run_open_interest_repair_step() -> None:
     settings = load_settings()
     results = run_repair_open_interest_gaps_policy_window_all_series(settings)
@@ -229,6 +246,7 @@ def run_scheduler_loop(
     open_interest_repair_interval_seconds: int,
     taker_ingest_interval_seconds: int,
     taker_correct_interval_seconds: int,
+    taker_repair_interval_seconds: int,
     stop_event: threading.Event,
 ) -> None:
     next_ingest: float | None = None
@@ -244,6 +262,9 @@ def run_scheduler_loop(
     )
     next_taker_ingest: float | None = None
     next_taker_correct: float | None = None
+    next_taker_repair: float | None = (
+        None if taker_repair_interval_seconds > 0 else float("inf")
+    )
 
     repair_cadence = (
         f"every {repair_interval_seconds}s"
@@ -391,6 +412,16 @@ def run_scheduler_loop(
                 time.time(), taker_correct_interval_seconds
             )
 
+        now = time.time()
+        if taker_repair_interval_seconds > 0 and _due(now, next_taker_repair):
+            try:
+                _run_taker_repair_step()
+            except Exception:
+                logger.exception("repair_gap_taker_buy_sell_volume step failed")
+            next_taker_repair = _next_periodic_deadline_after(
+                time.time(), taker_repair_interval_seconds
+            )
+
         deadline = min(
             _sleep_deadline(next_ingest),
             _sleep_deadline(next_correct),
@@ -403,6 +434,7 @@ def run_scheduler_loop(
             next_oi_repair,
             _sleep_deadline(next_taker_ingest),
             _sleep_deadline(next_taker_correct),
+            _sleep_deadline(next_taker_repair),
         )
         sleep_for = max(0.0, min(1.0, deadline - time.time()))
         if sleep_for > 0:
@@ -455,6 +487,8 @@ def main() -> None:
                 _run_open_interest_repair_step()
 
             _run_taker_correct_step()
+            if args.with_repair:
+                _run_taker_repair_step()
         except Exception:
             logger.exception("market_data --once failed")
             sys.exit(1)
@@ -482,6 +516,7 @@ def main() -> None:
         open_interest_repair_interval_seconds=OPEN_INTEREST_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
         taker_ingest_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_INGEST_INTERVAL_SECONDS,
         taker_correct_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+        taker_repair_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
         stop_event=stop,
     )
 
