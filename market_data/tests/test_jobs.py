@@ -633,6 +633,57 @@ def test_ingest_taker_buy_sell_volume_series_commits_per_chunk() -> None:
     assert conn.commit.call_count == 2
 
 
+def test_ingest_taker_buy_sell_volume_skip_existing_gap_mode_calls_detect_and_segments() -> None:
+    end_ms = 2_000_000_000_000
+    backfill_days = 1
+    horizon_ms = end_ms - backfill_days * 86_400_000
+    horizon_dt = datetime.fromtimestamp(horizon_ms / 1000.0, tz=timezone.utc)
+    g1 = horizon_dt + timedelta(hours=2)
+
+    pd_ms = 3_600_000  # period=1h in this test
+    # choose last stored sample time so tail_start = m_tail + 1h is < end_ms
+    m_tail = datetime.fromtimestamp((end_ms - pd_ms - 300_000) / 1000.0, tz=timezone.utc)
+
+    seg_calls: list[tuple[int, int]] = []
+
+    def fake_seg(_conn, _prov, _sym, _period, *, start_ms, end_ms, chunk_limit, chunk_progress):
+        seg_calls.append((start_ms, end_ms))
+        return (1, 1)
+
+    conn = MagicMock()
+    prov = MagicMock()
+
+    with (
+        patch(
+            "market_data.jobs.ingest_taker_buy_sell_volume.detect_taker_buy_sell_volume_time_gaps",
+            return_value=[(horizon_dt, g1)],
+        ),
+        patch(
+            "market_data.jobs.ingest_taker_buy_sell_volume._ingest_taker_buy_sell_volume_forward_segment",
+            side_effect=fake_seg,
+        ),
+        patch(
+            "market_data.jobs.ingest_taker_buy_sell_volume.max_sample_time_taker_buy_sell_volume",
+            return_value=m_tail,
+        ),
+    ):
+        r = ingest_taker_buy_sell_volume_series(
+            conn,
+            prov,
+            "BTCUSDT",
+            "1h",
+            now_ms=end_ms,
+            backfill_days=backfill_days,
+            use_watermark=False,
+            skip_existing_when_no_watermark=True,
+            chunk_limit=500,
+        )
+
+    assert r.rows_upserted == 2
+    assert r.chunks == 2
+    assert len(seg_calls) == 2
+
+
 def test_ingest_open_interest_series_commits_per_chunk() -> None:
     conn = MagicMock()
     cur = MagicMock()

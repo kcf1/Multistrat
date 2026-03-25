@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import psycopg2
 
 from market_data.config import (
+    OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
     TAKER_BUYSELL_VOLUME_FETCH_CHUNK_LIMIT,
     TAKER_BUYSELL_VOLUME_INITIAL_BACKFILL_DAYS,
     TAKER_BUYSELL_VOLUME_PERIODS,
@@ -25,6 +27,9 @@ from market_data.jobs.common import (
     open_time_plus_interval_ms,
     utc_now_ms,
     iter_taker_buy_sell_volume_batches_forward,
+)
+from market_data.jobs.repair_gap_taker_buy_sell_volume import (
+    detect_taker_buy_sell_volume_time_gaps,
 )
 from market_data.providers.base import TakerBuySellVolumeProvider
 from market_data.providers.binance_perps import build_binance_perps_provider
@@ -113,6 +118,86 @@ def _ingest_taker_buy_sell_volume_forward_segment(
     return total, chunks
 
 
+def _ingest_taker_buy_sell_volume_skip_existing_gap_mode(
+    conn,
+    provider: TakerBuySellVolumeProvider,
+    symbol: str,
+    period: str,
+    *,
+    end_ms: int,
+    backfill_days: int,
+    chunk_limit: int,
+    chunk_progress: Callable[[Sequence[TakerBuySellVolumePoint]], None] | None,
+    give_before: int,
+) -> IngestTakerBuySellVolumeSeriesResult:
+    """
+    Fill missing spans within the policy horizon via detect+segment gap repair.
+    """
+    pd_ms = interval_to_millis(period)
+    horizon_ms = end_ms - backfill_days * 86_400_000
+    horizon_ms = floor_align_ms_to_interval(horizon_ms, period)
+
+    if horizon_ms >= end_ms:
+        give_msgs = tuple(getattr(provider, "fetch_give_ups", [])[give_before:])
+        return IngestTakerBuySellVolumeSeriesResult(symbol, period, 0, 0, give_msgs)
+
+    horizon_dt = datetime.fromtimestamp(horizon_ms / 1000.0, tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
+    gaps = detect_taker_buy_sell_volume_time_gaps(
+        conn,
+        symbol,
+        period,
+        horizon_dt,
+        end_dt,
+        gap_multiple=OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
+    )
+
+    total = 0
+    chunks = 0
+    for g0, g1 in gaps:
+        seg_start = max(horizon_ms, int(g0.timestamp() * 1000))
+        seg_end = min(end_ms, int(g1.timestamp() * 1000))
+        if seg_start >= seg_end:
+            continue
+        t, c = _ingest_taker_buy_sell_volume_forward_segment(
+            conn,
+            provider,
+            symbol,
+            period,
+            start_ms=seg_start,
+            end_ms=seg_end,
+            chunk_limit=chunk_limit,
+            chunk_progress=chunk_progress,
+        )
+        total += t
+        chunks += c
+
+    # Tail catch-up: always ingest forward from the last stored sample time
+    # (after alignment) up to `end_ms`.
+    m = max_sample_time_taker_buy_sell_volume(conn, symbol, period)
+    tail_start = (
+        max(horizon_ms, open_time_plus_interval_ms(m, pd_ms))
+        if m is not None
+        else horizon_ms
+    )
+    if tail_start < end_ms:
+        t, c = _ingest_taker_buy_sell_volume_forward_segment(
+            conn,
+            provider,
+            symbol,
+            period,
+            start_ms=tail_start,
+            end_ms=end_ms,
+            chunk_limit=chunk_limit,
+            chunk_progress=chunk_progress,
+        )
+        total += t
+        chunks += c
+
+    give_msgs = tuple(getattr(provider, "fetch_give_ups", [])[give_before:])
+    return IngestTakerBuySellVolumeSeriesResult(symbol, period, total, chunks, give_msgs)
+
+
 def ingest_taker_buy_sell_volume_series(
     conn,
     provider: TakerBuySellVolumeProvider,
@@ -129,9 +214,18 @@ def ingest_taker_buy_sell_volume_series(
     end_ms = now_ms if now_ms is not None else utc_now_ms()
     give_before = len(getattr(provider, "fetch_give_ups", []))
 
-    # We don't implement a dedicated gap-based skip mode for this dataset yet.
-    # Upserts keep runs idempotent even if overlapping windows are re-fetched.
-    _ = skip_existing_when_no_watermark
+    if not use_watermark and skip_existing_when_no_watermark:
+        return _ingest_taker_buy_sell_volume_skip_existing_gap_mode(
+            conn,
+            provider,
+            symbol,
+            period,
+            end_ms=end_ms,
+            backfill_days=backfill_days,
+            chunk_limit=chunk_limit,
+            chunk_progress=chunk_progress,
+            give_before=give_before,
+        )
 
     start_ms = resolve_taker_buy_sell_volume_ingest_start_ms(
         conn,
