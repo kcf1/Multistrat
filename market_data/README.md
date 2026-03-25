@@ -51,9 +51,16 @@ python scripts/backfill_basis_rate.py
 python scripts/backfill_open_interest.py
 ```
 
+**Large top-trader long/short backfill** (`tqdm`, optional `--no-watermark` / `--skip-existing`):
+
+```bash
+python scripts/backfill_top_trader_long_short.py
+```
+
 Notes for perps history endpoints (basis + open interest, `period=1h`):
 
 - Binance retention for these endpoints is on the order of **~30 days**, but we request **`BINANCE_FUTURES_LIMITED_RETENTION_BACKFILL_DAYS` (27)** as a **buffer** so the oldest `startTime` stays inside the valid window (see comment in `config.py`). Legacy alias: `BINANCE_FUTURES_30D_DATASET_BACKFILL_DAYS`.
+- The same retention-buffer semantics apply to top-trader long/short (`topLongShortPositionRatio`).
 - Some symbols may return `HTTP 400` (invalid pair, invalid `startTime` before listing, etc.); those series are skipped and logged in provider give-ups.
 
 ## Environment
