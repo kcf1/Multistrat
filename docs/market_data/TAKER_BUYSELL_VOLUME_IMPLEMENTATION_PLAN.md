@@ -305,6 +305,66 @@ Retention handling:
 18. Run local one-shot smoke; verify cursor progression and that clamping works inside the "latest 30 days" availability.
 19. Finalize docs/runbook.
 
+**Phase E status:** done in-repo — parser/provider/storage/job tests under `market_data/tests/` (including taker paging helpers in `test_common.py`, taker ingest/correct/repair runners in `test_jobs.py`, and scheduler step hooks in `test_main.py`). **§12** documents manual smoke and SQL checks. Full live-Postgres E2E remains an operator step.
+
+---
+
+## 12) Operational runbook (smoke & verification)
+
+### Preconditions
+
+- Postgres reachable; migrations applied (`alembic upgrade head`) including `taker_buy_sell_volume` and `taker_buy_sell_volume_cursor`.
+- Env: `MARKET_DATA_DATABASE_URL` or `DATABASE_URL`; optional `MARKET_DATA_BINANCE_PERPS_BASE_URL` for mainnet/testnet.
+
+### Automated tests
+
+```bash
+python -m pytest market_data/tests/ -q
+```
+
+### One-shot service run (no daemon)
+
+```bash
+python -m market_data.main --once
+```
+
+With a single policy-window gap repair pass for all datasets (OHLCV/basis/OI/taker):
+
+```bash
+python -m market_data.main --once --with-repair
+```
+
+### Large / policy backfill CLI
+
+```bash
+python scripts/backfill_taker_buy_sell_volume.py
+python scripts/backfill_taker_buy_sell_volume.py --no-watermark
+python scripts/backfill_taker_buy_sell_volume.py --no-watermark --skip-existing
+```
+
+### Verify cursor / watermark (examples)
+
+```sql
+SELECT symbol, period, last_sample_time
+  FROM taker_buy_sell_volume_cursor
+ ORDER BY symbol, period;
+
+SELECT symbol, period, max(sample_time) AS newest
+  FROM taker_buy_sell_volume
+ GROUP BY symbol, period
+ ORDER BY symbol, period;
+```
+
+After ingest, `taker_buy_sell_volume_cursor.last_sample_time` and `max(sample_time)` should advance toward “now” (subject to Binance retention and per-symbol give-ups).
+
+### Long-running scheduler
+
+```bash
+python -m market_data.main
+```
+
+Tune cadence via `TAKER_BUYSELL_VOLUME_SCHEDULER_*` in `market_data/config.py`. Set `TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS` to a positive value to enable scheduled gap repair (default `0` = off).
+
 ---
 
 ## 11) Explicit non-goals for this tranche
