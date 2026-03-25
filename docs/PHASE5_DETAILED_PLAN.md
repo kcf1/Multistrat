@@ -166,9 +166,12 @@ Optional flags:
 - **`--no-build`** — skip image build (faster iteration if the image is already current).
 - **`--with-tools`** — also start **`pgadmin`** and **`redisinsight`** (see `docker-compose.yml` ports).
 - **`--skip-existing`** — only for backfill: attempt to skip contiguous existing history when possible.
+- **`--destructive-seed`** — run **`scripts/reset_and_seed_assets.py`** (truncates **`assets`**) instead of the default **`scripts/init_assets.py`** (stables only, idempotent).
 - **`--dry-run`** — print commands without running.
 
-The script: builds app images → **`docker compose up -d`** for `postgres` + `redis` → **`docker compose run --rm oms python -m alembic upgrade head`** → starts core apps (`oms`, `pms`, `risk`, `scheduler`) → runs **`scripts/backfill_all_no_watermarks.py`** → starts `market_data`.
+The script: builds app images → **`docker compose up -d`** for `postgres` + `redis` → **`docker compose run --rm oms python -m alembic upgrade head`** → **asset seed** (`init_assets` or `reset_and_seed_assets` with `--destructive-seed`) → starts core apps (`oms`, `pms`, `risk`, `scheduler`) → runs **`scripts/backfill_all_no_watermarks.py`** → starts `market_data`.
+
+On Windows PowerShell, use **`.\scripts\deploy_stack.ps1`** with the same idea: **`-DestructiveSeed`** replaces the default **`init_assets`** step.
 
 Legacy behavior (seed + start *all* services immediately) is preserved as `scripts/deploy_stack_legacy_all_services.sh`.
 
