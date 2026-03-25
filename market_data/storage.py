@@ -19,7 +19,13 @@ from typing import Any, Mapping, Sequence
 from psycopg2.extensions import connection as PsycopgConnection
 from psycopg2.extras import execute_values
 
-from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint, TakerBuySellVolumePoint
+from market_data.schemas import (
+    BasisPoint,
+    OhlcvBar,
+    OpenInterestPoint,
+    TakerBuySellVolumePoint,
+    TopTraderLongShortPoint,
+)
 
 _OHLCV_UPSERT_SQL = """
 INSERT INTO ohlcv (
@@ -75,6 +81,18 @@ ON CONFLICT (symbol, period, sample_time) DO UPDATE SET
     ingested_at = now()
 """
 
+_TOP_TRADER_LONG_SHORT_UPSERT_SQL = """
+INSERT INTO top_trader_long_short (
+    symbol, period, sample_time,
+    long_short_position_ratio, long_account_ratio, short_account_ratio
+) VALUES %s
+ON CONFLICT (symbol, period, sample_time) DO UPDATE SET
+    long_short_position_ratio = EXCLUDED.long_short_position_ratio,
+    long_account_ratio = EXCLUDED.long_account_ratio,
+    short_account_ratio = EXCLUDED.short_account_ratio,
+    ingested_at = now()
+"""
+
 
 def _bar_row(b: OhlcvBar) -> tuple[Any, ...]:
     return (
@@ -125,6 +143,17 @@ def _taker_buy_sell_volume_row(p: TakerBuySellVolumePoint) -> tuple[Any, ...]:
         p.buy_sell_ratio,
         p.buy_vol,
         p.sell_vol,
+    )
+
+
+def _top_trader_long_short_row(p: TopTraderLongShortPoint) -> tuple[Any, ...]:
+    return (
+        p.symbol,
+        p.period,
+        p.sample_time,
+        p.long_short_ratio,
+        p.long_account_ratio,
+        p.short_account_ratio,
     )
 
 
@@ -207,6 +236,29 @@ def upsert_taker_buy_sell_volume_points(
         execute_values(
             cur,
             _TAKER_BUYSELL_VOLUME_UPSERT_SQL,
+            rows,
+            template="(%s, %s, %s, %s, %s, %s)",
+            page_size=min(500, len(rows)),
+        )
+    return len(rows)
+
+
+def upsert_top_trader_long_short_points(
+    conn: PsycopgConnection,
+    points: Sequence[TopTraderLongShortPoint],
+) -> int:
+    """
+    Bulk upsert top-trader long/short ratio rows. Does not commit.
+
+    Returns the number of rows passed.
+    """
+    if not points:
+        return 0
+    rows = [_top_trader_long_short_row(p) for p in points]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            _TOP_TRADER_LONG_SHORT_UPSERT_SQL,
             rows,
             template="(%s, %s, %s, %s, %s, %s)",
             page_size=min(500, len(rows)),
@@ -369,6 +421,28 @@ def max_sample_time_taker_buy_sell_volume(
         cur.execute(
             """
             SELECT MAX(sample_time) FROM taker_buy_sell_volume
+            WHERE symbol = %s AND period = %s
+            """,
+            (sym, pd),
+        )
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    return row[0]
+
+
+def max_sample_time_top_trader_long_short(
+    conn: PsycopgConnection,
+    symbol: str,
+    period: str,
+) -> datetime | None:
+    """Latest ``sample_time`` in ``top_trader_long_short`` for the series, or ``None`` if empty."""
+    sym = symbol.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT MAX(sample_time) FROM top_trader_long_short
             WHERE symbol = %s AND period = %s
             """,
             (sym, pd),
@@ -587,6 +661,58 @@ def upsert_taker_buy_sell_volume_cursor(
         )
 
 
+def get_top_trader_long_short_cursor(
+    conn: PsycopgConnection,
+    symbol: str,
+    period: str,
+) -> datetime | None:
+    """Return stored ``last_sample_time`` for top-trader long/short series, or ``None`` if no row."""
+    sym = symbol.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT last_sample_time FROM top_trader_long_short_cursor
+            WHERE symbol = %s AND period = %s
+            """,
+            (sym, pd),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return row[0]
+
+
+def upsert_top_trader_long_short_cursor(
+    conn: PsycopgConnection,
+    symbol: str,
+    period: str,
+    last_sample_time: datetime,
+) -> None:
+    """
+    Set or update top-trader long/short ingestion high-water mark. Does not commit.
+
+    ``last_sample_time`` must be timezone-aware (UTC recommended).
+    """
+    if last_sample_time.tzinfo is None:
+        raise ValueError("last_sample_time must be timezone-aware")
+    sym = symbol.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO top_trader_long_short_cursor (
+                symbol, period, last_sample_time, updated_at
+            )
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (symbol, period) DO UPDATE SET
+                last_sample_time = EXCLUDED.last_sample_time,
+                updated_at = now()
+            """,
+            (sym, pd, last_sample_time.astimezone(timezone.utc)),
+        )
+
+
 def fetch_basis_rates_by_sample_times(
     conn: PsycopgConnection,
     pair: str,
@@ -724,6 +850,36 @@ def fetch_taker_buy_sell_volume_by_sample_times(
     return out
 
 
+def fetch_top_trader_long_short_by_sample_times(
+    conn: PsycopgConnection,
+    symbol: str,
+    period: str,
+    sample_times: Sequence[datetime],
+) -> Mapping[datetime, tuple[Decimal, Decimal, Decimal]]:
+    """
+    Return ``sample_time -> (long_short_position_ratio, long_account_ratio, short_account_ratio)``
+    for rows that exist. Missing keys are omitted.
+    """
+    if not sample_times:
+        return {}
+    sym = symbol.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sample_time, long_short_position_ratio, long_account_ratio, short_account_ratio
+            FROM top_trader_long_short
+            WHERE symbol = %s AND period = %s AND sample_time = ANY(%s)
+            """,
+            (sym, pd, list(sample_times)),
+        )
+        rows = cur.fetchall()
+    out: dict[datetime, tuple[Decimal, Decimal, Decimal]] = {}
+    for sample_time, ratio, long_acc, short_acc in rows:
+        out[sample_time] = (ratio, long_acc, short_acc)
+    return out
+
+
 def open_interest_window_stats(
     conn: PsycopgConnection,
     symbol: str,
@@ -784,6 +940,41 @@ def taker_buy_sell_volume_window_stats(
         cur.execute(
             """
             SELECT COUNT(*), MIN(sample_time), MAX(sample_time) FROM taker_buy_sell_volume
+            WHERE symbol = %s AND period = %s
+              AND sample_time >= %s AND sample_time <= %s
+            """,
+            (sym, pd, lo, hi),
+        )
+        row = cur.fetchone()
+    if not row:
+        return 0, None, None
+    n = int(row[0]) if row[0] is not None else 0
+    return n, row[1], row[2]
+
+
+def top_trader_long_short_window_stats(
+    conn: PsycopgConnection,
+    symbol: str,
+    period: str,
+    *,
+    sample_time_ge: datetime,
+    sample_time_le: datetime,
+) -> tuple[int, datetime | None, datetime | None]:
+    """
+    Return ``(row_count, min_sample_time, max_sample_time)`` for top-trader long/short rows in window (inclusive).
+
+    ``min`` / ``max`` are ``None`` when the count is zero.
+    """
+    sym = symbol.strip().upper()
+    pd = period.strip()
+    if sample_time_ge.tzinfo is None or sample_time_le.tzinfo is None:
+        raise ValueError("sample_time bounds must be timezone-aware")
+    lo = sample_time_ge.astimezone(timezone.utc)
+    hi = sample_time_le.astimezone(timezone.utc)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*), MIN(sample_time), MAX(sample_time) FROM top_trader_long_short
             WHERE symbol = %s AND period = %s
               AND sample_time >= %s AND sample_time <= %s
             """,
