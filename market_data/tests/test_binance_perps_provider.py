@@ -38,6 +38,14 @@ _TAKER_BUYSELL_VOLUME_ROW = {
     "period": "1h",
 }
 
+_TOP_TRADER_LONG_SHORT_ROW = {
+    "longShortRatio": "1.4342",
+    "longAccount": "0.5891",
+    "shortAccount": "0.4108",
+    "timestamp": 1640995200000,
+    "symbol": "BTCUSDT",
+}
+
 
 def _mock_response(payload: list) -> MagicMock:
     r = MagicMock()
@@ -284,6 +292,77 @@ def test_taker_buy_sell_volume_http_400_no_retry_returns_empty() -> None:
     )
     with patch("market_data.providers.binance_perps.time.sleep") as sl:
         rows = prov.fetch_taker_buy_sell_volume(
+            "BADUSDT",
+            "1h",
+            start_time_ms=1,
+        )
+    sl.assert_not_called()
+    session.get.assert_called_once()
+    assert rows == []
+    assert len(prov.fetch_give_ups) == 1
+    assert "400" in prov.fetch_give_ups[0]
+
+
+def test_fetch_top_trader_long_short_position_ratio_parses_and_calls_get() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response([_TOP_TRADER_LONG_SHORT_ROW])
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        rate_limiter=ProviderRateLimiter(None),
+        top_trader_fetch_max_attempts=1,
+    )
+    rows = prov.fetch_top_trader_long_short_position_ratio(
+        "btcusdt",
+        "1h",
+        start_time_ms=1640995200000,
+        limit=100,
+    )
+    assert len(rows) == 1
+    assert rows[0].symbol == "BTCUSDT"
+    assert rows[0].period == "1h"
+    session.get.assert_called_once()
+    url = session.get.call_args[0][0]
+    assert "symbol=BTCUSDT" in url
+    assert "period=1h" in url
+    assert "startTime=1640995200000" in url
+    assert "limit=100" in url
+
+
+def test_fetch_top_trader_long_short_position_ratio_includes_end_time() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response([])
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        top_trader_fetch_max_attempts=1,
+    )
+    prov.fetch_top_trader_long_short_position_ratio(
+        "BTCUSDT",
+        "1h",
+        start_time_ms=3_600_000,
+        end_time_ms=7_200_000,
+        limit=10,
+    )
+    url = session.get.call_args[0][0]
+    assert "startTime=3600000" in url
+    assert "endTime=7200000" in url
+
+
+def test_top_trader_long_short_position_ratio_http_400_no_retry_returns_empty() -> None:
+    session = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.text = '{"code":-1121,"msg":"Invalid symbol."}'
+    session.get.return_value = resp
+    prov = BinancePerpsMarketDataProvider(
+        "https://fapi.binance.com",
+        session=session,
+        top_trader_fetch_max_attempts=5,
+        top_trader_fetch_retry_base_sleep_sec=0.0,
+    )
+    with patch("market_data.providers.binance_perps.time.sleep") as sl:
+        rows = prov.fetch_top_trader_long_short_position_ratio(
             "BADUSDT",
             "1h",
             start_time_ms=1,

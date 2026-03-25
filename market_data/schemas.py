@@ -452,3 +452,100 @@ def parse_binance_taker_buy_sell_volume_rows(
         )
         for r in rows
     ]
+
+
+class TopTraderLongShortPoint(BaseModel):
+    """One persisted top trader long/short position ratio row (vendor-provided)."""
+
+    model_config = {"frozen": True}
+
+    symbol: str = Field(..., min_length=1)
+    period: str = Field(..., min_length=1)
+    sample_time: datetime
+
+    long_short_ratio: Decimal
+    long_account_ratio: Decimal
+    short_account_ratio: Decimal
+
+    @field_validator("symbol")
+    @classmethod
+    def upper_symbol(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("period")
+    @classmethod
+    def strip_period(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def top_trader_long_short_sanity(self) -> "TopTraderLongShortPoint":
+        # Binance values should be non-negative ratios in normal operation.
+        if self.long_short_ratio < 0:
+            raise ValueError("long_short_ratio must be >= 0")
+        if self.long_account_ratio < 0:
+            raise ValueError("long_account_ratio must be >= 0")
+        if self.short_account_ratio < 0:
+            raise ValueError("short_account_ratio must be >= 0")
+        return self
+
+
+def parse_binance_top_trader_long_short_position_ratio_row(
+    row: Mapping[str, Any],
+    *,
+    symbol: str | None = None,
+    period: str | None = None,
+) -> TopTraderLongShortPoint:
+    """Parse one Binance `/futures/data/topLongShortPositionRatio` object."""
+    if not isinstance(row, Mapping):
+        raise ValueError("Binance top trader long/short row must be an object")
+
+    def _get_required(key: str) -> Any:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(f"missing or empty top trader long/short field '{key}'")
+        return v
+
+    def _dec_required(key: str) -> Decimal:
+        try:
+            return Decimal(str(_get_required(key)))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {row.get(key)!r}") from e
+
+    ts_raw = _get_required("timestamp")
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid timestamp: {ts_raw!r}") from e
+
+    resolved_symbol = (symbol or str(_get_required("symbol"))).strip().upper()
+
+    if period is not None:
+        resolved_period = period.strip()
+    else:
+        resolved_period = str(_get_required("period")).strip()
+
+    return TopTraderLongShortPoint(
+        symbol=resolved_symbol,
+        period=resolved_period,
+        sample_time=_ms_to_utc_aware(ts_ms),
+        long_short_ratio=_dec_required("longShortRatio"),
+        long_account_ratio=_dec_required("longAccount"),
+        short_account_ratio=_dec_required("shortAccount"),
+    )
+
+
+def parse_binance_top_trader_long_short_position_ratio_rows(
+    rows: list[Mapping[str, Any]],
+    *,
+    symbol: str | None = None,
+    period: str | None = None,
+) -> list[TopTraderLongShortPoint]:
+    """Parse a list of top trader long/short objects (e.g. full API response)."""
+    return [
+        parse_binance_top_trader_long_short_position_ratio_row(
+            r,
+            symbol=symbol,
+            period=period,
+        )
+        for r in rows
+    ]

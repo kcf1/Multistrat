@@ -9,6 +9,7 @@ from market_data.schemas import (
     BasisPoint,
     OhlcvBar,
     OpenInterestPoint,
+    TopTraderLongShortPoint,
     TakerBuySellVolumePoint,
     parse_binance_basis_row,
     parse_binance_basis_rows,
@@ -16,6 +17,8 @@ from market_data.schemas import (
     parse_binance_klines,
     parse_binance_open_interest_row,
     parse_binance_open_interest_rows,
+    parse_binance_top_trader_long_short_position_ratio_row,
+    parse_binance_top_trader_long_short_position_ratio_rows,
     parse_binance_taker_buy_sell_volume_row,
     parse_binance_taker_buy_sell_volume_rows,
 )
@@ -230,5 +233,61 @@ def test_taker_buy_sell_volume_point_frozen() -> None:
     from pydantic import ValidationError
 
     p = parse_binance_taker_buy_sell_volume_row(_TAKER_BUYSELL_VOLUME_SAMPLE)
+    with pytest.raises(ValidationError):
+        p.period = "4h"  # type: ignore[misc]
+
+
+_TOP_TRADER_LONG_SHORT_SAMPLE = {
+    "longShortRatio": "1.4342",
+    "longAccount": "0.5891",
+    "shortAccount": "0.4108",
+    "timestamp": 1640995200000,
+    "symbol": "BTCUSDT",
+    # Intentionally omit `period` here to ensure the parser can use explicit context.
+}
+
+
+def test_parse_binance_top_trader_long_short_position_ratio_row_full() -> None:
+    p = parse_binance_top_trader_long_short_position_ratio_row(
+        dict(_TOP_TRADER_LONG_SHORT_SAMPLE),
+        period="1h",
+    )
+    assert p.symbol == "BTCUSDT"
+    assert p.period == "1h"
+    assert p.long_short_ratio == Decimal("1.4342")
+    assert p.long_account_ratio == Decimal("0.5891")
+    assert p.short_account_ratio == Decimal("0.4108")
+    assert p.sample_time == datetime(2022, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_binance_top_trader_long_short_position_ratio_row_with_explicit_context() -> None:
+    row = dict(_TOP_TRADER_LONG_SHORT_SAMPLE)
+    row["symbol"] = "IGNORED"
+    # Keep payload period absent; override symbol via explicit context.
+    p = parse_binance_top_trader_long_short_position_ratio_row(
+        row,
+        symbol="ethusdt",
+        period="1h",
+    )
+    assert p.symbol == "ETHUSDT"
+    assert p.period == "1h"
+
+
+def test_parse_binance_top_trader_long_short_position_ratio_rows_multiple() -> None:
+    points = parse_binance_top_trader_long_short_position_ratio_rows(
+        [dict(_TOP_TRADER_LONG_SHORT_SAMPLE), dict(_TOP_TRADER_LONG_SHORT_SAMPLE)],
+        period="1h",
+    )
+    assert len(points) == 2
+    assert all(isinstance(p, TopTraderLongShortPoint) for p in points)
+
+
+def test_top_trader_long_short_point_frozen() -> None:
+    from pydantic import ValidationError
+
+    p = parse_binance_top_trader_long_short_position_ratio_row(
+        _TOP_TRADER_LONG_SHORT_SAMPLE,
+        period="1h",
+    )
     with pytest.raises(ValidationError):
         p.period = "4h"  # type: ignore[misc]

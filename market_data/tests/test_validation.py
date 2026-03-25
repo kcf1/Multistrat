@@ -12,6 +12,7 @@ from market_data.validation import (
     process_binance_klines_payload,
     process_binance_open_interest_payload,
     process_binance_taker_buy_sell_volume_payload,
+    process_binance_top_trader_long_short_position_ratio_payload,
     scan_bar_series_grid_gaps,
     theoretical_max_bars_in_window,
 )
@@ -426,6 +427,82 @@ def test_process_taker_payload_rejects_duplicates_after_sort() -> None:
     b = _taker_buy_sell_row(1_640_995_200_000)
     with pytest.raises(ValueError, match="duplicate sample_time"):
         process_binance_taker_buy_sell_volume_payload(
+            [a, b],
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def _top_trader_long_short_row(
+    ts: int,
+    *,
+    symbol: str = "BTCUSDT",
+) -> dict:
+    # Intentionally omit `period` to ensure process uses explicit context.
+    return {
+        "symbol": symbol,
+        "longShortRatio": "1.4342",
+        "longAccount": "0.5891",
+        "shortAccount": "0.4108",
+        "timestamp": ts,
+    }
+
+
+def test_process_top_trader_payload_rejects_non_list() -> None:
+    with pytest.raises(ValueError, match="JSON array"):
+        process_binance_top_trader_long_short_position_ratio_payload(
+            {},
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def test_process_top_trader_payload_row_not_object() -> None:
+    with pytest.raises(ValueError, match=r"row\[0\]"):
+        process_binance_top_trader_long_short_position_ratio_payload(
+            [123],
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def test_process_top_trader_payload_empty_ok() -> None:
+    out = process_binance_top_trader_long_short_position_ratio_payload(
+        [],
+        symbol="BTCUSDT",
+        period="1h",
+    )
+    assert out == []
+
+
+def test_process_top_trader_payload_duplicate_sample_time() -> None:
+    r = _top_trader_long_short_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_top_trader_long_short_position_ratio_payload(
+            [r, r],
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def test_process_top_trader_payload_sorts_descending_timestamps_to_ascending() -> None:
+    older = _top_trader_long_short_row(1_640_995_100_000)
+    newer = _top_trader_long_short_row(1_640_995_200_000)
+    out = process_binance_top_trader_long_short_position_ratio_payload(
+        [newer, older],
+        symbol="BTCUSDT",
+        period="1h",
+    )
+    assert len(out) == 2
+    assert out[0].sample_time.timestamp() * 1000 == 1_640_995_100_000
+    assert out[1].sample_time.timestamp() * 1000 == 1_640_995_200_000
+
+
+def test_process_top_trader_payload_rejects_duplicates_after_sort() -> None:
+    a = _top_trader_long_short_row(1_640_995_200_000)
+    b = _top_trader_long_short_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_top_trader_long_short_position_ratio_payload(
             [a, b],
             symbol="BTCUSDT",
             period="1h",

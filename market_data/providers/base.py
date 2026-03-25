@@ -8,6 +8,7 @@ from market_data.schemas import (
     BasisPoint,
     OhlcvBar,
     OpenInterestPoint,
+    TopTraderLongShortPoint,
     TakerBuySellVolumePoint,
 )
 
@@ -94,5 +95,26 @@ class TakerBuySellVolumeProvider(Protocol):
         Return parsed taker buy/sell volume points (oldest first, Binance order).
 
         ``limit``: max rows per HTTP request (Binance cap 500 for /futures/data/takerlongshortRatio).
+        """
+        ...
+
+
+@runtime_checkable
+class TopTraderLongShortPositionRatioProvider(Protocol):
+    """Fetch top trader long/short position ratio positions for a symbol and period."""
+
+    def fetch_top_trader_long_short_position_ratio(
+        self,
+        symbol: str,
+        period: str,
+        *,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+        limit: int = 500,
+    ) -> list[TopTraderLongShortPoint]:
+        """
+        Return parsed top trader long/short position ratio points (oldest first, Binance order).
+
+        ``limit``: max rows per HTTP request (Binance cap 500 for /futures/data/topLongShortPositionRatio).
         """
         ...

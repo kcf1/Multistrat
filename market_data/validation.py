@@ -27,11 +27,13 @@ from market_data.schemas import (
     BasisPoint,
     OhlcvBar,
     OpenInterestPoint,
+    TopTraderLongShortPoint,
     TakerBuySellVolumePoint,
     parse_binance_basis_row,
     parse_binance_kline,
     parse_binance_open_interest_row,
     parse_binance_taker_buy_sell_volume_row,
+    parse_binance_top_trader_long_short_position_ratio_row,
 )
 
 
@@ -298,6 +300,61 @@ def process_binance_taker_buy_sell_volume_payload(
     return points
 
 
+def process_binance_top_trader_long_short_position_ratio_payload(
+    raw: Any,
+    *,
+    symbol: str,
+    period: str,
+) -> list[TopTraderLongShortPoint]:
+    """
+    Validate and parse Binance top-trader long/short position ratio payload.
+
+    Returns empty list for empty payload. Raises ``ValueError`` on malformed rows,
+    non-increasing timestamps, or duplicate timestamps in the same batch.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(
+            "Binance top trader long/short position ratio response must be a JSON array"
+        )
+
+    row_errors: list[str] = []
+    points: list[TopTraderLongShortPoint] = []
+    sym = symbol.strip().upper()
+    pd = period.strip()
+
+    for i, row in enumerate(raw):
+        if not isinstance(row, dict):
+            row_errors.append(f"row[{i}] is not an object")
+            continue
+        try:
+            points.append(
+                parse_binance_top_trader_long_short_position_ratio_row(
+                    row,
+                    symbol=sym,
+                    period=pd,
+                )
+            )
+        except Exception as e:
+            row_errors.append(f"row[{i}]: {e}")
+
+    if row_errors:
+        head = "; ".join(row_errors[:15])
+        more = f" … (+{len(row_errors) - 15} more)" if len(row_errors) > 15 else ""
+        raise ValueError(
+            f"top trader long/short position ratio row errors ({len(row_errors)}): {head}{more}"
+        )
+
+    # Normalize so pagination in ingest can safely treat batch[-1] as newest.
+    points.sort(key=lambda p: p.sample_time)
+
+    issues = _top_trader_long_short_position_ratio_batch_integrity_issues(points)
+    if issues:
+        raise ValueError(
+            "top trader long/short position ratio batch integrity: " + "; ".join(issues)
+        )
+    return points
+
+
 def _interior_overlap_issues(bars: list[OhlcvBar], iv_ms: int) -> list[str]:
     """
     Steps **shorter** than one bar length (overlap / out-of-order grid) are invalid.
@@ -464,6 +521,26 @@ def _open_interest_batch_integrity_issues(points: list[OpenInterestPoint]) -> li
 
 def _taker_buy_sell_volume_batch_integrity_issues(
     points: list[TakerBuySellVolumePoint],
+) -> list[str]:
+    if len(points) <= 1:
+        return []
+    issues: list[str] = []
+    seen: set = set()
+    for i, p in enumerate(points):
+        st = p.sample_time
+        if st in seen:
+            issues.append(f"duplicate sample_time at index {i}: {st}")
+        seen.add(st)
+        if i > 0 and points[i - 1].sample_time >= st:
+            issues.append(
+                f"non-increasing sample_time at index {i}: "
+                f"{points[i - 1].sample_time} then {st}"
+            )
+    return issues
+
+
+def _top_trader_long_short_position_ratio_batch_integrity_issues(
+    points: list[TopTraderLongShortPoint],
 ) -> list[str]:
     if len(points) <= 1:
         return []
