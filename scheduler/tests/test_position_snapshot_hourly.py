@@ -35,7 +35,6 @@ def test_run_position_snapshot_hourly_writes_four_csvs(mock_connect: MagicMock, 
             "long",
             Decimal("100000"),
             Decimal("10000"),
-            Decimal("0"),
             datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
         ),
     ]

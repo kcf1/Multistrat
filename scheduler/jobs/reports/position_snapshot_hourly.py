@@ -19,12 +19,13 @@ from scheduler.types import JobContext
 
 FILENAME_TS_FMT = "%Y%m%dT%H%MZ"
 
-# Shared roll-up metrics (per group key).
+# Shared roll-up metrics (per group key). ``positions`` has no ``realized_pnl`` (dropped in schema);
+# fourth column kept as ``0`` for stable CSV shape (legacy header total_realized_pnl).
 _SQL_SUFFIX = """
   COALESCE(SUM(usd_notional), 0),
   COALESCE(SUM(ABS(usd_notional)), 0),
   COALESCE(COUNT(*) FILTER (WHERE open_qty <> 0), 0)::integer,
-  COALESCE(SUM(realized_pnl), 0)
+  0::numeric
 FROM positions
 """
 
@@ -51,7 +52,6 @@ SELECT
   position_side,
   usd_price,
   usd_notional,
-  realized_pnl,
   updated_at
 FROM positions
 ORDER BY broker, account_id, book, asset;
@@ -80,7 +80,6 @@ HEADER_GRANULAR = (
     "position_side",
     "usd_price",
     "usd_notional",
-    "realized_pnl",
     "updated_at",
 )
 
@@ -142,7 +141,6 @@ def _write_granular_csv(path: Path, snap_iso: str, rows: list[tuple]) -> int:
                 position_side,
                 usd_price,
                 usd_notional,
-                realized_pnl,
                 updated_at,
             ) = row
             updated_s = updated_at.isoformat() if updated_at is not None else ""
@@ -158,7 +156,6 @@ def _write_granular_csv(path: Path, snap_iso: str, rows: list[tuple]) -> int:
                     position_side,
                     _fmt_decimal(usd_price) if usd_price is not None else "",
                     _fmt_decimal(usd_notional) if usd_notional is not None else "",
-                    _fmt_decimal(realized_pnl),
                     updated_s,
                 ]
             )
