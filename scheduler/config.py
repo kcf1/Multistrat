@@ -8,6 +8,8 @@ Scheduler configuration: **micro** (this file) vs **macro** (env — §5.2).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,11 +23,26 @@ DEFAULT_JOB_TIMEOUT_SECONDS: float = 300.0
 # Sleep slice when waiting for the next tick so shutdown is responsive (seconds).
 SCHEDULER_LOOP_POLL_SECONDS: float = 1.0
 
+# CSV report outputs live under ``scheduler/reports_out/`` (listed in root ``.gitignore``).
+SCHEDULER_REPORTS_CSV_DIRNAME: str = "reports_out"
+
+
+def scheduler_reports_csv_dir() -> Path:
+    """Package-relative directory for scheduler CSV exports; created on first write."""
+    return Path(__file__).resolve().parent / SCHEDULER_REPORTS_CSV_DIRNAME
+
 # Registry keys must match entries in ``scheduler.registry._JOB_FACTORIES``.
 JOB_SPECS: tuple[JobSpec, ...] = (
     JobSpec(
-        job_id="noop_heartbeat",
+        job_id="position_snapshot_hourly",
         enabled=True,
+        interval_seconds=3600,
+        cron_expression=None,
+        timeout_seconds=DEFAULT_JOB_TIMEOUT_SECONDS,
+    ),
+    JobSpec(
+        job_id="noop_heartbeat",
+        enabled=False,
         interval_seconds=3600,
         cron_expression=None,
         timeout_seconds=DEFAULT_JOB_TIMEOUT_SECONDS,

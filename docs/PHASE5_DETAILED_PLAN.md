@@ -73,9 +73,9 @@ Order: **skeleton → config → runner/observability → persistence (optional)
 
 ### 4.5 Reports jobs (v1)
 
-- [ ] **5.5.1** **`scheduler/jobs/reports/`:** implement **at least one** report — e.g. daily **position / exposure snapshot** — primarily **`SELECT`** from Postgres (views or queries aligned with PMS; avoid re-deriving position math inside scheduler).
-- [ ] **5.5.2** **Output v1:** write **one row per run** into a snapshot/archive table and/or structured log line; defer PDF/email/S3 until needed.
-- [ ] **5.5.3** **Unit test:** report function with **mock DB** or fixture rows; assert shape of written summary.
+- [x] **5.5.1** **`scheduler/jobs/reports/`:** implement **at least one** report — e.g. daily **position / exposure snapshot** — primarily **`SELECT`** from Postgres (views or queries aligned with PMS; avoid re-deriving position math inside scheduler). **Implemented:** hourly **`position_snapshot_hourly`** → **four** CSVs (`by_asset`, `by_broker`, `by_book`, `granular`) in `scheduler/reports_out/` (gitignored).
+- [x] **5.5.2** **Output v1:** write **one row per run** into a snapshot/archive table and/or structured log line; defer PDF/email/S3 until needed. **Implemented as CSV** (no snapshot table); same-hour re-run overwrites the file.
+- [x] **5.5.3** **Unit test:** report function with **mock DB** or fixture rows; assert shape of written summary. **Implemented:** `scheduler/tests/test_position_snapshot_hourly.py`.
 
 ### 4.6 Reconciliation jobs (v1)
 

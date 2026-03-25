@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from scheduler.config import JOB_SPECS
 from scheduler.jobs.noop import NoopJob
+from scheduler.jobs.reports.position_snapshot_hourly import PositionSnapshotHourlyJob
 from scheduler.types import Job, JobSpec
 
 
@@ -23,6 +24,7 @@ class RegisteredJob:
 
 
 _JOB_FACTORIES: dict[str, Callable[[], Job]] = {
+    "position_snapshot_hourly": lambda: PositionSnapshotHourlyJob(),
     "noop_heartbeat": lambda: NoopJob("noop_heartbeat"),
 }
 

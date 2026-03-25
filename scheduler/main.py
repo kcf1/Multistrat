@@ -32,7 +32,7 @@ def main() -> None:
         "--dry-run-job",
         metavar="JOB_ID",
         default=None,
-        help="Run a single enabled job once by id (with timeout; errors propagate)",
+        help="Run a single enabled job once by id (e.g. position_snapshot_hourly; needs DATABASE_URL)",
     )
     parser.add_argument(
         "--once",
