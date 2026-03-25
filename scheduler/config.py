@@ -8,6 +8,7 @@ Scheduler configuration: **micro** (this file) vs **macro** (env — §5.2).
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 from pydantic import Field
@@ -44,10 +45,22 @@ ORDER_RECON_TRADE_LOOKBACK_HOURS: int = 2
 # Restrict to one broker account id if set; ``None`` = all rows for ``ORDER_RECON_BROKER``.
 ORDER_RECON_ACCOUNT_ID: str | None = None
 
+# Position reconciliation (Phase 5 §5.6.2): PMS ``positions`` vs Binance spot wallet (hourly).
+POSITION_RECON_BROKER: str = "binance"
+POSITION_RECON_ACCOUNT_ID: str | None = None
+POSITION_RECON_QTY_EPSILON: Decimal = Decimal("1e-8")
+
 # Registry keys must match entries in ``scheduler.registry._JOB_FACTORIES``.
 JOB_SPECS: tuple[JobSpec, ...] = (
     JobSpec(
         job_id="order_reconciliation_binance",
+        enabled=True,
+        interval_seconds=SCHEDULER_HOURLY_INTERVAL_SECONDS,
+        cron_expression=None,
+        timeout_seconds=DEFAULT_JOB_TIMEOUT_SECONDS,
+    ),
+    JobSpec(
+        job_id="position_reconciliation_binance",
         enabled=True,
         interval_seconds=SCHEDULER_HOURLY_INTERVAL_SECONDS,
         cron_expression=None,
