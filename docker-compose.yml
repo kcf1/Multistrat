@@ -128,6 +128,9 @@ services:
       REDIS_URL: redis://redis:6379
       # Binance recon jobs read BINANCE_* from .env (keys, BINANCE_BASE_URL, BINANCE_TESTNET)
     command: ["python", "-m", "scheduler"]
+    volumes:
+      # Host folder (gitignored) so CSV reports are editable outside the container.
+      - ./scheduler/reports_out:/app/scheduler/reports_out
     restart: unless-stopped
     networks:
       - multistrat
