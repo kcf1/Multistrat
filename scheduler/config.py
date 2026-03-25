@@ -18,6 +18,9 @@ from scheduler.types import JobSpec
 # Default cap for a single job invocation when spec omits timeout (runner may use this).
 DEFAULT_JOB_TIMEOUT_SECONDS: float = 300.0
 
+# Sleep slice when waiting for the next tick so shutdown is responsive (seconds).
+SCHEDULER_LOOP_POLL_SECONDS: float = 1.0
+
 # Registry keys must match entries in ``scheduler.registry._JOB_FACTORIES``.
 JOB_SPECS: tuple[JobSpec, ...] = (
     JobSpec(

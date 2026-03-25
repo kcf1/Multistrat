@@ -62,9 +62,9 @@ Order: **skeleton → config → runner/observability → persistence (optional)
 
 ### 4.3 Runner loop, isolation, and shutdown
 
-- [ ] **5.3.1** Long-running **scheduler loop** (asyncio or threads): wake jobs when due; **one failure must not crash** the process — catch, log, continue.
-- [ ] **5.3.2** **Structured logging:** `job_id`, run boundaries, duration, exception stack on failure.
-- [ ] **5.3.3** **Graceful shutdown:** handle SIGTERM; finish in-flight job or bounded wait, then exit.
+- [x] **5.3.1** Long-running **scheduler loop** (asyncio or threads): wake jobs when due; **one failure must not crash** the process — catch, log, continue.
+- [x] **5.3.2** **Structured logging:** `job_id`, run boundaries, duration, exception stack on failure.
+- [x] **5.3.3** **Graceful shutdown:** handle SIGTERM; finish in-flight job or bounded wait, then exit.
 
 ### 4.4 Run history (optional v1, recommended for ops)
 

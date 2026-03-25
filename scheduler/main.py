@@ -1,13 +1,12 @@
 """
-Scheduler entrypoint (Phase 5 §5.1.1).
+Scheduler entrypoint (Phase 5).
 
 Usage::
 
-    python -m scheduler
+    python -m scheduler                  # long-running loop (§4.3)
     python -m scheduler --list-jobs
-
-The long-running loop (§4.3) is not implemented yet; this module lists the registry
-and exits so CI and Docker can verify the package imports cleanly.
+    python -m scheduler --dry-run-job ID
+    python -m scheduler --once           # all enabled interval jobs once, then exit
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import sys
 from loguru import logger
 
 from scheduler.registry import iter_registered_jobs
-from scheduler.types import JobContext
+from scheduler.runner import run_forever, run_job_isolated, run_job_once
 
 
 def main() -> None:
@@ -32,7 +31,12 @@ def main() -> None:
         "--dry-run-job",
         metavar="JOB_ID",
         default=None,
-        help="Run a single enabled job once by id (for debugging; noop only today)",
+        help="Run a single enabled job once by id (with timeout; errors propagate)",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run each enabled job with interval_seconds once, then exit",
     )
     args = parser.parse_args()
 
@@ -44,11 +48,11 @@ def main() -> None:
         _dry_run_job(args.dry_run_job)
         return
 
-    _print_job_table(include_disabled=False)
-    logger.info(
-        "Scheduler skeleton: no loop yet (Phase 5 §4.3). "
-        "Use --list-jobs or --dry-run-job JOB_ID."
-    )
+    if args.once:
+        _run_all_once()
+        return
+
+    run_forever()
 
 
 def _print_job_table(include_disabled: bool) -> None:
@@ -80,10 +84,21 @@ def _dry_run_job(job_id: str) -> None:
     for r in iter_registered_jobs(include_disabled=False):
         if r.spec.job_id == job_id:
             logger.info("Dry-run job_id={}", job_id)
-            r.job.run(JobContext(job_id=job_id))
+            run_job_once(r)
             return
     logger.error("No enabled job with job_id={!r}", job_id)
     sys.exit(1)
+
+
+def _run_all_once() -> None:
+    """Run every enabled job once (for CI/smoke); isolation matches the loop (errors do not stop others)."""
+    jobs = list(iter_registered_jobs(include_disabled=False))
+    if not jobs:
+        logger.warning("No enabled jobs")
+        return
+    logger.info("--once: running {} enabled job(s)", len(jobs))
+    for r in jobs:
+        run_job_isolated(r)
 
 
 if __name__ == "__main__":
