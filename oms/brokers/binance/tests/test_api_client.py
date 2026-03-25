@@ -364,6 +364,101 @@ class TestGetOpenOrders:
         assert params["symbol"][0] == "ETHUSDT"
 
 
+class TestGetAllOrders:
+    """Test get_all_orders (GET /api/v3/allOrders)."""
+
+    @responses.activate
+    def test_get_all_orders_single_request(self, api_client):
+        responses.add(
+            responses.GET,
+            "https://testnet.binance.vision/api/v3/allOrders",
+            json=[
+                {
+                    "symbol": "BTCUSDT",
+                    "orderId": 1,
+                    "clientOrderId": "a",
+                    "status": "FILLED",
+                    "updateTime": 100,
+                }
+            ],
+            status=200,
+        )
+        out = api_client.get_all_orders(
+            "BTCUSDT",
+            start_time_ms=10,
+            end_time_ms=99,
+            paginate_window=False,
+        )
+        assert len(out) == 1
+        assert out[0]["orderId"] == 1
+        params = parse_qs(urlparse(responses.calls[0].request.url).query)
+        assert params["symbol"][0] == "BTCUSDT"
+        assert params["startTime"][0] == "10"
+        assert params["endTime"][0] == "99"
+
+    @responses.activate
+    def test_get_all_orders_paginates_window(self, api_client):
+        page1 = [
+            {"symbol": "BTCUSDT", "orderId": i, "status": "FILLED", "updateTime": 1000 + i}
+            for i in range(1, 1001)
+        ]
+        page2 = [{"symbol": "BTCUSDT", "orderId": 1001, "status": "FILLED", "updateTime": 2500}]
+        responses.add(
+            responses.GET,
+            "https://testnet.binance.vision/api/v3/allOrders",
+            json=page1,
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            "https://testnet.binance.vision/api/v3/allOrders",
+            json=page2,
+            status=200,
+        )
+        out = api_client.get_all_orders(
+            "BTCUSDT",
+            start_time_ms=0,
+            end_time_ms=9999999,
+            paginate_window=True,
+            limit=1000,
+        )
+        assert len(out) == 1001
+
+
+class TestGetMyTrades:
+    """Test get_my_trades (GET /api/v3/myTrades)."""
+
+    @responses.activate
+    def test_get_my_trades_with_window(self, api_client):
+        responses.add(
+            responses.GET,
+            "https://testnet.binance.vision/api/v3/myTrades",
+            json=[
+                {
+                    "symbol": "BTCUSDT",
+                    "id": 100,
+                    "orderId": 10,
+                    "price": "50000",
+                    "qty": "0.01",
+                    "quoteQty": "500",
+                    "commission": "0",
+                    "commissionAsset": "USDT",
+                    "time": 1_700_000_000_000,
+                    "isBuyer": True,
+                    "isMaker": False,
+                }
+            ],
+            status=200,
+        )
+        out = api_client.get_my_trades("BTCUSDT", start_time_ms=1, end_time_ms=9_999_999)
+        assert len(out) == 1
+        assert out[0]["orderId"] == 10
+        params = parse_qs(urlparse(responses.calls[0].request.url).query)
+        assert params["symbol"][0] == "BTCUSDT"
+        assert params["startTime"][0] == "1"
+        assert params["endTime"][0] == "9999999"
+
+
 class TestCancelOrder:
     """Test cancel_order endpoint."""
     

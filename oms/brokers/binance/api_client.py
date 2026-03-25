@@ -323,6 +323,129 @@ class BinanceAPIClient:
                     ) from e
             raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
 
+    def get_all_orders(
+        self,
+        symbol: str,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
+        limit: int = 1000,
+        *,
+        paginate_window: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Query order history (signed GET /api/v3/allOrders).
+
+        ``symbol`` is required by Binance. With ``start_time_ms`` and ``end_time_ms`` set and
+        ``paginate_window=True``, follows 1000-row pages until the window is exhausted (uses
+        ``updateTime`` + 1 as the next ``startTime``).
+
+        With ``paginate_window=False`` (default), performs a single request (same params as given).
+        """
+        cap = min(max(limit, 1), 1000)
+
+        def _one_page(start: Optional[int], end: Optional[int]) -> List[Dict[str, Any]]:
+            endpoint = "/api/v3/allOrders"
+            url = f"{self.base_url}{endpoint}"
+            params: Dict[str, Any] = {"symbol": symbol, "limit": cap}
+            if start is not None:
+                params["startTime"] = int(start)
+            if end is not None:
+                params["endTime"] = int(end)
+            params = self._prepare_params(params)
+            param_list = sorted(params.items())
+            try:
+                response = self.session.get(url, params=param_list, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                return data if isinstance(data, list) else []
+            except requests.exceptions.RequestException as e:
+                if hasattr(e, "response") and e.response is not None:
+                    try:
+                        error_data = e.response.json()
+                        raise BinanceAPIError(
+                            f"Binance API error: {error_data.get('msg', 'Unknown error')} "
+                            f"(code: {error_data.get('code', 'N/A')})",
+                            error_data=error_data,
+                        ) from e
+                    except ValueError:
+                        error_data = {"text": e.response.text}
+                        raise BinanceAPIError(
+                            f"Binance API error: {e.response.text}",
+                            error_data=error_data,
+                        ) from e
+                raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
+
+        if not paginate_window or start_time_ms is None or end_time_ms is None:
+            return _one_page(start_time_ms, end_time_ms)
+
+        out: List[Dict[str, Any]] = []
+        cursor = int(start_time_ms)
+        end_i = int(end_time_ms)
+        while cursor <= end_i:
+            batch = _one_page(cursor, end_i)
+            if not batch:
+                break
+            out.extend(batch)
+            if len(batch) < cap:
+                break
+            last_ts = max(
+                (int(o.get("updateTime") or o.get("time") or 0) for o in batch),
+                default=cursor,
+            )
+            nxt = last_ts + 1
+            if nxt <= cursor:
+                break
+            cursor = nxt
+        return out
+
+    def get_my_trades(
+        self,
+        symbol: str,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
+        limit: int = 1000,
+        from_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Account trade list (signed GET /api/v3/myTrades).
+
+        ``symbol`` is required. Use ``start_time_ms`` / ``end_time_ms`` (inclusive) to bound time;
+        ``from_id`` for pagination (trade ids >= ``from_id``).
+        """
+        cap = min(max(limit, 1), 1000)
+        endpoint = "/api/v3/myTrades"
+        url = f"{self.base_url}{endpoint}"
+        params: Dict[str, Any] = {"symbol": symbol, "limit": cap}
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+        if end_time_ms is not None:
+            params["endTime"] = int(end_time_ms)
+        if from_id is not None:
+            params["fromId"] = int(from_id)
+        params = self._prepare_params(params)
+        param_list = sorted(params.items())
+        try:
+            response = self.session.get(url, params=param_list, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, list) else []
+        except requests.exceptions.RequestException as e:
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    error_data = e.response.json()
+                    raise BinanceAPIError(
+                        f"Binance API error: {error_data.get('msg', 'Unknown error')} "
+                        f"(code: {error_data.get('code', 'N/A')})",
+                        error_data=error_data,
+                    ) from e
+                except ValueError:
+                    error_data = {"text": e.response.text}
+                    raise BinanceAPIError(
+                        f"Binance API error: {e.response.text}",
+                        error_data=error_data,
+                    ) from e
+            raise BinanceAPIError(f"Request failed: {str(e)}", error_data=None) from e
+
     def cancel_order(
         self,
         symbol: str,
