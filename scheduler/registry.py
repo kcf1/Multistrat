@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from scheduler.config import JOB_SPECS
+from scheduler.jobs.misc.noop_heartbeat import NoopHeartbeatJob
 from scheduler.jobs.noop import NoopJob
 from scheduler.jobs.reconciliation.order_recon import OrderReconciliationBinanceJob
 from scheduler.jobs.reconciliation.position_recon import PositionReconciliationBinanceJob
@@ -29,7 +30,7 @@ _JOB_FACTORIES: dict[str, Callable[[], Job]] = {
     "position_snapshot_hourly": lambda: PositionSnapshotHourlyJob(),
     "order_reconciliation_binance": lambda: OrderReconciliationBinanceJob(),
     "position_reconciliation_binance": lambda: PositionReconciliationBinanceJob(),
-    "noop_heartbeat": lambda: NoopJob("noop_heartbeat"),
+    "noop_heartbeat": lambda: NoopHeartbeatJob(),
 }
 
 

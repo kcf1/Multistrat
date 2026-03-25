@@ -29,6 +29,10 @@ SCHEDULER_REPORTS_CSV_DIRNAME: str = "reports_out"
 
 # Cadence for hourly jobs (order recon, position snapshot, etc.).
 SCHEDULER_HOURLY_INTERVAL_SECONDS: int = 3600
+# Wall-clock alignment (UTC): after each run, next fire is the **next** occurrence of this
+# minute past the hour (e.g. ``5`` → …:04:59 → **10:05:00** UTC). Same idea as spacing off
+# the hour in ``market_data`` (ingest ticks on 5-minute epoch grid), but **hourly at :05**, not every 5 minutes.
+SCHEDULER_HOURLY_ALIGN_MINUTE: int = 5
 
 
 def scheduler_reports_csv_dir() -> Path:
@@ -49,6 +53,9 @@ ORDER_RECON_ACCOUNT_ID: str | None = None
 POSITION_RECON_BROKER: str = "binance"
 POSITION_RECON_ACCOUNT_ID: str | None = None
 POSITION_RECON_QTY_EPSILON: Decimal = Decimal("1e-8")
+
+# Misc (Phase 5 §4.7): no-op heartbeat (hourly, same cadence as other scheduler jobs).
+NOOP_HEARTBEAT_INTERVAL_SECONDS: int = SCHEDULER_HOURLY_INTERVAL_SECONDS
 
 # Registry keys must match entries in ``scheduler.registry._JOB_FACTORIES``.
 JOB_SPECS: tuple[JobSpec, ...] = (
@@ -75,8 +82,8 @@ JOB_SPECS: tuple[JobSpec, ...] = (
     ),
     JobSpec(
         job_id="noop_heartbeat",
-        enabled=False,
-        interval_seconds=SCHEDULER_HOURLY_INTERVAL_SECONDS,
+        enabled=True,
+        interval_seconds=NOOP_HEARTBEAT_INTERVAL_SECONDS,
         cron_expression=None,
         timeout_seconds=DEFAULT_JOB_TIMEOUT_SECONDS,
     ),

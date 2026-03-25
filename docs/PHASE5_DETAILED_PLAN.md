@@ -86,7 +86,7 @@ Order: **skeleton → config → runner/observability → persistence (optional)
 
 ### 4.7 Miscellaneous jobs (example)
 
-- [ ] **5.7.1** **`scheduler/jobs/misc/`:** one **housekeeping** job — e.g. prune old `scheduler_runs` beyond **N** days, or documented **no-op** placeholder with log line — proves the registry accepts arbitrary jobs.
+- [x] **5.7.1** **`scheduler/jobs/misc/`:** one **housekeeping** job — e.g. prune old `scheduler_runs` beyond **N** days, or documented **no-op** placeholder with log line — proves the registry accepts arbitrary jobs. **Implemented:** **`NoopHeartbeatJob`** in **`scheduler/jobs/misc/noop_heartbeat.py`** — **`noop_heartbeat`** in **`JOB_SPECS`** (**hourly**, **`NOOP_HEARTBEAT_INTERVAL_SECONDS`** = **`SCHEDULER_HOURLY_INTERVAL_SECONDS`**); **info** log per run.
 
 ### 4.8 Docker and Compose
 

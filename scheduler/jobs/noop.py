@@ -1,4 +1,5 @@
-"""Placeholder job to validate registry wiring (Phase 5 §4.1)."""
+"""Minimal no-op for **disabled** job specs (placeholder when ``iter_registered_jobs(..., include_disabled=True)``)."""
+
 
 from __future__ import annotations
 

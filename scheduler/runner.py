@@ -8,6 +8,7 @@ import math
 import signal
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
@@ -15,6 +16,8 @@ from loguru import logger
 
 from scheduler.config import (
     DEFAULT_JOB_TIMEOUT_SECONDS,
+    SCHEDULER_HOURLY_ALIGN_MINUTE,
+    SCHEDULER_HOURLY_INTERVAL_SECONDS,
     SCHEDULER_LOOP_POLL_SECONDS,
     load_scheduler_settings,
 )
@@ -27,13 +30,34 @@ _ERROR_TEXT_MAX_LEN = 8000
 
 def _next_periodic_deadline_after(completed_at: float, period_seconds: int) -> float:
     """
-    Next UTC-aligned tick strictly after ``completed_at`` (wall clock, epoch seconds).
+    Next epoch-aligned tick strictly after ``completed_at`` (Unix period grid).
 
-    Matches ``market_data.main`` semantics: ``floor(t / p) * p + p``.
+    Matches ``market_data.main`` semantics for non-hourly periods: ``floor(t / p) * p + p``.
     """
     if period_seconds < 1:
         raise ValueError("period_seconds must be >= 1")
     return math.floor(completed_at / period_seconds) * period_seconds + period_seconds
+
+
+def _next_utc_hourly_at_minute_past(completed_at: float, minute_past: int) -> float:
+    """
+    Next time **strictly after** ``completed_at`` (epoch seconds, UTC) that falls on
+    ``minute_past`` seconds-of-minute 0 (e.g. minute_past=5 → hh:05:00 UTC).
+    """
+    if not 0 <= minute_past <= 59:
+        raise ValueError("minute_past must be 0..59")
+    after = datetime.fromtimestamp(completed_at, tz=timezone.utc)
+    cand = after.replace(minute=minute_past, second=0, microsecond=0)
+    if cand <= after:
+        cand = (after + timedelta(hours=1)).replace(minute=minute_past, second=0, microsecond=0)
+    return cand.timestamp()
+
+
+def _next_deadline_after_run(completed_at: float, interval_seconds: int) -> float:
+    """Schedule next fire: hourly specs use UTC ``:MM`` alignment; other intervals use epoch grid."""
+    if interval_seconds == SCHEDULER_HOURLY_INTERVAL_SECONDS:
+        return _next_utc_hourly_at_minute_past(completed_at, SCHEDULER_HOURLY_ALIGN_MINUTE)
+    return _next_periodic_deadline_after(completed_at, interval_seconds)
 
 
 def _jobs_for_loop() -> list[RegisteredJob]:
@@ -182,7 +206,10 @@ def run_job_isolated(r: RegisteredJob, *, database_url: str | None = None) -> No
 
 def run_scheduled_loop(stop: threading.Event, *, database_url: str | None = None) -> None:
     """
-    Interval-based scheduler until ``stop`` is set. First fire for each job is immediate.
+    Interval-based scheduler until ``stop`` is set. First fire for each job is immediate; thereafter
+    jobs with ``interval_seconds == SCHEDULER_HOURLY_INTERVAL_SECONDS`` run at **UTC**
+    ``SCHEDULER_HOURLY_ALIGN_MINUTE`` past each hour (e.g. :05). Other intervals use the epoch grid
+    (same formula as ``market_data`` periodic deadlines).
 
     Cron-only jobs (no ``interval_seconds``) are excluded; see logs at startup.
     """
@@ -196,7 +223,12 @@ def run_scheduled_loop(stop: threading.Event, *, database_url: str | None = None
         return
 
     next_run: dict[str, float | None] = {r.spec.job_id: None for r in jobs}
-    logger.info("Scheduler loop: {} job(s); first run immediate; SIGINT/SIGTERM to stop", len(jobs))
+    logger.info(
+        "Scheduler loop: {} job(s); first run immediate; then hourly jobs at UTC :{:02d} each hour; "
+        "SIGINT/SIGTERM to stop",
+        len(jobs),
+        SCHEDULER_HOURLY_ALIGN_MINUTE,
+    )
 
     while not stop.is_set():
         now_wall = time.time()
@@ -215,7 +247,7 @@ def run_scheduled_loop(stop: threading.Event, *, database_url: str | None = None
             completed_at = time.time()
             interval = r.spec.interval_seconds
             assert interval is not None and interval > 0
-            next_run[r.spec.job_id] = _next_periodic_deadline_after(completed_at, interval)
+            next_run[r.spec.job_id] = _next_deadline_after_run(completed_at, interval)
 
         if stop.is_set():
             break
