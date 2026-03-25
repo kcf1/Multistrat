@@ -11,9 +11,9 @@ Set-Location $RepoRoot
 Write-Host "Running DB migrations (alembic upgrade head)..."
 docker compose run --rm oms python -m alembic upgrade head
 
-# One image is built (same Dockerfile + context); oms, pms, risk, market_data all use it. Build once.
-Write-Host "Rebuilding app image (single image used by oms, pms, risk, market_data)..."
-docker compose build --pull oms
+# Rebuild all app services that use local Dockerfile build contexts.
+Write-Host "Rebuilding app images (oms, pms, risk, market_data)..."
+docker compose build --pull oms pms risk market_data
 
 Write-Host "Starting oms, pms, risk, and market_data (same image; force recreate)..."
 docker compose up -d --force-recreate oms pms risk market_data

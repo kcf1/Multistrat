@@ -192,3 +192,18 @@ Use for continuous maintenance after initial history exists.
 - Validation and parsing: `market_data/validation.py`, `market_data/schemas.py`
 - Upsert and cursor persistence: `market_data/storage.py`
 - Tunables and settings: `market_data/config.py`
+
+---
+
+## 10) Reference mapping — open interest (`open_interest`)
+
+- Scheduler wiring: `market_data/main.py` (`ingest_open_interest`, `correct_window_open_interest`, `repair_gap_open_interest`)
+- Ingest / backfill mechanics: `market_data/jobs/ingest_open_interest.py`
+- Chunk paging: `market_data/jobs/common.py` (`iter_open_interest_batches_forward`, `floor_align_ms_to_interval`)
+- Drift correction: `market_data/jobs/correct_window_open_interest.py`
+- Gap detect/repair: `market_data/jobs/repair_gap_open_interest.py`
+- Provider: `market_data/providers/binance_perps.py` (`fetch_open_interest_hist`)
+- Validation / model: `market_data/validation.py`, `market_data/schemas.py` (`OpenInterestPoint`)
+- Storage / cursor: `market_data/storage.py`
+- One-shot backfill CLI: `scripts/backfill_open_interest.py`
+- Tunables: `OPEN_INTEREST_*` in `market_data/config.py`

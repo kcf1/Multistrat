@@ -28,3 +28,16 @@ def interval_to_millis(interval: str) -> int:
     if key not in _INTERVAL_MS:
         raise ValueError(f"Unsupported OHLCV interval: {interval!r}")
     return _INTERVAL_MS[key]
+
+
+def floor_align_ms_to_interval(ms: int, interval: str) -> int:
+    """
+    Floor ``ms`` to a multiple of the bar length for a Binance-style ``interval`` string.
+
+    Some Binance futures history endpoints reject timestamps that are not on the series
+    grid (e.g. ``openInterestHist`` / ``basis`` with ``period=1h``).
+    """
+    iv_ms = interval_to_millis(interval)
+    if iv_ms <= 0:
+        return ms
+    return (ms // iv_ms) * iv_ms

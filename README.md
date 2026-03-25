@@ -21,8 +21,8 @@ The system is built on a microservices architecture with event-driven communicat
 All core services operate as infinite loop-based processes that consume and produce Redis Streams:
 
 ### Market Data Service
-- Fetches market data feeds from external sources
-- Updates Postgres database with historical data
+- Fetches market data feeds from external sources (e.g. Binance spot klines, perps basis & open interest)
+- Updates Postgres database with historical data (`ohlcv`, `basis_rate`, `open_interest`, …)
 - Maintains Redis cache for real-time data access
 
 ### Strategies Service

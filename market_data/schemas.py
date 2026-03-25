@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, List, Union
+from typing import Any, List, Mapping, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -143,3 +143,409 @@ def parse_binance_klines(
 ) -> list[OhlcvBar]:
     """Parse a list of kline arrays (e.g. full API response)."""
     return [parse_binance_kline(r, symbol=symbol, interval=interval) for r in rows]
+
+
+class BasisPoint(BaseModel):
+    """One persisted basis row (matches ``basis_rate`` table, excluding ingested_at)."""
+
+    model_config = {"frozen": True}
+
+    pair: str = Field(..., min_length=1)
+    contract_type: str = Field(..., min_length=1)
+    period: str = Field(..., min_length=1)
+    sample_time: datetime
+    basis: Decimal
+    basis_rate: Decimal
+    futures_price: Decimal
+    index_price: Decimal
+
+    @field_validator("pair")
+    @classmethod
+    def upper_pair(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("contract_type")
+    @classmethod
+    def normalize_contract_type(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("period")
+    @classmethod
+    def strip_period(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def basis_sanity(self) -> BasisPoint:
+        if self.futures_price <= 0:
+            raise ValueError("futures_price must be > 0")
+        if self.index_price <= 0:
+            raise ValueError("index_price must be > 0")
+        return self
+
+
+def parse_binance_basis_row(
+    row: Mapping[str, Any],
+    *,
+    pair: str | None = None,
+    contract_type: str | None = None,
+    period: str | None = None,
+) -> BasisPoint:
+    """Parse one Binance `/futures/data/basis` object into ``BasisPoint``."""
+    if not isinstance(row, Mapping):
+        raise ValueError("Binance basis row must be an object")
+
+    def _get_required(key: str) -> Any:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(f"missing or empty basis field '{key}'")
+        return v
+
+    def _dec(key: str) -> Decimal:
+        try:
+            return Decimal(str(_get_required(key)))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {row.get(key)!r}") from e
+
+    ts_raw = _get_required("timestamp")
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid timestamp: {ts_raw!r}") from e
+
+    resolved_pair = (pair or str(_get_required("pair"))).strip().upper()
+    resolved_contract = (
+        contract_type or str(_get_required("contractType"))
+    ).strip().upper()
+    resolved_period = (period or str(_get_required("period"))).strip()
+
+    return BasisPoint(
+        pair=resolved_pair,
+        contract_type=resolved_contract,
+        period=resolved_period,
+        sample_time=_ms_to_utc_aware(ts_ms),
+        basis=_dec("basis"),
+        basis_rate=_dec("basisRate"),
+        futures_price=_dec("futuresPrice"),
+        index_price=_dec("indexPrice"),
+    )
+
+
+def parse_binance_basis_rows(
+    rows: list[Mapping[str, Any]],
+    *,
+    pair: str | None = None,
+    contract_type: str | None = None,
+    period: str | None = None,
+) -> list[BasisPoint]:
+    """Parse a list of basis objects (e.g. full API response)."""
+    return [
+        parse_binance_basis_row(
+            r,
+            pair=pair,
+            contract_type=contract_type,
+            period=period,
+        )
+        for r in rows
+    ]
+
+
+class OpenInterestPoint(BaseModel):
+    """One persisted open-interest row (matches ``open_interest`` table, excluding ingested_at)."""
+
+    model_config = {"frozen": True}
+
+    symbol: str = Field(..., min_length=1)
+    contract_type: str = Field(..., min_length=1)
+    period: str = Field(..., min_length=1)
+    sample_time: datetime
+    sum_open_interest: Decimal
+    sum_open_interest_value: Decimal
+    cmc_circulating_supply: Decimal | None = None
+
+    @field_validator("symbol")
+    @classmethod
+    def upper_symbol(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("contract_type")
+    @classmethod
+    def normalize_contract_type(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("period")
+    @classmethod
+    def strip_period(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def open_interest_sanity(self) -> OpenInterestPoint:
+        if self.sum_open_interest < 0:
+            raise ValueError("sum_open_interest must be >= 0")
+        if self.sum_open_interest_value < 0:
+            raise ValueError("sum_open_interest_value must be >= 0")
+        if self.cmc_circulating_supply is not None and self.cmc_circulating_supply < 0:
+            raise ValueError("cmc_circulating_supply must be >= 0 when set")
+        return self
+
+
+def parse_binance_open_interest_row(
+    row: Mapping[str, Any],
+    *,
+    symbol: str | None = None,
+    contract_type: str | None = None,
+    period: str | None = None,
+) -> OpenInterestPoint:
+    """Parse one Binance `/futures/data/openInterestHist` object into ``OpenInterestPoint``."""
+    if not isinstance(row, Mapping):
+        raise ValueError("Binance open interest row must be an object")
+
+    def _get_required(key: str) -> Any:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(f"missing or empty open interest field '{key}'")
+        return v
+
+    def _dec_required(key: str) -> Decimal:
+        try:
+            return Decimal(str(_get_required(key)))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {row.get(key)!r}") from e
+
+    def _dec_optional(key: str) -> Decimal | None:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        try:
+            return Decimal(str(v))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {v!r}") from e
+
+    ts_raw = _get_required("timestamp")
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid timestamp: {ts_raw!r}") from e
+
+    resolved_symbol = (symbol or str(_get_required("symbol"))).strip().upper()
+    resolved_contract = (
+        contract_type or str(_get_required("contractType"))
+    ).strip().upper()
+    resolved_period = (period or str(_get_required("period"))).strip()
+
+    return OpenInterestPoint(
+        symbol=resolved_symbol,
+        contract_type=resolved_contract,
+        period=resolved_period,
+        sample_time=_ms_to_utc_aware(ts_ms),
+        sum_open_interest=_dec_required("sumOpenInterest"),
+        sum_open_interest_value=_dec_required("sumOpenInterestValue"),
+        cmc_circulating_supply=_dec_optional("CMCCirculatingSupply"),
+    )
+
+
+def parse_binance_open_interest_rows(
+    rows: list[Mapping[str, Any]],
+    *,
+    symbol: str | None = None,
+    contract_type: str | None = None,
+    period: str | None = None,
+) -> list[OpenInterestPoint]:
+    """Parse a list of open-interest objects (e.g. full API response)."""
+    return [
+        parse_binance_open_interest_row(
+            r,
+            symbol=symbol,
+            contract_type=contract_type,
+            period=period,
+        )
+        for r in rows
+    ]
+
+
+class TakerBuySellVolumePoint(BaseModel):
+    """One persisted taker buy/sell volume row (matches ``taker_buy_sell_volume`` table, excluding ingested_at)."""
+
+    model_config = {"frozen": True}
+
+    symbol: str = Field(..., min_length=1)
+    period: str = Field(..., min_length=1)
+    sample_time: datetime
+    buy_sell_ratio: Decimal
+    buy_vol: Decimal
+    sell_vol: Decimal
+
+    @field_validator("symbol")
+    @classmethod
+    def upper_symbol(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("period")
+    @classmethod
+    def strip_period(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def taker_buy_sell_volume_sanity(self) -> "TakerBuySellVolumePoint":
+        if self.buy_vol < 0:
+            raise ValueError("buy_vol must be >= 0")
+        if self.sell_vol < 0:
+            raise ValueError("sell_vol must be >= 0")
+        # ratio can be fractional; but should not be negative in normal Binance data
+        if self.buy_sell_ratio < 0:
+            raise ValueError("buy_sell_ratio must be >= 0")
+        return self
+
+
+def parse_binance_taker_buy_sell_volume_row(
+    row: Mapping[str, Any],
+    *,
+    symbol: str | None = None,
+    period: str | None = None,
+) -> TakerBuySellVolumePoint:
+    """Parse one Binance `/futures/data/takerlongshortRatio` object into ``TakerBuySellVolumePoint``."""
+    if not isinstance(row, Mapping):
+        raise ValueError("Binance taker buy/sell volume row must be an object")
+
+    def _get_required(key: str) -> Any:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(f"missing or empty taker volume field '{key}'")
+        return v
+
+    def _dec_required(key: str) -> Decimal:
+        try:
+            return Decimal(str(_get_required(key)))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {row.get(key)!r}") from e
+
+    ts_raw = _get_required("timestamp")
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid timestamp: {ts_raw!r}") from e
+
+    resolved_symbol = (symbol or str(_get_required("symbol"))).strip().upper()
+    resolved_period = (period or str(_get_required("period"))).strip()
+
+    return TakerBuySellVolumePoint(
+        symbol=resolved_symbol,
+        period=resolved_period,
+        sample_time=_ms_to_utc_aware(ts_ms),
+        buy_sell_ratio=_dec_required("buySellRatio"),
+        buy_vol=_dec_required("buyVol"),
+        sell_vol=_dec_required("sellVol"),
+    )
+
+
+def parse_binance_taker_buy_sell_volume_rows(
+    rows: list[Mapping[str, Any]],
+    *,
+    symbol: str | None = None,
+    period: str | None = None,
+) -> list[TakerBuySellVolumePoint]:
+    """Parse a list of taker buy/sell volume objects (e.g. full API response)."""
+    return [
+        parse_binance_taker_buy_sell_volume_row(
+            r,
+            symbol=symbol,
+            period=period,
+        )
+        for r in rows
+    ]
+
+
+class TopTraderLongShortPoint(BaseModel):
+    """One persisted top trader long/short position ratio row (vendor-provided)."""
+
+    model_config = {"frozen": True}
+
+    symbol: str = Field(..., min_length=1)
+    period: str = Field(..., min_length=1)
+    sample_time: datetime
+
+    long_short_ratio: Decimal
+    long_account_ratio: Decimal
+    short_account_ratio: Decimal
+
+    @field_validator("symbol")
+    @classmethod
+    def upper_symbol(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("period")
+    @classmethod
+    def strip_period(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def top_trader_long_short_sanity(self) -> "TopTraderLongShortPoint":
+        # Binance values should be non-negative ratios in normal operation.
+        if self.long_short_ratio < 0:
+            raise ValueError("long_short_ratio must be >= 0")
+        if self.long_account_ratio < 0:
+            raise ValueError("long_account_ratio must be >= 0")
+        if self.short_account_ratio < 0:
+            raise ValueError("short_account_ratio must be >= 0")
+        return self
+
+
+def parse_binance_top_trader_long_short_position_ratio_row(
+    row: Mapping[str, Any],
+    *,
+    symbol: str | None = None,
+    period: str | None = None,
+) -> TopTraderLongShortPoint:
+    """Parse one Binance `/futures/data/topLongShortPositionRatio` object."""
+    if not isinstance(row, Mapping):
+        raise ValueError("Binance top trader long/short row must be an object")
+
+    def _get_required(key: str) -> Any:
+        v = row.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(f"missing or empty top trader long/short field '{key}'")
+        return v
+
+    def _dec_required(key: str) -> Decimal:
+        try:
+            return Decimal(str(_get_required(key)))
+        except (InvalidOperation, TypeError) as e:
+            raise ValueError(f"Invalid decimal for '{key}': {row.get(key)!r}") from e
+
+    ts_raw = _get_required("timestamp")
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid timestamp: {ts_raw!r}") from e
+
+    resolved_symbol = (symbol or str(_get_required("symbol"))).strip().upper()
+
+    if period is not None:
+        resolved_period = period.strip()
+    else:
+        resolved_period = str(_get_required("period")).strip()
+
+    return TopTraderLongShortPoint(
+        symbol=resolved_symbol,
+        period=resolved_period,
+        sample_time=_ms_to_utc_aware(ts_ms),
+        long_short_ratio=_dec_required("longShortRatio"),
+        long_account_ratio=_dec_required("longAccount"),
+        short_account_ratio=_dec_required("shortAccount"),
+    )
+
+
+def parse_binance_top_trader_long_short_position_ratio_rows(
+    rows: list[Mapping[str, Any]],
+    *,
+    symbol: str | None = None,
+    period: str | None = None,
+) -> list[TopTraderLongShortPoint]:
+    """Parse a list of top trader long/short objects (e.g. full API response)."""
+    return [
+        parse_binance_top_trader_long_short_position_ratio_row(
+            r,
+            symbol=symbol,
+            period=period,
+        )
+        for r in rows
+    ]

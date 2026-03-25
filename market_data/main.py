@@ -6,6 +6,12 @@ Runs until SIGINT/SIGTERM (Docker stop) or forever:
 - **ingest_ohlcv** — catch-up from cursor / ``max(open_time)`` (cadence: ``OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS`` in ``config.py``).
 - **correct_window** — rolling drift check (``OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS``).
 - **repair_gap** — policy-window detect+refetch (``OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS``; **0 = off**).
+- **ingest_basis_rate** — catch-up from basis cursor / ``max(sample_time)``.
+- **correct_window_basis_rate** — rolling basis drift check.
+- **repair_gap_basis_rate** — policy-window basis detect+refetch (**0 = off**).
+- **ingest_open_interest** — catch-up from open-interest cursor / ``max(sample_time)``.
+- **correct_window_open_interest** — rolling open-interest drift check.
+- **repair_gap_open_interest** — policy-window open-interest detect+refetch (**0 = off**).
 
 Each job **runs once immediately** on startup, then its **next** runs fall on **UTC-aligned** period
 boundaries (Unix epoch): e.g. default ingest every **300 s** then fires at **:00, :05, :10, … UTC**.
@@ -16,7 +22,8 @@ Usage::
     python -m market_data.main --once
     python -m market_data.main --once --with-repair
 
-Env: ``DATABASE_URL`` or ``MARKET_DATA_DATABASE_URL``, optional ``MARKET_DATA_BINANCE_BASE_URL``.
+Env: ``DATABASE_URL`` or ``MARKET_DATA_DATABASE_URL``, optional
+``MARKET_DATA_BINANCE_BASE_URL`` and ``MARKET_DATA_BINANCE_PERPS_BASE_URL``.
 """
 
 from __future__ import annotations
@@ -31,14 +38,48 @@ import time
 from loguru import logger
 
 from market_data.config import (
+    BASIS_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+    BASIS_SCHEDULER_INGEST_INTERVAL_SECONDS,
+    BASIS_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
     OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
     OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS,
     OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+    OPEN_INTEREST_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+    OPEN_INTEREST_SCHEDULER_INGEST_INTERVAL_SECONDS,
+    OPEN_INTEREST_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+    TOP_TRADER_LONG_SHORT_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+    TOP_TRADER_LONG_SHORT_SCHEDULER_INGEST_INTERVAL_SECONDS,
+    TOP_TRADER_LONG_SHORT_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+    TAKER_BUYSELL_VOLUME_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+    TAKER_BUYSELL_VOLUME_SCHEDULER_INGEST_INTERVAL_SECONDS,
+    TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
     load_settings,
 )
+from market_data.jobs.correct_window_basis_rate import run_correct_window_basis_rate
+from market_data.jobs.correct_window_open_interest import run_correct_window_open_interest
 from market_data.jobs.correct_window import run_correct_window
+from market_data.jobs.correct_window_taker_buy_sell_volume import (
+    run_correct_window_taker_buy_sell_volume,
+)
+from market_data.jobs.ingest_basis_rate import run_ingest_basis_rate
+from market_data.jobs.ingest_open_interest import run_ingest_open_interest
+from market_data.jobs.ingest_top_trader_long_short import run_ingest_top_trader_long_short
+from market_data.jobs.ingest_taker_buy_sell_volume import run_ingest_taker_buy_sell_volume
 from market_data.jobs.ingest_ohlcv import run_ingest_ohlcv
+from market_data.jobs.repair_gap_basis_rate import run_repair_basis_gaps_policy_window_all_series
+from market_data.jobs.repair_gap_open_interest import (
+    run_repair_open_interest_gaps_policy_window_all_series,
+)
 from market_data.jobs.repair_gap import run_repair_gaps_policy_window_all_series
+from market_data.jobs.repair_gap_taker_buy_sell_volume import (
+    run_repair_taker_buy_sell_volume_gaps_policy_window_all_series,
+)
+from market_data.jobs.correct_window_top_trader_long_short import (
+    run_correct_window_top_trader_long_short,
+)
+from market_data.jobs.repair_gap_top_trader_long_short import (
+    run_repair_top_trader_long_short_gaps_policy_window_all_series,
+)
 
 
 def _next_periodic_deadline_after(completed_at: float, period_seconds: int) -> float:
@@ -97,32 +138,237 @@ def _run_repair_step() -> None:
     )
 
 
+def _run_basis_ingest_step() -> None:
+    settings = load_settings()
+    results = run_ingest_basis_rate(settings)
+    n = sum(r.rows_upserted for r in results)
+    logger.info(
+        "ingest_basis_rate: {} series, {} rows upserted",
+        len(results),
+        n,
+    )
+
+
+def _run_basis_correct_step() -> None:
+    settings = load_settings()
+    results = run_correct_window_basis_rate(settings)
+    d = sum(r.drift_rows for r in results)
+    logger.info(
+        "correct_window_basis_rate: {} series, {} drift row(s)",
+        len(results),
+        d,
+    )
+
+
+def _run_basis_repair_step() -> None:
+    settings = load_settings()
+    results = run_repair_basis_gaps_policy_window_all_series(settings)
+    with_gaps = sum(1 for r in results if r.gap_spans > 0)
+    rows = sum(r.rows_upserted for r in results)
+    logger.info(
+        "repair_gap_basis_rate: {} series, {} had gaps, {} rows upserted",
+        len(results),
+        with_gaps,
+        rows,
+    )
+
+
+def _run_open_interest_ingest_step() -> None:
+    settings = load_settings()
+    results = run_ingest_open_interest(settings)
+    n = sum(r.rows_upserted for r in results)
+    logger.info(
+        "ingest_open_interest: {} series, {} rows upserted",
+        len(results),
+        n,
+    )
+
+
+def _run_taker_ingest_step() -> None:
+    settings = load_settings()
+    results = run_ingest_taker_buy_sell_volume(settings)
+    n = sum(r.rows_upserted for r in results)
+    logger.info(
+        "ingest_taker_buy_sell_volume: {} series, {} rows upserted",
+        len(results),
+        n,
+    )
+
+
+def _run_top_trader_ingest_step() -> None:
+    settings = load_settings()
+    results = run_ingest_top_trader_long_short(settings)
+    n = sum(r.rows_upserted for r in results)
+    logger.info(
+        "ingest_top_trader_long_short: {} series, {} rows upserted",
+        len(results),
+        n,
+    )
+
+
+def _run_open_interest_correct_step() -> None:
+    settings = load_settings()
+    results = run_correct_window_open_interest(settings)
+    d = sum(r.drift_rows for r in results)
+    logger.info(
+        "correct_window_open_interest: {} series, {} drift row(s)",
+        len(results),
+        d,
+    )
+
+
+def _run_taker_correct_step() -> None:
+    settings = load_settings()
+    results = run_correct_window_taker_buy_sell_volume(settings)
+    d = sum(r.drift_rows for r in results)
+    logger.info(
+        "correct_window_taker_buy_sell_volume: {} series, {} drift row(s)",
+        len(results),
+        d,
+    )
+
+
+def _run_top_trader_correct_step() -> None:
+    settings = load_settings()
+    results = run_correct_window_top_trader_long_short(settings)
+    d = sum(r.drift_rows for r in results)
+    logger.info(
+        "correct_window_top_trader_long_short: {} series, {} drift row(s)",
+        len(results),
+        d,
+    )
+
+
+def _run_taker_repair_step() -> None:
+    settings = load_settings()
+    results = run_repair_taker_buy_sell_volume_gaps_policy_window_all_series(settings)
+    with_gaps = sum(1 for r in results if r.gap_spans > 0)
+    rows = sum(r.rows_upserted for r in results)
+    logger.info(
+        "repair_gap_taker_buy_sell_volume: {} series, {} had gaps, {} rows upserted",
+        len(results),
+        with_gaps,
+        rows,
+    )
+
+
+def _run_top_trader_repair_step() -> None:
+    settings = load_settings()
+    results = run_repair_top_trader_long_short_gaps_policy_window_all_series(settings)
+    with_gaps = sum(1 for r in results if r.gap_spans > 0)
+    rows = sum(r.rows_upserted for r in results)
+    logger.info(
+        "repair_gap_top_trader_long_short: {} series, {} had gaps, {} rows upserted",
+        len(results),
+        with_gaps,
+        rows,
+    )
+
+
+def _run_open_interest_repair_step() -> None:
+    settings = load_settings()
+    results = run_repair_open_interest_gaps_policy_window_all_series(settings)
+    with_gaps = sum(1 for r in results if r.gap_spans > 0)
+    rows = sum(r.rows_upserted for r in results)
+    logger.info(
+        "repair_gap_open_interest: {} series, {} had gaps, {} rows upserted",
+        len(results),
+        with_gaps,
+        rows,
+    )
+
+
 def run_scheduler_loop(
     *,
     ingest_interval_seconds: int,
     correct_interval_seconds: int,
     repair_interval_seconds: int,
+    basis_ingest_interval_seconds: int,
+    basis_correct_interval_seconds: int,
+    basis_repair_interval_seconds: int,
+    open_interest_ingest_interval_seconds: int,
+    open_interest_correct_interval_seconds: int,
+    open_interest_repair_interval_seconds: int,
+    top_trader_ingest_interval_seconds: int,
+    top_trader_correct_interval_seconds: int,
+    top_trader_repair_interval_seconds: int,
+    taker_ingest_interval_seconds: int,
+    taker_correct_interval_seconds: int,
+    taker_repair_interval_seconds: int,
     stop_event: threading.Event,
 ) -> None:
     next_ingest: float | None = None
     next_correct: float | None = None
     next_repair: float | None = None if repair_interval_seconds > 0 else float("inf")
+    next_basis_ingest: float | None = None
+    next_basis_correct: float | None = None
+    next_basis_repair: float | None = None if basis_repair_interval_seconds > 0 else float("inf")
+    next_oi_ingest: float | None = None
+    next_oi_correct: float | None = None
+    next_oi_repair: float | None = (
+        None if open_interest_repair_interval_seconds > 0 else float("inf")
+    )
+    next_top_ingest: float | None = None
+    next_top_correct: float | None = None
+    next_top_repair: float | None = (
+        None if top_trader_repair_interval_seconds > 0 else float("inf")
+    )
+    next_taker_ingest: float | None = None
+    next_taker_correct: float | None = None
+    next_taker_repair: float | None = (
+        None if taker_repair_interval_seconds > 0 else float("inf")
+    )
 
     repair_cadence = (
         f"every {repair_interval_seconds}s"
         if repair_interval_seconds > 0
         else "off"
     )
+    oi_repair_cadence = (
+        f"every {open_interest_repair_interval_seconds}s"
+        if open_interest_repair_interval_seconds > 0
+        else "off"
+    )
     logger.info(
         "market_data scheduler: ingest every {}s (first run now, then UTC-aligned), "
-        "correct_window every {}s, repair_gap {} ({})",
+        "correct_window every {}s, repair_gap {} ({}), "
+        "ingest_basis_rate every {}s, correct_window_basis_rate every {}s, "
+        "repair_gap_basis_rate {} ({}), "
+        "ingest_open_interest every {}s, correct_window_open_interest every {}s, "
+        "repair_gap_open_interest {} ({}), "
+        "ingest_top_trader_long_short every {}s, correct_window_top_trader_long_short every {}s, "
+        "repair_gap_top_trader_long_short {} ({}), "
+        "ingest_taker_buy_sell_volume every {}s, correct_window_taker_buy_sell_volume every {}s",
         ingest_interval_seconds,
         correct_interval_seconds,
         repair_cadence,
         "enabled" if repair_interval_seconds > 0 else "disabled",
+        basis_ingest_interval_seconds,
+        basis_correct_interval_seconds,
+        (
+            f"every {basis_repair_interval_seconds}s"
+            if basis_repair_interval_seconds > 0
+            else "off"
+        ),
+        "enabled" if basis_repair_interval_seconds > 0 else "disabled",
+        open_interest_ingest_interval_seconds,
+        open_interest_correct_interval_seconds,
+        oi_repair_cadence,
+        "enabled" if open_interest_repair_interval_seconds > 0 else "disabled",
+        top_trader_ingest_interval_seconds,
+        top_trader_correct_interval_seconds,
+        f"every {top_trader_repair_interval_seconds}s"
+        if top_trader_repair_interval_seconds > 0
+        else "off",
+        "enabled" if top_trader_repair_interval_seconds > 0 else "disabled",
+        taker_ingest_interval_seconds,
+        taker_correct_interval_seconds,
     )
 
     while not stop_event.is_set():
+        # Process-by-process ordering:
+        # 1) run all due ingests (OHLCV -> basis -> open interest)
+        # 2) then run correct+repair per dataset in the same order.
         now = time.time()
         if _due(now, next_ingest):
             try:
@@ -130,6 +376,46 @@ def run_scheduler_loop(
             except Exception:
                 logger.exception("ingest_ohlcv step failed")
             next_ingest = _next_periodic_deadline_after(time.time(), ingest_interval_seconds)
+
+        now = time.time()
+        if _due(now, next_basis_ingest):
+            try:
+                _run_basis_ingest_step()
+            except Exception:
+                logger.exception("ingest_basis_rate step failed")
+            next_basis_ingest = _next_periodic_deadline_after(
+                time.time(), basis_ingest_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_oi_ingest):
+            try:
+                _run_open_interest_ingest_step()
+            except Exception:
+                logger.exception("ingest_open_interest step failed")
+            next_oi_ingest = _next_periodic_deadline_after(
+                time.time(), open_interest_ingest_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_top_ingest):
+            try:
+                _run_top_trader_ingest_step()
+            except Exception:
+                logger.exception("ingest_top_trader_long_short step failed")
+            next_top_ingest = _next_periodic_deadline_after(
+                time.time(), top_trader_ingest_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_taker_ingest):
+            try:
+                _run_taker_ingest_step()
+            except Exception:
+                logger.exception("ingest_taker_buy_sell_volume step failed")
+            next_taker_ingest = _next_periodic_deadline_after(
+                time.time(), taker_ingest_interval_seconds
+            )
 
         now = time.time()
         if _due(now, next_correct):
@@ -147,10 +433,102 @@ def run_scheduler_loop(
                 logger.exception("repair_gap step failed")
             next_repair = _next_periodic_deadline_after(time.time(), repair_interval_seconds)
 
+        now = time.time()
+        if _due(now, next_basis_correct):
+            try:
+                _run_basis_correct_step()
+            except Exception:
+                logger.exception("correct_window_basis_rate step failed")
+            next_basis_correct = _next_periodic_deadline_after(
+                time.time(), basis_correct_interval_seconds
+            )
+
+        now = time.time()
+        if basis_repair_interval_seconds > 0 and _due(now, next_basis_repair):
+            try:
+                _run_basis_repair_step()
+            except Exception:
+                logger.exception("repair_gap_basis_rate step failed")
+            next_basis_repair = _next_periodic_deadline_after(
+                time.time(), basis_repair_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_oi_correct):
+            try:
+                _run_open_interest_correct_step()
+            except Exception:
+                logger.exception("correct_window_open_interest step failed")
+            next_oi_correct = _next_periodic_deadline_after(
+                time.time(), open_interest_correct_interval_seconds
+            )
+
+        now = time.time()
+        if open_interest_repair_interval_seconds > 0 and _due(now, next_oi_repair):
+            try:
+                _run_open_interest_repair_step()
+            except Exception:
+                logger.exception("repair_gap_open_interest step failed")
+            next_oi_repair = _next_periodic_deadline_after(
+                time.time(), open_interest_repair_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_top_correct):
+            try:
+                _run_top_trader_correct_step()
+            except Exception:
+                logger.exception("correct_window_top_trader_long_short step failed")
+            next_top_correct = _next_periodic_deadline_after(
+                time.time(), top_trader_correct_interval_seconds
+            )
+
+        now = time.time()
+        if top_trader_repair_interval_seconds > 0 and _due(now, next_top_repair):
+            try:
+                _run_top_trader_repair_step()
+            except Exception:
+                logger.exception("repair_gap_top_trader_long_short step failed")
+            next_top_repair = _next_periodic_deadline_after(
+                time.time(), top_trader_repair_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_taker_correct):
+            try:
+                _run_taker_correct_step()
+            except Exception:
+                logger.exception("correct_window_taker_buy_sell_volume step failed")
+            next_taker_correct = _next_periodic_deadline_after(
+                time.time(), taker_correct_interval_seconds
+            )
+
+        now = time.time()
+        if taker_repair_interval_seconds > 0 and _due(now, next_taker_repair):
+            try:
+                _run_taker_repair_step()
+            except Exception:
+                logger.exception("repair_gap_taker_buy_sell_volume step failed")
+            next_taker_repair = _next_periodic_deadline_after(
+                time.time(), taker_repair_interval_seconds
+            )
+
         deadline = min(
             _sleep_deadline(next_ingest),
             _sleep_deadline(next_correct),
             next_repair,
+            _sleep_deadline(next_basis_ingest),
+            _sleep_deadline(next_basis_correct),
+            next_basis_repair,
+            _sleep_deadline(next_oi_ingest),
+            _sleep_deadline(next_oi_correct),
+            next_oi_repair,
+            _sleep_deadline(next_top_ingest),
+            _sleep_deadline(next_top_correct),
+            next_top_repair,
+            _sleep_deadline(next_taker_ingest),
+            _sleep_deadline(next_taker_correct),
+            _sleep_deadline(next_taker_repair),
         )
         sleep_for = max(0.0, min(1.0, deadline - time.time()))
         if sleep_for > 0:
@@ -160,7 +538,9 @@ def run_scheduler_loop(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Market data: scheduled OHLCV jobs (REST → Postgres)")
+    parser = argparse.ArgumentParser(
+        description="Market data: scheduled OHLCV + basis + open-interest jobs (REST -> Postgres)"
+    )
     parser.add_argument(
         "--once",
         action="store_true",
@@ -180,10 +560,34 @@ def main() -> None:
 
     if args.once:
         try:
+            # Process-by-process ordering for --once:
+            # 1) run all ingests
+            # 2) then run correct+repair per dataset in order.
             _run_ingest_step()
+            _run_basis_ingest_step()
+            _run_open_interest_ingest_step()
+            _run_top_trader_ingest_step()
+            _run_taker_ingest_step()
+
             _run_correct_step()
             if args.with_repair:
                 _run_repair_step()
+
+            _run_basis_correct_step()
+            if args.with_repair:
+                _run_basis_repair_step()
+
+            _run_open_interest_correct_step()
+            if args.with_repair:
+                _run_open_interest_repair_step()
+
+            _run_top_trader_correct_step()
+            if args.with_repair:
+                _run_top_trader_repair_step()
+
+            _run_taker_correct_step()
+            if args.with_repair:
+                _run_taker_repair_step()
         except Exception:
             logger.exception("market_data --once failed")
             sys.exit(1)
@@ -203,6 +607,18 @@ def main() -> None:
         ingest_interval_seconds=OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS,
         correct_interval_seconds=OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
         repair_interval_seconds=OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+        basis_ingest_interval_seconds=BASIS_SCHEDULER_INGEST_INTERVAL_SECONDS,
+        basis_correct_interval_seconds=BASIS_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+        basis_repair_interval_seconds=BASIS_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+        open_interest_ingest_interval_seconds=OPEN_INTEREST_SCHEDULER_INGEST_INTERVAL_SECONDS,
+        open_interest_correct_interval_seconds=OPEN_INTEREST_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+        open_interest_repair_interval_seconds=OPEN_INTEREST_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+        top_trader_ingest_interval_seconds=TOP_TRADER_LONG_SHORT_SCHEDULER_INGEST_INTERVAL_SECONDS,
+        top_trader_correct_interval_seconds=TOP_TRADER_LONG_SHORT_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+        top_trader_repair_interval_seconds=TOP_TRADER_LONG_SHORT_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+        taker_ingest_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_INGEST_INTERVAL_SECONDS,
+        taker_correct_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
+        taker_repair_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
         stop_event=stop,
     )
 

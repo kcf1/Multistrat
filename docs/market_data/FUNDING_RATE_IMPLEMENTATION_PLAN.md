@@ -1,89 +1,127 @@
-# Funding Rate Implementation Plan (Postgres, OHLCV-Aligned)
+# Funding Rate Implementation Plan (Binance USD-M `fundingRate`, Historical)
 
-This plan follows `docs/market_data/STANDARD_DATA_PIPELINE.md` and mirrors the OHLCV runtime pattern:
+This plan follows `docs/market_data/STANDARD_DATA_PIPELINE.md` and mirrors the OHLCV/basis/open-interest runtime shape:
 `config -> provider -> validation/parser -> storage upsert -> cursor/watermark -> jobs -> scheduler`.
+
+Scope here is Binance USD-M **funding rate history** from the public futures market-data endpoint, not locally computed funding or premium index math.
 
 ---
 
 ## 1) Design goals
 
-- Ship funding history ingestion with one canonical path for backfill + incremental updates.
+- Ingest official Binance funding settlements as the source of truth (per symbol, per `fundingTime`).
+- Support long backfills where the venue allows (this endpoint is **not** the same retention family as `/futures/data/*`; tune cold-start days in code constants, not the 27-day limited-retention helper unless Binance documents a hard cap).
 - Keep writes idempotent on a stable natural key.
-- Make progress restart-safe with durable cursor checkpoints.
-- Reuse OHLCV job/scheduler behavior and observability style.
-- Keep spot OHLCV provider separate from perps provider.
+- Make ingest restart-safe with durable cursor checkpoints.
+- Reuse existing market_data scheduler/observability patterns and the **same** `BinancePerpsMarketDataProvider` + shared `ProviderRateLimiter` as basis/open interest.
 
 ---
 
-## 2) Standard components (funding-specific)
+## 2) Binance source contract (funding rate history)
 
-### 2.1 Config split
+Planned source endpoint (USD-M futures, same REST host as basis/OI today — `MARKET_DATA_BINANCE_PERPS_BASE_URL`, default `https://fapi.binance.com`):
+
+- `GET /fapi/v1/fundingRate`
+
+Expected request fields:
+
+- `symbol` (for example `BTCUSDT`) — **required for our jobs** (we enumerate symbols; omitting `symbol` returns a global recent window, which is not the series model we use)
+- optional pagination / window: `startTime`, `endTime` (milliseconds, inclusive)
+- `limit` (default 100, **max 1000** per request)
+
+Expected response fields (dataset payload, per row):
+
+- `symbol`
+- `fundingTime`
+- `fundingRate`
+- `markPrice` (present in current API docs; treat as optional when parsing for forward compatibility)
+
+Key constraints to encode in plan:
+
+- Responses are **ascending** by `fundingTime`; chunk ingest should advance cursors forward in time.
+- If only `startTime`/`endTime` span more than `limit` events, the venue returns from `startTime` up to `limit` rows — paginate by moving `startTime` past the last seen `fundingTime`.
+- Shares IP rate-weight budget with other USD-M market endpoints (coordinate with the shared per-provider limiter).
+- If Binance documents or enforces a maximum history depth, clamp cold-start / `--no-watermark` ranges similarly to open interest (log once per series).
+
+---
+
+## 3) Standard components (funding-specific)
+
+### 3.1 Config split
 
 - **Macro/env**
   - `MARKET_DATA_DATABASE_URL` (or `DATABASE_URL` fallback)
-  - `MARKET_DATA_BINANCE_PERPS_BASE_URL` (new, service-isolated perps endpoint)
+  - `MARKET_DATA_BINANCE_PERPS_BASE_URL`
 - **Micro/code constants** in `market_data/config.py`
-  - `FUNDING_SYMBOLS`
-  - `FUNDING_INITIAL_BACKFILL_DAYS`
-  - `FUNDING_FETCH_CHUNK_LIMIT`
-  - `FUNDING_CORRECT_WINDOW_POINTS`
+  - `FUNDING_SYMBOLS` (typically aligned with `DATA_COLLECTION_SYMBOLS` / perp universe)
+  - `FUNDING_INITIAL_BACKFILL_DAYS` (cold start; **not** tied to `BINANCE_FUTURES_LIMITED_RETENTION_BACKFILL_DAYS` unless we discover a matching venue cap)
+  - `FUNDING_FETCH_CHUNK_LIMIT` (≤ 1000)
+  - `FUNDING_CORRECT_WINDOW_POINTS` (re-fetch the last *N* funding settlements per symbol for drift correction)
   - `FUNDING_SCHEDULER_INGEST_INTERVAL_SECONDS`
   - `FUNDING_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS`
   - `FUNDING_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS`
-  - funding retry/backoff constants
+  - funding-specific retry/backoff constants (or shared perps fetch knobs if we consolidate with basis/OI)
 
-### 2.2 Provider
+### 3.2 Provider
 
-- Keep existing OHLCV spot provider unchanged (`KlinesProvider` + `binance_spot`).
-- Add perps provider contract and adapter:
-  - protocol: `PerpsMarketDataProvider.fetch_funding_rates(...)`
-  - implementation: `market_data/providers/binance_perps.py`
-- Use one shared `ProviderRateLimiter` per perps provider instance.
+- Extend perps market-data provider contract:
+  - `fetch_funding_rates(...) -> list[FundingRatePoint]`
+- Implement in `market_data/providers/binance_perps.py`.
+- Use one shared `ProviderRateLimiter` per provider instance across basis/funding/open-interest calls.
+- Preserve no-retry behavior for obvious client errors (HTTP 400 / invalid symbol).
 
-### 2.3 Validation and parse
+### 3.3 Validation and parse
 
-- Add `FundingRatePoint` in `market_data/schemas.py`.
-- Parse Binance funding payloads into canonical model.
-- Validate UTC timestamps, numeric fields, symbol normalization, and order assumptions.
-- Surface parse errors for retry/give-up policy.
+- Add `FundingRatePoint` model in `market_data/schemas.py`.
+- Parse payload to typed model:
+  - uppercase `symbol`
+  - UTC-aware `fundingTime` mapped to `funding_time`
+  - decimals for `fundingRate` and optional `markPrice`
+- Validate ordering and duplicate `fundingTime` handling per series key `(symbol)`.
 
-### 2.4 Storage
+### 3.4 Storage
 
-- Add table `funding_rate`:
-  - `exchange` TEXT
+- Add table `funding_rate` with Binance-returned fields plus ingest metadata:
   - `symbol` TEXT
   - `funding_time` TIMESTAMPTZ
   - `funding_rate` NUMERIC(18,10)
   - `mark_price` NUMERIC(20,10) NULL
-  - `sample_ts` TIMESTAMPTZ
   - `ingested_at` TIMESTAMPTZ DEFAULT now()
-- Natural key: `(exchange, symbol, funding_time)`.
+- Natural key: `(symbol, funding_time)` (single-venue v1; add `exchange` later if multi-venue ingestion is introduced).
 - Read index: `(symbol, funding_time DESC)`.
-- Upsert with `ON CONFLICT ... DO UPDATE`.
+- Upsert semantics: `ON CONFLICT ... DO UPDATE`.
+- Omit redundant columns such as a separate “sample_ts” if it duplicates `funding_time`.
 
-### 2.5 Cursor / watermark
+### 3.5 Cursor / watermark
 
-- Add explicit funding cursor helpers (`get`, `upsert`, `max_stored_time`).
-- Cursor advances only after chunk commit.
-- Start-point recovery: `max(cursor, max(funding_time))`.
+- Add cursor helpers for funding series key:
+  - `get_funding_cursor(...)`
+  - `upsert_funding_cursor(...)`
+  - `max_funding_time(...)` (or equivalent max stored settlement time)
+- Start-point recovery:
+  - `max(cursor, max(funding_time))`
+- Cursor rows keyed by `symbol`.
+- Cursor advances only after successful per-chunk commit.
 
 ---
 
-## 3) Runtime modes
+## 4) Runtime modes
 
-## 3.1 Initialize / backfill mode
+## 4.1 Initialize / backfill mode
 
 ### Ordered flow
 
-1. Load settings, build provider, open DB connection.
-2. Enumerate `FUNDING_SYMBOLS`.
-3. Resolve start from `max(cursor, max(stored_time))`; cold start from `now - FUNDING_INITIAL_BACKFILL_DAYS`.
-4. Fetch forward in chunked pages from funding endpoint.
+1. Load settings, build perps provider, open DB connection.
+2. Enumerate series by `symbol`.
+3. Resolve start:
+   - default from `max(cursor, max(funding_time))`
+   - cold start from `now - FUNDING_INITIAL_BACKFILL_DAYS`
+4. Fetch chunked funding pages from `/fapi/v1/fundingRate`.
 5. Parse + validate into `FundingRatePoint`.
 6. Upsert rows + update cursor in same transaction scope.
-7. Commit per chunk.
-8. Continue until end range or empty page.
-9. Emit per-symbol result summary (rows/chunks/retries/give-ups).
+7. Commit per chunk (checkpoint).
+8. Continue until end range reached or page empty / underfilled per pagination rules.
+9. Emit per-series run summary (rows/chunks/retries/give-ups).
 
 ### Backfill options
 
@@ -91,107 +129,97 @@ This plan follows `docs/market_data/STANDARD_DATA_PIPELINE.md` and mirrors the O
 - `--skip-existing`
 - `--once`
 
-## 3.2 Real-time scheduled mode
+## 4.2 Real-time scheduled mode
 
-1. Scheduler starts, first run immediate.
-2. `ingest_funding_rate` on short cadence.
-3. `correct_window_funding_rate` on medium cadence.
-4. `repair_gap_funding_rate` on optional long cadence.
-5. Each job failure is isolated; scheduler continues.
-6. Next runs remain UTC-aligned.
-
----
-
-## 4) Retry and failure policy
-
-- Retry transient HTTP/network issues with exponential backoff.
-- Do not retry obvious client input errors (for example HTTP 400 invalid symbol).
-- Track parse failures and give-ups in logs and run summaries.
-- Commit per chunk to preserve progress on crash/restart.
+1. Scheduler starts with immediate first run.
+2. `ingest_funding_rate` runs on short cadence.
+3. `correct_window_funding_rate` runs on medium cadence.
+4. `repair_gap_funding_rate` runs on optional long cadence.
+5. Job failures are isolated; loop continues.
+6. Subsequent runs are UTC-aligned.
 
 ---
 
-## 5) Data quality controls
+## 5) Retry and failure policy
 
-- Batch ordering and duplicate-key diagnostics.
-- Coverage checks for requested range spans.
-- Drift counts in correct-window runs.
-- Gap-span metrics in repair runs.
-- Freshness checks on latest funding time per symbol.
+- Retry transient transport/server errors with exponential backoff.
+- Do not retry clear client errors (invalid params/symbol).
+- Log parse failures and provider give-ups with `symbol` and time range.
+- Commit per chunk so partial progress persists across crashes.
+- If requested history exceeds venue availability, clamp + log once per series (same pattern as other datasets).
 
 ---
 
-## 6) Observability and operations
+## 6) Data quality controls
 
-- Structured job logs:
-  - symbols processed
+- Ordering/duplicate checks by `(symbol, funding_time)`.
+- Span checks for requested windows (head slack / tail shortfall diagnostics where applicable).
+- Drift checks in correction window for `funding_rate` / `mark_price`.
+- Gap detection over a policy window and targeted repair (funding intervals are symbol-dependent; gap logic should use time thresholds, not assume fixed bar length like OHLCV).
+- Freshness monitoring of latest `funding_time` per symbol.
+
+---
+
+## 7) Observability and operations
+
+- Structured logs per job:
+  - series processed (`symbol`)
   - rows fetched/upserted
   - retries/give-ups
-  - drift rows
-  - repaired spans
-- Health checks:
+  - corrected rows
+  - repaired gap spans
+- Health:
   - scheduler liveness
-  - funding cursor advancement
-  - staleness alerting
-- Operational commands:
-  - one-shot run
-  - one-shot with repair
-  - full backfill
+  - cursor advancement
+  - staleness alerts per `symbol`
+- Ops modes:
+  - one-shot ingest
+  - one-shot ingest + repair
+  - standalone backfill script (e.g. `scripts/backfill_funding_rate.py`)
 
 ---
 
-## 7) Testing blueprint
+## 8) Testing blueprint
 
 ### Unit tests
 
-- Parser/model validity and malformed payload handling.
-- Provider URL params, limiter order, retry/backoff, 400 no-retry behavior.
-- Storage idempotency and cursor update semantics.
-- Gap/window helper logic.
+- `FundingRatePoint` parser/model validity and malformed payload handling.
+- Provider request params, pagination, limiter interaction, and retry behavior.
+- Storage upsert idempotency and cursor semantics.
+- Gap/window helper math for irregular funding cadence.
 
 ### Job-level tests
 
 - Cold start backfill.
 - Incremental resume from cursor.
-- No-op when up to date.
-- Partial failure with chunk checkpoint recovery.
+- Up-to-date no-op behavior.
+- Chunk checkpoint recovery after partial failure.
 - Correct-window drift upsert behavior.
-- Repair-gap targeted refill behavior.
+- Gap-repair targeted refill behavior.
 
 ### Integration tests
 
-- End-to-end one-shot writes expected funding rows.
-- Scheduler executes funding jobs in expected cadence/order.
+- One-shot ingest writes expected funding rows.
+- Scheduler triggers funding jobs at configured cadence.
 - Restart resumes from persisted watermark.
 
 ---
 
-## 8) Delivery checklist
+## 9) Delivery checklist
 
-- [ ] Add migration for `funding_rate` table and indexes.
-- [ ] Add funding config constants and perps base URL setting.
+- [ ] Add migration for `funding_rate` table, cursor table (if separate), and indexes.
+- [ ] Add funding config constants in `market_data/config.py`.
+- [ ] Add/confirm perps base URL setting and docs (already shared with basis/OI).
 - [ ] Add `FundingRatePoint` model + parser + tests.
-- [ ] Add perps provider protocol + Binance perps adapter.
+- [ ] Add/extend perps provider with `fetch_funding_rates`.
 - [ ] Add funding upsert + cursor helpers + tests.
 - [ ] Implement `ingest_funding_rate`.
 - [ ] Implement `correct_window_funding_rate`.
-- [ ] Implement `repair_gap_funding_rate` (or explicitly defer).
+- [ ] Implement `repair_gap_funding_rate`.
 - [ ] Wire funding jobs into `market_data/main.py`.
-- [ ] Update docs and README.
-- [ ] Add unit/job/integration coverage.
-
----
-
-## 9) Reference mapping to OHLCV code
-
-- Scheduler: `market_data/main.py`
-- Ingest baseline: `market_data/jobs/ingest_ohlcv.py`
-- Correct-window baseline: `market_data/jobs/correct_window.py`
-- Repair baseline: `market_data/jobs/repair_gap.py`
-- Provider baseline: `market_data/providers/binance_spot.py`
-- Validation baseline: `market_data/validation.py`, `market_data/schemas.py`
-- Storage baseline: `market_data/storage.py`
-- Config baseline: `market_data/config.py`
+- [ ] Add one-shot/backfill CLI for funding.
+- [ ] Update README and dataset docs.
+- [ ] Add unit/job/integration coverage (automated tests under `market_data/tests/`; live DB E2E optional operator step — mirror §12 in open-interest plan).
 
 ---
 
@@ -199,39 +227,113 @@ This plan follows `docs/market_data/STANDARD_DATA_PIPELINE.md` and mirrors the O
 
 ### Phase A - Foundations
 
-1. Add migration for `funding_rate` table + indexes.
-2. Add funding constants in `market_data/config.py`.
-3. Add `MARKET_DATA_BINANCE_PERPS_BASE_URL` in settings + docs.
+1. Add Alembic migration for `funding_rate` (+ `funding_rate_cursor` if not using a generic cursor table).
+2. Add funding constants and settings wiring in `market_data/config.py`.
+3. Ensure perps endpoint setting exists and is documented (`MARKET_DATA_BINANCE_PERPS_BASE_URL`).
 
 ### Phase B - Provider and parsing
 
 4. Add `FundingRatePoint` model in `market_data/schemas.py`.
-5. Add funding payload parser in `market_data/validation.py`.
-6. Define perps provider protocol.
-7. Implement `market_data/providers/binance_perps.py` with limiter/retry policy.
+5. Add funding payload parser/validation in `market_data/validation.py`.
+6. Extend perps provider protocol and implement Binance adapter method for `/fapi/v1/fundingRate` (pagination + limiter).
 
 ### Phase C - Storage and cursor
 
-8. Add funding upsert function(s).
-9. Add funding cursor helpers.
-10. Add range/window query helpers for correction and repair jobs.
+7. Add funding upsert storage function.
+8. Add funding cursor helpers and max-time helper.
+9. Add query helpers used by correction/repair jobs.
 
 ### Phase D - Jobs and scheduler
 
-11. Implement `ingest_funding_rate`.
-12. Implement `correct_window_funding_rate`.
-13. Implement `repair_gap_funding_rate`.
-14. Register funding jobs in `market_data/main.py`.
+10. Implement `ingest_funding_rate`.
+11. Implement `correct_window_funding_rate`.
+12. Implement `repair_gap_funding_rate`.
+13. Register funding jobs in `market_data/main.py`.
+14. Add funding backfill script.
 
 ### Phase E - Verification and rollout
 
-15. Add unit and job tests.
-16. Add scheduler integration smoke test.
-17. Update README + runbook docs.
-18. Run one-shot smoke in dev and verify cursor advancement + freshness.
+15. Add unit tests for parser/provider/storage.
+16. Add job-level tests and scheduler smoke tests.
+17. Run local one-shot smoke and verify cursor progression.
+18. Finalize docs and operational runbook (§12).
 
 ---
 
-## Follow-on note
+## 11) Explicit non-goals for this tranche
 
-Open interest should reuse the same perps provider module and limiter budget, but be implemented as a separate dataset plan using the same blueprint.
+- Do not compute funding from mark/index prices in this phase (that belongs in analytics, not the canonical funding table).
+- Do not conflate this dataset with Binance **premium index** or **mark price** klines unless stored as separate series.
+- Do not add websocket-based funding stream in first cut.
+- Do not couple funding ingestion with strategy computations in the ingest service.
+
+Follow-on work can add joins to basis/open interest in dedicated analytics tables or views.
+
+---
+
+## 12) Operational runbook (smoke & verification)
+
+### Preconditions
+
+- Postgres reachable; migrations applied (`alembic upgrade head`) including `funding_rate` and funding cursor storage.
+- Env: `MARKET_DATA_DATABASE_URL` or `DATABASE_URL`; optional `MARKET_DATA_BINANCE_PERPS_BASE_URL` for testnet/mainnet.
+
+### Automated tests
+
+```bash
+python -m pytest market_data/tests/ -q
+```
+
+### One-shot service run (no daemon)
+
+```bash
+python -m market_data.main --once
+```
+
+With a policy-window gap repair pass (once funding jobs exist, include them in the same `--with-repair` behavior as other datasets).
+
+### Large / policy backfill CLI
+
+```bash
+python scripts/backfill_funding_rate.py
+python scripts/backfill_funding_rate.py --no-watermark
+python scripts/backfill_funding_rate.py --no-watermark --skip-existing
+```
+
+### Verify cursor / watermark (examples)
+
+Adjust table/column names to match the chosen migration.
+
+```sql
+SELECT symbol, last_sample_time
+  FROM funding_rate_cursor
+ ORDER BY symbol;
+
+SELECT symbol, max(funding_time) AS newest
+  FROM funding_rate
+ GROUP BY symbol
+ ORDER BY symbol;
+```
+
+After ingest, `funding_rate_cursor.last_sample_time` and `max(funding_time)` should advance toward the latest settlement per symbol (same cursor column name pattern as `basis_cursor` / `open_interest_cursor`).
+
+### Long-running scheduler
+
+```bash
+python -m market_data.main
+```
+
+Tune cadence via `FUNDING_SCHEDULER_*` in `market_data/config.py`. Set `FUNDING_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS` to a positive value to enable scheduled gap repair (default `0` = off, consistent with basis/OI).
+
+---
+
+## Reference (code parallels)
+
+- Scheduler: `market_data/main.py`
+- Ingest pattern: `market_data/jobs/ingest_basis_rate.py` / `ingest_open_interest.py`
+- Correct-window pattern: `market_data/jobs/correct_window_basis_rate.py` / `correct_window_open_interest.py`
+- Repair pattern: `market_data/jobs/repair_gap_basis_rate.py` / `repair_gap_open_interest.py`
+- Perps provider: `market_data/providers/binance_perps.py`
+- Validation: `market_data/validation.py`, `market_data/schemas.py`
+- Storage: `market_data/storage.py`
+- Config: `market_data/config.py`

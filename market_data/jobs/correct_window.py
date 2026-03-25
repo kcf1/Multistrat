@@ -54,7 +54,7 @@ def _log_drifts(
         )
         if not same:
             n += 1
-            logger.warning(
+            logger.debug(
                 "market_data OHLC drift symbol={} interval={} open_time={} "
                 "db=({}, {}, {}, {}) api=({}, {}, {}, {})",
                 b.symbol,

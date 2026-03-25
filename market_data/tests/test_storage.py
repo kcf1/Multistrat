@@ -9,14 +9,44 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from market_data.schemas import OhlcvBar
+from market_data.schemas import (
+    BasisPoint,
+    OhlcvBar,
+    OpenInterestPoint,
+    TakerBuySellVolumePoint,
+    TopTraderLongShortPoint,
+)
 from market_data.storage import (
+    basis_window_stats,
     count_ohlcv_bars_in_window,
+    fetch_basis_rates_by_sample_times,
+    fetch_open_interest_by_sample_times,
+    fetch_taker_buy_sell_volume_by_sample_times,
+    fetch_top_trader_long_short_by_sample_times,
+    get_basis_cursor,
     get_ingestion_cursor,
+    get_open_interest_cursor,
+    get_top_trader_long_short_cursor,
+    get_taker_buy_sell_volume_cursor,
     max_open_time_ohlcv,
+    max_sample_time_basis,
+    max_sample_time_open_interest,
+    max_sample_time_top_trader_long_short,
+    max_sample_time_taker_buy_sell_volume,
+    open_interest_window_stats,
     ohlcv_window_stats,
+    upsert_basis_cursor,
+    upsert_basis_points,
     upsert_ingestion_cursor,
+    upsert_open_interest_cursor,
+    upsert_open_interest_points,
+    upsert_top_trader_long_short_cursor,
+    upsert_top_trader_long_short_points,
+    upsert_taker_buy_sell_volume_cursor,
+    upsert_taker_buy_sell_volume_points,
     upsert_ohlcv_bars,
+    taker_buy_sell_volume_window_stats,
+    top_trader_long_short_window_stats,
 )
 
 
@@ -40,6 +70,87 @@ def _bar(
         quote_volume=Decimal("20"),
         trades=100,
         close_time=ot,
+    )
+
+
+def _basis_point(
+    *,
+    pair: str = "BTCUSDT",
+    contract_type: str = "PERPETUAL",
+    period: str = "1h",
+    sample_time: datetime | None = None,
+    basis_rate: Decimal = Decimal("0.001"),
+) -> BasisPoint:
+    st = sample_time or datetime(2020, 1, 1, 0, 0, tzinfo=timezone.utc)
+    return BasisPoint(
+        pair=pair,
+        contract_type=contract_type,
+        period=period,
+        sample_time=st,
+        basis=Decimal("100"),
+        basis_rate=basis_rate,
+        futures_price=Decimal("50100"),
+        index_price=Decimal("50000"),
+    )
+
+
+def _open_interest_point(
+    *,
+    symbol: str = "BTCUSDT",
+    contract_type: str = "PERPETUAL",
+    period: str = "1h",
+    sample_time: datetime | None = None,
+    sum_open_interest: Decimal = Decimal("12345.6789"),
+) -> OpenInterestPoint:
+    st = sample_time or datetime(2020, 1, 1, 0, 0, tzinfo=timezone.utc)
+    return OpenInterestPoint(
+        symbol=symbol,
+        contract_type=contract_type,
+        period=period,
+        sample_time=st,
+        sum_open_interest=sum_open_interest,
+        sum_open_interest_value=Decimal("987654321.123456"),
+        cmc_circulating_supply=Decimal("19500000.0"),
+    )
+
+
+def _taker_buy_sell_volume_point(
+    *,
+    symbol: str = "BTCUSDT",
+    period: str = "1h",
+    sample_time: datetime | None = None,
+    buy_sell_ratio: Decimal = Decimal("1.5586"),
+    buy_vol: Decimal = Decimal("387.3300"),
+    sell_vol: Decimal = Decimal("248.5030"),
+) -> TakerBuySellVolumePoint:
+    st = sample_time or datetime(2020, 1, 1, 0, 0, tzinfo=timezone.utc)
+    return TakerBuySellVolumePoint(
+        symbol=symbol,
+        period=period,
+        sample_time=st,
+        buy_sell_ratio=buy_sell_ratio,
+        buy_vol=buy_vol,
+        sell_vol=sell_vol,
+    )
+
+
+def _top_trader_long_short_point(
+    *,
+    symbol: str = "BTCUSDT",
+    period: str = "1h",
+    sample_time: datetime | None = None,
+    long_short_position_ratio: Decimal = Decimal("1.4342"),
+    long_account_ratio: Decimal = Decimal("0.5891"),
+    short_account_ratio: Decimal = Decimal("0.4108"),
+) -> TopTraderLongShortPoint:
+    st = sample_time or datetime(2020, 1, 1, 0, 0, tzinfo=timezone.utc)
+    return TopTraderLongShortPoint(
+        symbol=symbol,
+        period=period,
+        sample_time=st,
+        long_short_ratio=long_short_position_ratio,
+        long_account_ratio=long_account_ratio,
+        short_account_ratio=short_account_ratio,
     )
 
 
@@ -74,6 +185,126 @@ def test_upsert_uses_execute_values_with_on_conflict() -> None:
     assert row[1] == "1m"
 
 
+def test_upsert_basis_empty_no_cursor() -> None:
+    conn = MagicMock()
+    assert upsert_basis_points(conn, []) == 0
+    conn.cursor.assert_not_called()
+
+
+def test_upsert_basis_uses_execute_values_with_on_conflict() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    points = [_basis_point()]
+
+    with patch("market_data.storage.execute_values") as ev:
+        n = upsert_basis_points(conn, points)
+
+    assert n == 1
+    ev.assert_called_once()
+    args, _kwargs = ev.call_args
+    sql = args[1]
+    assert "ON CONFLICT (pair, contract_type, period, sample_time)" in sql
+    assert "DO UPDATE SET" in sql
+    assert "ingested_at = now()" in sql
+    row = args[2][0]
+    assert row[0] == "BTCUSDT"
+    assert row[1] == "PERPETUAL"
+    assert row[2] == "1h"
+
+
+def test_upsert_open_interest_empty_no_cursor() -> None:
+    conn = MagicMock()
+    assert upsert_open_interest_points(conn, []) == 0
+    conn.cursor.assert_not_called()
+
+
+def test_upsert_open_interest_uses_execute_values_with_on_conflict() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    points = [_open_interest_point()]
+
+    with patch("market_data.storage.execute_values") as ev:
+        n = upsert_open_interest_points(conn, points)
+
+    assert n == 1
+    ev.assert_called_once()
+    args, _kwargs = ev.call_args
+    sql = args[1]
+    assert "ON CONFLICT (symbol, contract_type, period, sample_time)" in sql
+    assert "DO UPDATE SET" in sql
+    assert "ingested_at = now()" in sql
+    row = args[2][0]
+    assert row[0] == "BTCUSDT"
+    assert row[1] == "PERPETUAL"
+    assert row[2] == "1h"
+
+
+def test_upsert_taker_buy_sell_volume_empty_no_cursor() -> None:
+    conn = MagicMock()
+    assert upsert_taker_buy_sell_volume_points(conn, []) == 0
+    conn.cursor.assert_not_called()
+
+
+def test_upsert_taker_buy_sell_volume_uses_execute_values_with_on_conflict() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    points = [_taker_buy_sell_volume_point()]
+
+    with patch("market_data.storage.execute_values") as ev:
+        n = upsert_taker_buy_sell_volume_points(conn, points)
+
+    assert n == 1
+    ev.assert_called_once()
+    args, _kwargs = ev.call_args
+    sql = args[1]
+    assert "ON CONFLICT (symbol, period, sample_time)" in sql
+    assert "DO UPDATE SET" in sql
+    assert "ingested_at = now()" in sql
+    row = args[2][0]
+    assert row[0] == "BTCUSDT"
+    assert row[1] == "1h"
+    assert row[3] == Decimal("1.5586")
+
+
+def test_upsert_top_trader_long_short_empty_no_cursor() -> None:
+    conn = MagicMock()
+    assert upsert_top_trader_long_short_points(conn, []) == 0
+    conn.cursor.assert_not_called()
+
+
+def test_upsert_top_trader_long_short_uses_execute_values_with_on_conflict() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    points = [_top_trader_long_short_point()]
+
+    with patch("market_data.storage.execute_values") as ev:
+        n = upsert_top_trader_long_short_points(conn, points)
+
+    assert n == 1
+    ev.assert_called_once()
+    args, _kwargs = ev.call_args
+    sql = args[1]
+    assert "ON CONFLICT (symbol, period, sample_time)" in sql
+    assert "DO UPDATE SET" in sql
+    assert "ingested_at = now()" in sql
+    row = args[2][0]
+    assert row[0] == "BTCUSDT"
+    assert row[1] == "1h"
+    assert row[3] == Decimal("1.4342")
+
+
 def test_get_ingestion_cursor_returns_none_when_missing() -> None:
     conn = MagicMock()
     cur = MagicMock()
@@ -98,6 +329,106 @@ def test_get_ingestion_cursor_returns_time() -> None:
     conn.cursor.return_value = cur
 
     assert get_ingestion_cursor(conn, "BTCUSDT", "1m") == ts
+
+
+def test_get_basis_cursor_returns_none_when_missing() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = None
+    conn.cursor.return_value = cur
+
+    assert get_basis_cursor(conn, "btcusdt", "perpetual", "1h") is None
+    params = cur.execute.call_args[0][1]
+    assert params == ("BTCUSDT", "PERPETUAL", "1h")
+
+
+def test_get_basis_cursor_returns_time() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    ts = datetime(2021, 6, 15, 12, 0, tzinfo=timezone.utc)
+    cur.fetchone.return_value = (ts,)
+    conn.cursor.return_value = cur
+
+    assert get_basis_cursor(conn, "BTCUSDT", "PERPETUAL", "1h") == ts
+
+
+def test_get_open_interest_cursor_returns_none_when_missing() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = None
+    conn.cursor.return_value = cur
+
+    assert get_open_interest_cursor(conn, "btcusdt", "perpetual", "1h") is None
+    params = cur.execute.call_args[0][1]
+    assert params == ("BTCUSDT", "PERPETUAL", "1h")
+
+
+def test_get_open_interest_cursor_returns_time() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    ts = datetime(2021, 6, 15, 12, 0, tzinfo=timezone.utc)
+    cur.fetchone.return_value = (ts,)
+    conn.cursor.return_value = cur
+
+    assert get_open_interest_cursor(conn, "BTCUSDT", "PERPETUAL", "1h") == ts
+
+
+def test_get_taker_buy_sell_volume_cursor_returns_none_when_missing() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = None
+    conn.cursor.return_value = cur
+
+    assert get_taker_buy_sell_volume_cursor(conn, "btcusdt", "1h") is None
+    params = cur.execute.call_args[0][1]
+    assert params == ("BTCUSDT", "1h")
+
+
+def test_get_taker_buy_sell_volume_cursor_returns_time() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    ts = datetime(2021, 6, 15, 12, 0, tzinfo=timezone.utc)
+    cur.fetchone.return_value = (ts,)
+    conn.cursor.return_value = cur
+
+    assert get_taker_buy_sell_volume_cursor(conn, "BTCUSDT", "1h") == ts
+
+
+def test_get_top_trader_long_short_cursor_returns_none_when_missing() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = None
+    conn.cursor.return_value = cur
+
+    assert get_top_trader_long_short_cursor(conn, "btcusdt", "1h") is None
+    params = cur.execute.call_args[0][1]
+    assert params == ("BTCUSDT", "1h")
+
+
+def test_get_top_trader_long_short_cursor_returns_time() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    ts = datetime(2021, 6, 15, 12, 0, tzinfo=timezone.utc)
+    cur.fetchone.return_value = (ts,)
+    conn.cursor.return_value = cur
+
+    assert get_top_trader_long_short_cursor(conn, "BTCUSDT", "1h") == ts
 
 
 def test_count_ohlcv_bars_in_window_executes() -> None:
@@ -148,6 +479,54 @@ def test_max_open_time_ohlcv() -> None:
     assert max_open_time_ohlcv(conn, "btcusdt", "1m") == ts
 
 
+def test_max_sample_time_basis() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    ts = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    cur.fetchone.return_value = (ts,)
+    conn.cursor.return_value = cur
+
+    assert max_sample_time_basis(conn, "btcusdt", "perpetual", "1h") == ts
+
+
+def test_max_sample_time_open_interest() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    ts = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    cur.fetchone.return_value = (ts,)
+    conn.cursor.return_value = cur
+
+    assert max_sample_time_open_interest(conn, "btcusdt", "perpetual", "1h") == ts
+
+
+def test_max_sample_time_taker_buy_sell_volume() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    ts = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    cur.fetchone.return_value = (ts,)
+    conn.cursor.return_value = cur
+
+    assert max_sample_time_taker_buy_sell_volume(conn, "btcusdt", "1h") == ts
+
+
+def test_max_sample_time_top_trader_long_short() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    ts = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    cur.fetchone.return_value = (ts,)
+    conn.cursor.return_value = cur
+
+    assert max_sample_time_top_trader_long_short(conn, "btcusdt", "1h") == ts
+
+
 def test_upsert_ingestion_cursor_rejects_naive_datetime() -> None:
     conn = MagicMock()
     naive = datetime(2020, 1, 1)
@@ -170,6 +549,339 @@ def test_upsert_ingestion_cursor_executes_upsert() -> None:
     assert params[0] == "BTCUSDT"
     assert params[1] == "1h"
     assert params[2] == ts
+
+
+def test_upsert_basis_cursor_rejects_naive_datetime() -> None:
+    conn = MagicMock()
+    naive = datetime(2020, 1, 1)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        upsert_basis_cursor(conn, "BTCUSDT", "PERPETUAL", "1h", naive)
+
+
+def test_upsert_basis_cursor_executes_upsert() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    ts = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    upsert_basis_cursor(conn, "btcusdt", "perpetual", "1h", ts)
+    cur.execute.assert_called_once()
+    sql = cur.execute.call_args[0][0]
+    assert "ON CONFLICT (pair, contract_type, period)" in sql
+    params = cur.execute.call_args[0][1]
+    assert params[0] == "BTCUSDT"
+    assert params[1] == "PERPETUAL"
+    assert params[2] == "1h"
+    assert params[3] == ts
+
+
+def test_upsert_open_interest_cursor_rejects_naive_datetime() -> None:
+    conn = MagicMock()
+    naive = datetime(2020, 1, 1)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        upsert_open_interest_cursor(conn, "BTCUSDT", "PERPETUAL", "1h", naive)
+
+
+def test_upsert_open_interest_cursor_executes_upsert() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    ts = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    upsert_open_interest_cursor(conn, "btcusdt", "perpetual", "1h", ts)
+    cur.execute.assert_called_once()
+    sql = cur.execute.call_args[0][0]
+    assert "ON CONFLICT (symbol, contract_type, period)" in sql
+    params = cur.execute.call_args[0][1]
+    assert params[0] == "BTCUSDT"
+    assert params[1] == "PERPETUAL"
+    assert params[2] == "1h"
+    assert params[3] == ts
+
+
+def test_upsert_taker_buy_sell_volume_cursor_rejects_naive_datetime() -> None:
+    conn = MagicMock()
+    naive = datetime(2020, 1, 1)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        upsert_taker_buy_sell_volume_cursor(conn, "BTCUSDT", "1h", naive)
+
+
+def test_upsert_taker_buy_sell_volume_cursor_executes_upsert() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    ts = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    upsert_taker_buy_sell_volume_cursor(conn, "btcusdt", "1h", ts)
+    cur.execute.assert_called_once()
+    sql = cur.execute.call_args[0][0]
+    assert "ON CONFLICT (symbol, period)" in sql
+    params = cur.execute.call_args[0][1]
+    assert params[0] == "BTCUSDT"
+    assert params[1] == "1h"
+    assert params[2] == ts
+
+
+def test_upsert_top_trader_long_short_cursor_rejects_naive_datetime() -> None:
+    conn = MagicMock()
+    naive = datetime(2020, 1, 1)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        upsert_top_trader_long_short_cursor(conn, "BTCUSDT", "1h", naive)
+
+
+def test_upsert_top_trader_long_short_cursor_executes_upsert() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+    ts = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    upsert_top_trader_long_short_cursor(conn, "btcusdt", "1h", ts)
+    cur.execute.assert_called_once()
+    sql = cur.execute.call_args[0][0]
+    assert "ON CONFLICT (symbol, period)" in sql
+    params = cur.execute.call_args[0][1]
+    assert params[0] == "BTCUSDT"
+    assert params[1] == "1h"
+    assert params[2] == ts
+
+
+def test_fetch_basis_rates_by_sample_times_empty_returns_empty() -> None:
+    conn = MagicMock()
+    assert fetch_basis_rates_by_sample_times(conn, "BTCUSDT", "PERPETUAL", "1h", []) == {}
+
+
+def test_fetch_basis_rates_by_sample_times_executes() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    st = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    cur.fetchall.return_value = [
+        (
+            st,
+            Decimal("100"),
+            Decimal("0.001"),
+            Decimal("50100"),
+            Decimal("50000"),
+        )
+    ]
+    conn.cursor.return_value = cur
+    out = fetch_basis_rates_by_sample_times(conn, "btcusdt", "perpetual", "1h", [st])
+    assert st in out
+    assert out[st][1] == Decimal("0.001")
+
+
+def test_basis_window_stats_empty() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = (0, None, None)
+    conn.cursor.return_value = cur
+    lo = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    assert basis_window_stats(
+        conn,
+        "BTCUSDT",
+        "PERPETUAL",
+        "1h",
+        sample_time_ge=lo,
+        sample_time_le=hi,
+    ) == (0, None, None)
+
+
+def test_basis_window_stats_rejects_naive() -> None:
+    conn = MagicMock()
+    naive = datetime(2020, 1, 1)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        basis_window_stats(
+            conn,
+            "BTCUSDT",
+            "PERPETUAL",
+            "1h",
+            sample_time_ge=naive,
+            sample_time_le=hi,
+        )
+
+
+def test_fetch_open_interest_by_sample_times_empty_returns_empty() -> None:
+    conn = MagicMock()
+    assert fetch_open_interest_by_sample_times(conn, "BTCUSDT", "PERPETUAL", "1h", []) == {}
+
+
+def test_fetch_open_interest_by_sample_times_executes() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    st = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    cur.fetchall.return_value = [
+        (
+            st,
+            Decimal("12345.6789"),
+            Decimal("987654321.123456"),
+            Decimal("19500000.0"),
+        )
+    ]
+    conn.cursor.return_value = cur
+    out = fetch_open_interest_by_sample_times(conn, "btcusdt", "perpetual", "1h", [st])
+    assert st in out
+    assert out[st][0] == Decimal("12345.6789")
+
+
+def test_open_interest_window_stats_empty() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = (0, None, None)
+    conn.cursor.return_value = cur
+    lo = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    assert open_interest_window_stats(
+        conn,
+        "BTCUSDT",
+        "PERPETUAL",
+        "1h",
+        sample_time_ge=lo,
+        sample_time_le=hi,
+    ) == (0, None, None)
+
+
+def test_open_interest_window_stats_rejects_naive() -> None:
+    conn = MagicMock()
+    naive = datetime(2020, 1, 1)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        open_interest_window_stats(
+            conn,
+            "BTCUSDT",
+            "PERPETUAL",
+            "1h",
+            sample_time_ge=naive,
+            sample_time_le=hi,
+        )
+
+
+def test_fetch_taker_buy_sell_volume_by_sample_times_empty_returns_empty() -> None:
+    conn = MagicMock()
+    assert (
+        fetch_taker_buy_sell_volume_by_sample_times(conn, "BTCUSDT", "1h", []) == {}
+    )
+
+
+def test_fetch_taker_buy_sell_volume_by_sample_times_executes() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    st = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    cur.fetchall.return_value = [
+        (
+            st,
+            Decimal("1.5586"),
+            Decimal("387.3300"),
+            Decimal("248.5030"),
+        )
+    ]
+    conn.cursor.return_value = cur
+    out = fetch_taker_buy_sell_volume_by_sample_times(conn, "btcusdt", "1h", [st])
+    assert st in out
+    assert out[st][0] == Decimal("1.5586")
+
+
+def test_fetch_top_trader_long_short_by_sample_times_empty_returns_empty() -> None:
+    conn = MagicMock()
+    assert fetch_top_trader_long_short_by_sample_times(conn, "BTCUSDT", "1h", []) == {}
+
+
+def test_fetch_top_trader_long_short_by_sample_times_executes() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    st = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    cur.fetchall.return_value = [
+        (
+            st,
+            Decimal("1.4342"),
+            Decimal("0.5891"),
+            Decimal("0.4108"),
+        )
+    ]
+    conn.cursor.return_value = cur
+    out = fetch_top_trader_long_short_by_sample_times(conn, "btcusdt", "1h", [st])
+    assert st in out
+    assert out[st][0] == Decimal("1.4342")
+
+
+def test_top_trader_long_short_window_stats_empty() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = (0, None, None)
+    conn.cursor.return_value = cur
+    lo = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    assert top_trader_long_short_window_stats(
+        conn,
+        "BTCUSDT",
+        "1h",
+        sample_time_ge=lo,
+        sample_time_le=hi,
+    ) == (0, None, None)
+
+
+def test_top_trader_long_short_window_stats_rejects_naive() -> None:
+    conn = MagicMock()
+    naive = datetime(2020, 1, 1)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        top_trader_long_short_window_stats(
+            conn,
+            "BTCUSDT",
+            "1h",
+            sample_time_ge=naive,
+            sample_time_le=hi,
+        )
+
+
+def test_taker_buy_sell_volume_window_stats_empty() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = (0, None, None)
+    conn.cursor.return_value = cur
+    lo = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    assert taker_buy_sell_volume_window_stats(
+        conn,
+        "BTCUSDT",
+        "1h",
+        sample_time_ge=lo,
+        sample_time_le=hi,
+    ) == (0, None, None)
+
+
+def test_taker_buy_sell_volume_window_stats_rejects_naive() -> None:
+    conn = MagicMock()
+    naive = datetime(2020, 1, 1)
+    hi = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        taker_buy_sell_volume_window_stats(
+            conn,
+            "BTCUSDT",
+            "1h",
+            sample_time_ge=naive,
+            sample_time_le=hi,
+        )
 
 
 def _postgres_url() -> str | None:

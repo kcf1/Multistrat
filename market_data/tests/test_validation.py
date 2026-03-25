@@ -8,7 +8,11 @@ import pytest
 
 from market_data.schemas import OhlcvBar, parse_binance_kline
 from market_data.validation import (
+    process_binance_basis_payload,
     process_binance_klines_payload,
+    process_binance_open_interest_payload,
+    process_binance_taker_buy_sell_volume_payload,
+    process_binance_top_trader_long_short_position_ratio_payload,
     scan_bar_series_grid_gaps,
     theoretical_max_bars_in_window,
 )
@@ -208,3 +212,298 @@ def test_scan_bar_series_grid_gaps_detects() -> None:
     ]
     g = scan_bar_series_grid_gaps(bars, "1m")
     assert g and "gap" in g[0].lower()
+
+
+def _basis_row(ts: int, *, pair: str = "BTCUSDT") -> dict:
+    return {
+        "indexPrice": "46317.16333333",
+        "contractType": "PERPETUAL",
+        "basisRate": "0.00295565",
+        "futuresPrice": "46454.22",
+        "basis": "137.05666667",
+        "pair": pair,
+        "timestamp": ts,
+        "period": "1h",
+    }
+
+
+def test_process_basis_payload_rejects_non_list() -> None:
+    with pytest.raises(ValueError, match="JSON array"):
+        process_binance_basis_payload(
+            {},
+            pair="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_basis_payload_row_not_object() -> None:
+    with pytest.raises(ValueError, match=r"row\[0\]"):
+        process_binance_basis_payload(
+            [123],
+            pair="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_basis_payload_empty_ok() -> None:
+    out = process_binance_basis_payload(
+        [],
+        pair="BTCUSDT",
+        contract_type="PERPETUAL",
+        period="1h",
+    )
+    assert out == []
+
+
+def test_process_basis_payload_duplicate_sample_time() -> None:
+    r = _basis_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_basis_payload(
+            [r, r],
+            pair="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_basis_payload_non_monotonic() -> None:
+    a = _basis_row(1_640_995_200_000)
+    b = _basis_row(1_640_995_100_000)
+    with pytest.raises(ValueError, match="non-increasing"):
+        process_binance_basis_payload(
+            [a, b],
+            pair="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def _open_interest_row(ts: int, *, symbol: str = "BTCUSDT") -> dict:
+    return {
+        "symbol": symbol,
+        "contractType": "PERPETUAL",
+        "sumOpenInterest": "12345.6789",
+        "sumOpenInterestValue": "987654321.123456",
+        "CMCCirculatingSupply": "19500000.0",
+        "timestamp": ts,
+        "period": "1h",
+    }
+
+
+def test_process_open_interest_payload_rejects_non_list() -> None:
+    with pytest.raises(ValueError, match="JSON array"):
+        process_binance_open_interest_payload(
+            {},
+            symbol="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_open_interest_payload_row_not_object() -> None:
+    with pytest.raises(ValueError, match=r"row\[0\]"):
+        process_binance_open_interest_payload(
+            [123],
+            symbol="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_open_interest_payload_empty_ok() -> None:
+    out = process_binance_open_interest_payload(
+        [],
+        symbol="BTCUSDT",
+        contract_type="PERPETUAL",
+        period="1h",
+    )
+    assert out == []
+
+
+def test_process_open_interest_payload_duplicate_sample_time() -> None:
+    r = _open_interest_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_open_interest_payload(
+            [r, r],
+            symbol="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def test_process_open_interest_payload_sorts_descending_timestamps_to_ascending() -> None:
+    """API may return newest-first; we sort so pagination can use the last row as newest."""
+    older = _open_interest_row(1_640_995_100_000)
+    newer = _open_interest_row(1_640_995_200_000)
+    out = process_binance_open_interest_payload(
+        [newer, older],
+        symbol="BTCUSDT",
+        contract_type="PERPETUAL",
+        period="1h",
+    )
+    assert len(out) == 2
+    assert out[0].sample_time.timestamp() * 1000 == 1_640_995_100_000
+    assert out[1].sample_time.timestamp() * 1000 == 1_640_995_200_000
+
+
+def test_process_open_interest_payload_rejects_non_increasing_after_sort() -> None:
+    """Duplicate timestamps remain invalid after sort (true non-monotonic grid)."""
+    a = _open_interest_row(1_640_995_200_000)
+    b = _open_interest_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_open_interest_payload(
+            [a, b],
+            symbol="BTCUSDT",
+            contract_type="PERPETUAL",
+            period="1h",
+        )
+
+
+def _taker_buy_sell_row(ts: int, *, symbol: str = "BTCUSDT", period: str = "1h") -> dict:
+    return {
+        "symbol": symbol,
+        "period": period,
+        "buySellRatio": "1.5586",
+        "buyVol": "387.3300",
+        "sellVol": "248.5030",
+        "timestamp": ts,
+    }
+
+
+def test_process_taker_payload_rejects_non_list() -> None:
+    with pytest.raises(ValueError, match="JSON array"):
+        process_binance_taker_buy_sell_volume_payload(
+            {},
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def test_process_taker_payload_row_not_object() -> None:
+    with pytest.raises(ValueError, match=r"row\[0\]"):
+        process_binance_taker_buy_sell_volume_payload(
+            [123],
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def test_process_taker_payload_empty_ok() -> None:
+    out = process_binance_taker_buy_sell_volume_payload(
+        [],
+        symbol="BTCUSDT",
+        period="1h",
+    )
+    assert out == []
+
+
+def test_process_taker_payload_duplicate_sample_time() -> None:
+    r = _taker_buy_sell_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_taker_buy_sell_volume_payload(
+            [r, r],
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def test_process_taker_payload_sorts_descending_timestamps_to_ascending() -> None:
+    older = _taker_buy_sell_row(1_640_995_100_000)
+    newer = _taker_buy_sell_row(1_640_995_200_000)
+    out = process_binance_taker_buy_sell_volume_payload(
+        [newer, older],
+        symbol="BTCUSDT",
+        period="1h",
+    )
+    assert len(out) == 2
+    assert out[0].sample_time.timestamp() * 1000 == 1_640_995_100_000
+    assert out[1].sample_time.timestamp() * 1000 == 1_640_995_200_000
+
+
+def test_process_taker_payload_rejects_duplicates_after_sort() -> None:
+    a = _taker_buy_sell_row(1_640_995_200_000)
+    b = _taker_buy_sell_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_taker_buy_sell_volume_payload(
+            [a, b],
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def _top_trader_long_short_row(
+    ts: int,
+    *,
+    symbol: str = "BTCUSDT",
+) -> dict:
+    # Intentionally omit `period` to ensure process uses explicit context.
+    return {
+        "symbol": symbol,
+        "longShortRatio": "1.4342",
+        "longAccount": "0.5891",
+        "shortAccount": "0.4108",
+        "timestamp": ts,
+    }
+
+
+def test_process_top_trader_payload_rejects_non_list() -> None:
+    with pytest.raises(ValueError, match="JSON array"):
+        process_binance_top_trader_long_short_position_ratio_payload(
+            {},
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def test_process_top_trader_payload_row_not_object() -> None:
+    with pytest.raises(ValueError, match=r"row\[0\]"):
+        process_binance_top_trader_long_short_position_ratio_payload(
+            [123],
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def test_process_top_trader_payload_empty_ok() -> None:
+    out = process_binance_top_trader_long_short_position_ratio_payload(
+        [],
+        symbol="BTCUSDT",
+        period="1h",
+    )
+    assert out == []
+
+
+def test_process_top_trader_payload_duplicate_sample_time() -> None:
+    r = _top_trader_long_short_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_top_trader_long_short_position_ratio_payload(
+            [r, r],
+            symbol="BTCUSDT",
+            period="1h",
+        )
+
+
+def test_process_top_trader_payload_sorts_descending_timestamps_to_ascending() -> None:
+    older = _top_trader_long_short_row(1_640_995_100_000)
+    newer = _top_trader_long_short_row(1_640_995_200_000)
+    out = process_binance_top_trader_long_short_position_ratio_payload(
+        [newer, older],
+        symbol="BTCUSDT",
+        period="1h",
+    )
+    assert len(out) == 2
+    assert out[0].sample_time.timestamp() * 1000 == 1_640_995_100_000
+    assert out[1].sample_time.timestamp() * 1000 == 1_640_995_200_000
+
+
+def test_process_top_trader_payload_rejects_duplicates_after_sort() -> None:
+    a = _top_trader_long_short_row(1_640_995_200_000)
+    b = _top_trader_long_short_row(1_640_995_200_000)
+    with pytest.raises(ValueError, match="duplicate sample_time"):
+        process_binance_top_trader_long_short_position_ratio_payload(
+            [a, b],
+            symbol="BTCUSDT",
+            period="1h",
+        )
