@@ -51,7 +51,7 @@ def _log_open_interest_drifts(
         )
         if not same:
             n += 1
-            logger.warning(
+            logger.debug(
                 "market_data open_interest drift symbol={} contract_type={} period={} sample_time={} "
                 "db=({}, {}, {}) api=({}, {}, {})",
                 r.symbol,

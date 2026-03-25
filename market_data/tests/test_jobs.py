@@ -340,7 +340,7 @@ def test_log_drifts_warns_on_mismatch() -> None:
     ot = datetime(2020, 1, 1, tzinfo=timezone.utc)
     bar = _bar(int(ot.timestamp() * 1000), close=Decimal("2"))
     existing = {ot: (Decimal("1"), Decimal("2"), Decimal("0.5"), Decimal("1"))}
-    with patch("market_data.jobs.correct_window.logger.warning") as w:
+    with patch("market_data.jobs.correct_window.logger.debug") as w:
         n = _log_drifts(existing, [bar])
     assert n == 1
     assert w.called
@@ -468,7 +468,7 @@ def test_log_basis_drifts_warns_on_mismatch() -> None:
     st = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
     row = _basis_point(int(st.timestamp() * 1000))
     existing = {st: (Decimal("99"), Decimal("0.001"), Decimal("50100"), Decimal("50000"))}
-    with patch("market_data.jobs.correct_window_basis_rate.logger.warning") as w:
+    with patch("market_data.jobs.correct_window_basis_rate.logger.debug") as w:
         n = _log_basis_drifts(existing, [row])
     assert n == 1
     assert w.called
@@ -610,7 +610,7 @@ def test_log_open_interest_drifts_warns_on_mismatch() -> None:
     st = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
     row = _open_interest_point(int(st.timestamp() * 1000))
     existing = {st: (Decimal("1"), Decimal("2"), Decimal("3"))}
-    with patch("market_data.jobs.correct_window_open_interest.logger.warning") as w:
+    with patch("market_data.jobs.correct_window_open_interest.logger.debug") as w:
         n = _log_open_interest_drifts(existing, [row])
     assert n == 1
     assert w.called
