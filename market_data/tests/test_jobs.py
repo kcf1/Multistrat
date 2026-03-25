@@ -13,6 +13,8 @@ from market_data.config import (
     OPEN_INTEREST_CONTRACT_TYPES,
     OPEN_INTEREST_PERIODS,
     OPEN_INTEREST_SYMBOLS,
+    TAKER_BUYSELL_VOLUME_PERIODS,
+    TAKER_BUYSELL_VOLUME_SYMBOLS,
 )
 from market_data.jobs.common import (
     expected_ohlcv_slots,
@@ -36,6 +38,12 @@ from market_data.jobs.ingest_open_interest import (
     ingest_open_interest_series,
     run_ingest_open_interest,
 )
+from market_data.jobs.ingest_taker_buy_sell_volume import (
+    IngestTakerBuySellVolumeSeriesResult,
+    ingest_taker_buy_sell_volume_series,
+    resolve_taker_buy_sell_volume_ingest_start_ms,
+    run_ingest_taker_buy_sell_volume,
+)
 from market_data.jobs.ingest_ohlcv import ingest_ohlcv_series
 from market_data.jobs.repair_gap_open_interest import (
     detect_open_interest_time_gaps,
@@ -47,6 +55,12 @@ from market_data.jobs.repair_gap_basis_rate import (
 )
 from market_data.jobs.repair_gap import detect_ohlcv_time_gaps, run_repair_gap
 from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint
+from market_data.jobs.correct_window_taker_buy_sell_volume import (
+    CorrectTakerBuySellVolumeWindowResult,
+    run_correct_window_taker_buy_sell_volume_series,
+    run_correct_window_taker_buy_sell_volume,
+)
+from market_data.schemas import TakerBuySellVolumePoint
 
 
 def _bar(
@@ -93,6 +107,18 @@ def _open_interest_point(sample_ms: int, *, symbol: str = "BTCUSDT") -> OpenInte
         sum_open_interest=Decimal("12345.6789"),
         sum_open_interest_value=Decimal("987654321.123456"),
         cmc_circulating_supply=Decimal("19500000.0"),
+    )
+
+
+def _taker_buy_sell_volume_point(sample_ms: int, *, symbol: str = "BTCUSDT") -> TakerBuySellVolumePoint:
+    st = datetime.fromtimestamp(sample_ms / 1000.0, tz=timezone.utc)
+    return TakerBuySellVolumePoint(
+        symbol=symbol,
+        period="1h",
+        sample_time=st,
+        buy_sell_ratio=Decimal("1.5586"),
+        buy_vol=Decimal("387.3300"),
+        sell_vol=Decimal("248.5030"),
     )
 
 
@@ -528,6 +554,81 @@ def test_resolve_open_interest_ingest_start_backfill_when_empty() -> None:
     assert start == (raw_horizon // pd_ms) * pd_ms
 
 
+def test_resolve_taker_buy_sell_volume_ingest_start_backfill_when_empty() -> None:
+    conn = MagicMock()
+    now_ms = 1_000_000_000_000
+    with (
+        patch(
+            "market_data.jobs.ingest_taker_buy_sell_volume.get_taker_buy_sell_volume_cursor",
+            return_value=None,
+        ),
+        patch(
+            "market_data.jobs.ingest_taker_buy_sell_volume.max_sample_time_taker_buy_sell_volume",
+            return_value=None,
+        ),
+    ):
+        from market_data.jobs.ingest_taker_buy_sell_volume import (
+            resolve_taker_buy_sell_volume_ingest_start_ms,
+        )
+
+        start = resolve_taker_buy_sell_volume_ingest_start_ms(
+            conn,
+            "BTCUSDT",
+            "1h",
+            now_ms=now_ms,
+            backfill_days=7,
+        )
+
+    raw_horizon = now_ms - 7 * 86_400_000
+    pd_ms = 3_600_000
+    assert start == (raw_horizon // pd_ms) * pd_ms
+
+
+def test_ingest_taker_buy_sell_volume_series_commits_per_chunk() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+
+    p_tail = [_taker_buy_sell_volume_point(7_260_000)]
+    p_head = [_taker_buy_sell_volume_point(60_000), _taker_buy_sell_volume_point(3_660_000)]
+
+    class P:
+        def fetch_taker_buy_sell_volume(self, *args, **kwargs):
+            start_time_ms = kwargs["start_time_ms"]
+            if start_time_ms == 60_000:
+                return p_head
+            if start_time_ms == 7_260_000:
+                return p_tail
+            return []
+
+    with (
+        patch(
+            "market_data.jobs.ingest_taker_buy_sell_volume.resolve_taker_buy_sell_volume_ingest_start_ms",
+            return_value=60_000,
+        ),
+        patch("market_data.jobs.ingest_taker_buy_sell_volume.upsert_taker_buy_sell_volume_points") as up,
+        patch(
+            "market_data.jobs.ingest_taker_buy_sell_volume.upsert_taker_buy_sell_volume_cursor"
+        ) as uc,
+    ):
+        r = ingest_taker_buy_sell_volume_series(
+            conn,
+            P(),
+            "BTCUSDT",
+            "1h",
+            now_ms=10_000_000,
+            chunk_limit=500,
+        )
+
+    assert r.rows_upserted == 3
+    assert r.chunks == 2
+    assert up.call_count == 2
+    assert uc.call_count == 2
+    assert conn.commit.call_count == 2
+
+
 def test_ingest_open_interest_series_commits_per_chunk() -> None:
     conn = MagicMock()
     cur = MagicMock()
@@ -646,6 +747,95 @@ def test_run_correct_window_open_interest_series_upserts() -> None:
     assert r.drift_rows == 0
     up.assert_called_once_with(conn, rows)
     conn.commit.assert_called_once()
+
+
+def test_run_correct_window_taker_buy_sell_volume_series_upserts() -> None:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cur
+
+    rows = [_taker_buy_sell_volume_point(1_700_000_000_000)]
+
+    class P:
+        def fetch_taker_buy_sell_volume(self, *a, **k):
+            return rows
+
+    with (
+        patch(
+            "market_data.jobs.correct_window_taker_buy_sell_volume.chunk_fetch_taker_buy_sell_volume_forward",
+            return_value=rows,
+        ),
+        patch(
+            "market_data.jobs.correct_window_taker_buy_sell_volume.fetch_taker_buy_sell_volume_by_sample_times",
+            return_value={},
+        ),
+        patch(
+            "market_data.jobs.correct_window_taker_buy_sell_volume.upsert_taker_buy_sell_volume_points"
+        ) as up,
+    ):
+        r = run_correct_window_taker_buy_sell_volume_series(
+            conn,
+            P(),
+            "BTCUSDT",
+            "1h",
+            lookback_points=10,
+            now_ms=1_700_000_060_000,
+        )
+
+    assert r.rows_fetched == 1
+    assert r.drift_rows == 0
+    up.assert_called_once_with(conn, rows)
+    conn.commit.assert_called_once()
+
+
+def test_run_ingest_taker_buy_sell_volume_calls_series_once_per_config_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_ingest(conn, prov, symbol, period, **kwargs):
+        calls.append((symbol, period))
+        return IngestTakerBuySellVolumeSeriesResult(symbol, period, 0, 0, ())
+
+    monkeypatch.setattr(
+        "market_data.jobs.ingest_taker_buy_sell_volume.ingest_taker_buy_sell_volume_series",
+        fake_ingest,
+    )
+    monkeypatch.setattr(
+        "market_data.jobs.ingest_taker_buy_sell_volume.psycopg2.connect",
+        lambda _url: MagicMock(close=MagicMock()),
+    )
+    settings = SimpleNamespace(database_url="postgresql://test")
+    run_ingest_taker_buy_sell_volume(settings, provider=MagicMock())
+
+    expected_n = len(TAKER_BUYSELL_VOLUME_SYMBOLS) * len(TAKER_BUYSELL_VOLUME_PERIODS)
+    assert len(calls) == expected_n
+
+
+def test_run_correct_window_taker_buy_sell_volume_calls_series_once_per_config_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_series(conn, prov, symbol, period, **kwargs):
+        calls.append((symbol, period))
+        return CorrectTakerBuySellVolumeWindowResult(symbol, period, 0, 0)
+
+    monkeypatch.setattr(
+        "market_data.jobs.correct_window_taker_buy_sell_volume.run_correct_window_taker_buy_sell_volume_series",
+        fake_series,
+    )
+    monkeypatch.setattr(
+        "market_data.jobs.correct_window_taker_buy_sell_volume.psycopg2.connect",
+        lambda _url: MagicMock(close=MagicMock()),
+    )
+    settings = SimpleNamespace(database_url="postgresql://test")
+    run_correct_window_taker_buy_sell_volume(settings, provider=MagicMock())
+
+    expected_n = len(TAKER_BUYSELL_VOLUME_SYMBOLS) * len(TAKER_BUYSELL_VOLUME_PERIODS)
+    assert len(calls) == expected_n
 
 
 def test_run_ingest_open_interest_calls_series_once_per_config_key(monkeypatch: pytest.MonkeyPatch) -> None:

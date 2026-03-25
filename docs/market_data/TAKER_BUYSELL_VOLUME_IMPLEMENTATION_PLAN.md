@@ -257,13 +257,13 @@ Retention handling:
 - [x] Add `TakerBuySellVolumePoint` model + parser + tests.
 - [x] Add perps provider protocol + Binance adapter method for `/futures/data/takerlongshortRatio`.
 - [x] Add taker-buy-sell-volume upsert storage + cursor helpers + tests.
-- [ ] Implement `ingest_taker_buy_sell_volume`.
-- [ ] Implement `correct_window_taker_buy_sell_volume`.
+- [x] Implement `ingest_taker_buy_sell_volume`.
+- [x] Implement `correct_window_taker_buy_sell_volume`.
 - [ ] Implement `repair_gap_taker_buy_sell_volume` (or explicitly defer with scheduler repair disabled).
-- [ ] Wire taker jobs into `market_data/main.py`.
+- [x] Wire taker jobs into `market_data/main.py`.
 - [ ] Add one-shot/backfill CLI/script for this dataset.
 - [ ] Update README and dataset docs.
-- [ ] Add unit/job/integration coverage under `market_data/tests/`.
+- [x] Add unit/job/integration coverage under `market_data/tests/`.
 
 ---
 

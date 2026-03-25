@@ -6,8 +6,13 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 from market_data.intervals import floor_align_ms_to_interval, interval_to_millis
-from market_data.providers.base import BasisProvider, KlinesProvider, OpenInterestProvider
-from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint
+from market_data.providers.base import (
+    BasisProvider,
+    KlinesProvider,
+    OpenInterestProvider,
+    TakerBuySellVolumeProvider,
+)
+from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint, TakerBuySellVolumePoint
 
 
 def utc_now_ms() -> int:
@@ -246,6 +251,71 @@ def chunk_fetch_open_interest_forward(
         provider,
         symbol,
         contract_type,
+        period,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        chunk_limit=chunk_limit,
+    ):
+        out.extend(batch)
+    return out
+
+
+def filter_taker_buy_sell_volume_not_after_ms(
+    points: list[TakerBuySellVolumePoint],
+    end_ms: int,
+) -> list[TakerBuySellVolumePoint]:
+    end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
+    return [p for p in points if p.sample_time <= end_dt]
+
+
+def iter_taker_buy_sell_volume_batches_forward(
+    provider: TakerBuySellVolumeProvider,
+    symbol: str,
+    period: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    chunk_limit: int = 500,
+) -> Iterator[list[TakerBuySellVolumePoint]]:
+    """
+    Yield each ``fetch_taker_buy_sell_volume`` page from ``start_ms`` toward ``end_ms`` (oldest first).
+    """
+    pd_ms = interval_to_millis(period)
+    cur = start_ms
+    safety = 0
+    while cur < end_ms and safety < 100_000:
+        safety += 1
+        batch = provider.fetch_taker_buy_sell_volume(
+            symbol,
+            period,
+            start_time_ms=cur,
+            end_time_ms=end_ms,
+            limit=chunk_limit,
+        )
+        if not batch:
+            break
+        batch = filter_taker_buy_sell_volume_not_after_ms(batch, end_ms)
+        if not batch:
+            break
+        yield batch
+        last = batch[-1]
+        cur = open_time_plus_interval_ms(last.sample_time, pd_ms)
+
+
+def chunk_fetch_taker_buy_sell_volume_forward(
+    provider: TakerBuySellVolumeProvider,
+    symbol: str,
+    period: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    chunk_limit: int = 500,
+) -> list[TakerBuySellVolumePoint]:
+    """Concatenate all batches from :func:`iter_taker_buy_sell_volume_batches_forward` (oldest first)."""
+    out: list[TakerBuySellVolumePoint] = []
+    for batch in iter_taker_buy_sell_volume_batches_forward(
+        provider,
+        symbol,
         period,
         start_ms=start_ms,
         end_ms=end_ms,
