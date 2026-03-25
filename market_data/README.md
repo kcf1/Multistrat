@@ -1,7 +1,7 @@
 # Market data (Phase 4)
 
-REST **Binance spot** klines + **Binance perps basis** + **Binance perps open interest** → Postgres
-(**`ohlcv`**, **`basis_rate`**, **`open_interest`**).
+REST **Binance spot** klines + **Binance perps basis** + **Binance perps open interest** + **Binance top-trader long/short (positions)** → Postgres
+(**`ohlcv`**, **`basis_rate`**, **`open_interest`**, **`top_trader_long_short`**).
 Symbols/pairs, intervals/periods, and scheduler cadence (`OHLCV_SCHEDULER_*`, `BASIS_SCHEDULER_*`,
 `OPEN_INTEREST_SCHEDULER_*`) are code constants in [`config.py`](config.py). Postgres URL and optional REST bases come from env.
 
@@ -63,7 +63,7 @@ Notes for perps history endpoints (basis + open interest, `period=1h`):
 | `DATABASE_URL` | Postgres (fallback) |
 | `MARKET_DATA_DATABASE_URL` | Overrides `DATABASE_URL` when set |
 | `MARKET_DATA_BINANCE_BASE_URL` | Public REST base (e.g. testnet) |
-| `MARKET_DATA_BINANCE_PERPS_BASE_URL` | Perps REST base for basis / funding / open-interest datasets |
+| `MARKET_DATA_BINANCE_PERPS_BASE_URL` | Perps REST base for basis / funding / open-interest / top-trader datasets |
 
 Scheduler timing is **not** env — edit `OHLCV_SCHEDULER_*`, `BASIS_SCHEDULER_*`, and `OPEN_INTEREST_SCHEDULER_*`
 constants in [`config.py`](config.py).

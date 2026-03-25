@@ -116,6 +116,22 @@ TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS: int = 0
 TAKER_BUYSELL_VOLUME_FETCH_MAX_ATTEMPTS: int = 5
 TAKER_BUYSELL_VOLUME_FETCH_RETRY_BASE_SLEEP_SEC: float = 0.75
 
+# Top Trader Long/Short (Binance USD-M topLongShortPositionRatio endpoint) micro constants.
+TOP_TRADER_LONG_SHORT_SYMBOLS: tuple[str, ...] = DATA_COLLECTION_SYMBOLS
+# Binance period enum: "5m","15m","30m","1h","2h","4h","6h","12h","1d"
+# Start with a subset; expand once the pipeline is stable.
+TOP_TRADER_LONG_SHORT_PERIODS: tuple[str, ...] = ("1h",)
+# Binance documents "only the latest 30 days is available" for this dataset family; use the
+# same 27-day buffered default as basis/open interest to stay safely within the venue window.
+TOP_TRADER_LONG_SHORT_INITIAL_BACKFILL_DAYS: int = BINANCE_FUTURES_LIMITED_RETENTION_BACKFILL_DAYS
+TOP_TRADER_LONG_SHORT_FETCH_CHUNK_LIMIT: int = 500
+TOP_TRADER_LONG_SHORT_CORRECT_WINDOW_POINTS: int = 48
+TOP_TRADER_LONG_SHORT_SCHEDULER_INGEST_INTERVAL_SECONDS: int = 300
+TOP_TRADER_LONG_SHORT_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS: int = 3600
+TOP_TRADER_LONG_SHORT_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS: int = 0
+TOP_TRADER_LONG_SHORT_FETCH_MAX_ATTEMPTS: int = 5
+TOP_TRADER_LONG_SHORT_FETCH_RETRY_BASE_SLEEP_SEC: float = 0.75
+
 
 class MarketDataSettings(BaseSettings):
     """
