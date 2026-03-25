@@ -29,15 +29,15 @@ FROM positions
 """
 
 SELECT_BY_ASSET_SQL = (
-    "SELECT asset " + _SQL_SUFFIX + "GROUP BY asset ORDER BY asset;"
+    "SELECT asset, " + _SQL_SUFFIX + "GROUP BY asset ORDER BY asset;"
 )
 
 SELECT_BY_BROKER_SQL = (
-    "SELECT broker " + _SQL_SUFFIX + "GROUP BY broker ORDER BY broker;"
+    "SELECT broker, " + _SQL_SUFFIX + "GROUP BY broker ORDER BY broker;"
 )
 
 SELECT_BY_BOOK_SQL = (
-    "SELECT broker, book " + _SQL_SUFFIX + "GROUP BY broker, book ORDER BY broker, book;"
+    "SELECT broker, book, " + _SQL_SUFFIX + "GROUP BY broker, book ORDER BY broker, book;"
 )
 
 SELECT_GRANULAR_SQL = """
