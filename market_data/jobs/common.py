@@ -260,14 +260,6 @@ def chunk_fetch_open_interest_forward(
     return out
 
 
-def filter_taker_buy_sell_volume_not_after_ms(
-    points: list[TakerBuySellVolumePoint],
-    end_ms: int,
-) -> list[TakerBuySellVolumePoint]:
-    end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
-    return [p for p in points if p.sample_time <= end_dt]
-
-
 def iter_taker_buy_sell_volume_batches_forward(
     provider: TakerBuySellVolumeProvider,
     symbol: str,
@@ -278,28 +270,66 @@ def iter_taker_buy_sell_volume_batches_forward(
     chunk_limit: int = 500,
 ) -> Iterator[list[TakerBuySellVolumePoint]]:
     """
-    Yield each ``fetch_taker_buy_sell_volume`` page from ``start_ms`` toward ``end_ms`` (oldest first).
+    Yield each ``fetch_taker_buy_sell_volume`` page covering ``[start_ms, end_ms]``, **oldest
+    chunk first** (chronological ingest / cursor checkpoints).
+
+    Binance ``takerlongshortRatio`` behaves like ``openInterestHist`` here: when both
+    ``startTime`` and ``endTime`` are provided, the response is effectively the **latest**
+    ``limit`` rows within that window. We therefore page **backward** by lowering
+    ``endTime`` to just before the current page's oldest timestamp, then reverse the
+    fetch stack so callers still receive batches from oldest wall-clock segment to newest.
     """
     pd_ms = interval_to_millis(period)
-    cur = start_ms
+    lo = int(start_ms)
+    hi = int(end_ms)
+    if lo >= hi:
+        return
+
+    def filter_taker_buy_sell_volume_in_ms_window(
+        points: list[TakerBuySellVolumePoint],
+        start_ms: int,
+        end_ms: int,
+    ) -> list[TakerBuySellVolumePoint]:
+        start_dt = datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
+        return [p for p in points if start_dt <= p.sample_time <= end_dt]
+
+    stack: list[list[TakerBuySellVolumePoint]] = []
     safety = 0
-    while cur < end_ms and safety < 100_000:
+    cur_end = hi
+    prev_first_sample_time: datetime | None = None
+
+    while cur_end > lo and safety < 100_000:
         safety += 1
         batch = provider.fetch_taker_buy_sell_volume(
             symbol,
             period,
-            start_time_ms=cur,
-            end_time_ms=end_ms,
+            start_time_ms=lo,
+            end_time_ms=cur_end,
             limit=chunk_limit,
         )
         if not batch:
             break
-        batch = filter_taker_buy_sell_volume_not_after_ms(batch, end_ms)
+        batch = filter_taker_buy_sell_volume_in_ms_window(batch, lo, hi)
         if not batch:
             break
+
+        first = batch[0].sample_time
+        # Paging backward expects the oldest timestamp to move earlier each iteration.
+        # If it does not, we'd get a repeated page loop.
+        if prev_first_sample_time is not None and first >= prev_first_sample_time:
+            break
+        prev_first_sample_time = first
+
+        stack.append(batch)
+
+        next_end = int(first.timestamp() * 1000) - pd_ms
+        if next_end < lo:
+            break
+        cur_end = next_end
+
+    for batch in reversed(stack):
         yield batch
-        last = batch[-1]
-        cur = open_time_plus_interval_ms(last.sample_time, pd_ms)
 
 
 def chunk_fetch_taker_buy_sell_volume_forward(

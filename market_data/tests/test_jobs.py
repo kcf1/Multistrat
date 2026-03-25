@@ -600,11 +600,13 @@ def test_ingest_taker_buy_sell_volume_series_commits_per_chunk() -> None:
 
     class P:
         def fetch_taker_buy_sell_volume(self, *args, **kwargs):
-            start_time_ms = kwargs["start_time_ms"]
-            if start_time_ms == 60_000:
-                return p_head
-            if start_time_ms == 7_260_000:
+            end_time_ms = kwargs["end_time_ms"]
+            # iterator pages backward by lowering endTime; first returns the tail (newest),
+            # then returns the head (older window chunk).
+            if end_time_ms == 10_000_000:
                 return p_tail
+            if end_time_ms == 3_660_000:
+                return p_head
             return []
 
     with (

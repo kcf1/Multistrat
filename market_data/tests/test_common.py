@@ -4,8 +4,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-from market_data.jobs.common import floor_align_ms_to_interval, iter_open_interest_batches_forward
-from market_data.schemas import OpenInterestPoint
+from market_data.jobs.common import (
+    floor_align_ms_to_interval,
+    iter_open_interest_batches_forward,
+    iter_taker_buy_sell_volume_batches_forward,
+)
+from market_data.schemas import OpenInterestPoint, TakerBuySellVolumePoint
 
 
 def _oi_at(ms: int) -> OpenInterestPoint:
@@ -82,3 +86,99 @@ def test_floor_align_ms_to_interval_1h() -> None:
 def test_floor_align_ms_to_interval_already_aligned() -> None:
     ms = 10 * 3_600_000
     assert floor_align_ms_to_interval(ms, "1h") == ms
+
+
+def _taker_point(ms: int) -> TakerBuySellVolumePoint:
+    return TakerBuySellVolumePoint(
+        symbol="BTCUSDT",
+        period="1h",
+        sample_time=datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc),
+        buy_sell_ratio=Decimal("1.0"),
+        buy_vol=Decimal("1.0"),
+        sell_vol=Decimal("1.0"),
+    )
+
+
+def test_iter_taker_buy_sell_volume_pages_tail_then_head_like_binance() -> None:
+    """
+    takerlongshortRatio returns the *latest* ``limit`` rows in [start,end].
+
+    So two windows of 500 + 149 buckets require two HTTP calls with a lowered ``endTime``
+    on the second. Iterator must yield the older 149 rows before the newer 500
+    (chronological ingest).
+    """
+    pd_ms = 3_600_000
+    lo = 1_700_000_000_000
+    hi = lo + 649 * pd_ms
+
+    # Newest 500 buckets in window: hours index 149..648 from lo
+    tail = [_taker_point(lo + (149 + i) * pd_ms) for i in range(500)]
+    # Older 149 buckets: index 0..148
+    head = [_taker_point(lo + i * pd_ms) for i in range(149)]
+    second_end = lo + 148 * pd_ms
+
+    prov = MagicMock()
+
+    def fetch(
+        _s: str,
+        _p: str,
+        *,
+        start_time_ms: int,
+        end_time_ms: int,
+        limit: int,
+    ) -> list[TakerBuySellVolumePoint]:
+        assert start_time_ms == lo
+        assert limit == 500
+        if end_time_ms == hi:
+            return tail
+        if end_time_ms == second_end:
+            return head
+        raise AssertionError(f"unexpected end_time_ms={end_time_ms}")
+
+    prov.fetch_taker_buy_sell_volume.side_effect = fetch
+
+    batches = list(
+        iter_taker_buy_sell_volume_batches_forward(
+            prov,
+            "BTCUSDT",
+            "1h",
+            start_ms=lo,
+            end_ms=hi,
+            chunk_limit=500,
+        )
+    )
+    assert len(batches) == 2
+    assert batches[0] == head
+    assert batches[1] == tail
+    assert sum(len(b) for b in batches) == 649
+
+
+def test_iter_taker_buy_sell_volume_stops_on_non_advancing_oldest_point() -> None:
+    pd_ms = 3_600_000
+    start_ms = 1_700_000_000_000
+    end_ms = start_ms + 5 * pd_ms
+
+    # Paging backward expects the oldest sample_time in the returned page to move
+    # earlier each iteration. If the API repeats the same page, we'd otherwise
+    # keep requesting the same endTime repeatedly.
+    first = start_ms + 2 * pd_ms
+    batch = [
+        _taker_point(first),
+        _taker_point(start_ms + 4 * pd_ms),
+    ]
+
+    prov = MagicMock()
+    prov.fetch_taker_buy_sell_volume.return_value = batch
+
+    batches = list(
+        iter_taker_buy_sell_volume_batches_forward(
+            prov,
+            "BTCUSDT",
+            "1h",
+            start_ms=start_ms,
+            end_ms=end_ms,
+            chunk_limit=500,
+        )
+    )
+    assert len(batches) == 1
+    assert batches[0] == batch
