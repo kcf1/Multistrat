@@ -189,7 +189,7 @@ Binance **cancel_order** returns same shape as query.
 
 | Stream | Producer | Consumer | Purpose |
 |--------|----------|----------|---------|
-| `strategy_orders` | Strategies (Phase 5) or test inject | Risk | Order intents from strategies |
+| `strategy_orders` | Strategies (Phase 6) or test inject | Risk | Order intents from strategies |
 | `risk_approved` | Risk | OMS | Orders approved (or pass-through in P2). Consumer group `oms`, XREADGROUP + XACK. Trimmed by OMS. |
 | `cancel_requested` | Risk / Admin | OMS | Cancel by order_id or (broker_order_id + symbol). Consumer group `oms`. Not trimmed. |
 | `oms_fills` | OMS | Downstream (PMS, future services) | Fill, reject, cancelled, and expired events. Trimmed by OMS. |
@@ -356,11 +356,11 @@ Binance is the **first broker adapter** plugged into the generic OMS. Other brok
 - Keep the main focus of Phase 2 on **OMS/PMS and broker integration**.
 - Risk service can run in one of two modes:
   - **Pass-through mode (default for Phase 2):** consume `strategy_orders`, perform schema validation only, and forward messages to `risk_approved` unchanged so OMS can be exercised end-to-end.
-  - **Minimal rules mode (optional in Phase 2):** enable a very small subset of hard checks (e.g. min/max quantity and allowed venues) while leaving all stateful exposure/PnL/margin checks for Phase 5.
+  - **Minimal rules mode (optional in Phase 2):** enable a very small subset of hard checks (e.g. min/max quantity and allowed venues) while leaving all stateful exposure/PnL/margin checks for Phase 6.
 - Full, expandable rule design and recommended rule set are defined in `docs/risk/RISK_SERVICE_PLAN.md`.
 - **Implementation approach:** **No-rule interface first**, then **add rules on demand**. Risk input schema is the same or more than risk output to OMS; with zero rules the service is a pass-through.
 
-See: [docs/risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md) for architecture, §2.3 implementation approach, and full rules list (Phase 5 target).
+See: [docs/risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md) for architecture, §2.3 implementation approach, and full rules list (Phase 6 target).
 
 ### 9.2 Minimal rules for Phase 2 (optional)
 
@@ -370,7 +370,7 @@ If you choose to enable “real” checks already in Phase 2, start with **simpl
 - **ORDER_02_MAX_QTY**: reject orders with `quantity` above configured per-symbol/account maximum.
 - **VENUE_01_ALLOWED_VENUES**: reject orders whose `broker`/venue is not in the allowed list for the account/strategy.
 
-All other rules (position limits, margin/leverage, PnL/drawdown) are deferred to Phase 5 when PMS is the stable source of exposure and PnL.
+All other rules (position limits, margin/leverage, PnL/drawdown) are deferred to Phase 6 when PMS is the stable source of exposure and PnL.
 
 ### 9.3 Test inject
 
@@ -382,7 +382,7 @@ All other rules (position limits, margin/leverage, PnL/drawdown) are deferred to
 - Optional in Phase 2: Docker service `risk`:
   - Loop: `strategy_orders` → Risk (pass-through or minimal rules) → `risk_approved`.
   - Env: `REDIS_URL` plus any simple static config (e.g. min/max qty per symbol via config file or DB).
-- Phase 5 will extend the same service to use PMS-derived account snapshots and the full rule set from `docs/risk/RISK_SERVICE_PLAN.md`.
+- Phase 6 will extend the same service to use PMS-derived account snapshots and the full rule set from `docs/risk/RISK_SERVICE_PLAN.md`.
 
 ---
 

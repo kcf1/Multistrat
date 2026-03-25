@@ -32,7 +32,6 @@ DATA_COLLECTION_BASE_ASSETS: tuple[str, ...] = (
     "TRX",
     "DOT",
     "LINK",
-    "SHIB",
     "LTC",
     "BCH",
     "UNI",
@@ -53,7 +52,6 @@ DATA_COLLECTION_BASE_ASSETS: tuple[str, ...] = (
     "AAVE",
     "ALGO",
     "ASTER",
-    "BONK",
     "ENA",
     "FET",
     "ICP",
@@ -63,7 +61,6 @@ DATA_COLLECTION_BASE_ASSETS: tuple[str, ...] = (
     "NEAR",
     "NIGHT",
     "ONDO",
-    "PEPE",
     "POL",
     "PUMP",
     "QNT",
@@ -76,6 +73,9 @@ DATA_COLLECTION_BASE_ASSETS: tuple[str, ...] = (
     "WLD",
     "ZEC",
     "ZRO",
+    #"PEPE",
+    #"BONK",
+    #"SHIB",
 )
 
 

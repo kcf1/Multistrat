@@ -125,7 +125,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 - [ ] **Consumers (in existing services)**
   - OMS: consume `oms_commands` (or `admin_commands` filtered) for cancel/manual order
   - Risk: consume for flush/override (if allowed)
-  - Strategy runner (Phase 5): consume for start/stop
+  - Strategy runner (Phase 6): consume for start/stop
 - [ ] **Admin UI or CLI**
   - **Option A – CLI:** Scripts (e.g. Python) that publish to Redis (e.g. `redis-cli` or small app)
   - **Option B – Web GUI:** Simple SPA or server-rendered page that lists positions, balances, open orders, recent fills; buttons/forms that call Admin service to publish commands
@@ -176,7 +176,37 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 ---
 
-## Phase 5: Strategy Modules
+## Phase 5: Scheduler / batch jobs
+
+**Goal:** A **general scheduling service** for work that does not belong in existing modules: **reports** (positions, PnL, risk rollups, etc.), **reconciliation** (order rec, position rec vs broker), and **miscellaneous** scheduled tasks — one runner, pluggable jobs, shared config and observability.
+
+**Detailed plan:** [docs/PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md) — scope, job categories, task order, acceptance, tests.
+
+### Dependencies
+
+- Phase 1, 2 (Postgres + Redis with booking/PMS/OMS data); Phase 4 optional for market-history-aware reports
+
+### Deliverables
+
+- [ ] **Scheduler service**
+  - Long-running process: registry of jobs with cron or interval schedules, enable/disable, per-job timeouts; structured logs; graceful shutdown
+  - Optional: Redis distributed lock per job window; optional `scheduler_runs` (or equivalent) in Postgres for audit
+- [ ] **Reports jobs**
+  - At least one v1 pipeline: read positions/PnL/risk-related state from Postgres (and Redis if needed), emit snapshot rows and/or logs; extend to exports later
+- [ ] **Reconciliation jobs**
+  - Order reconciliation (internal vs broker) and position reconciliation (Booking/PMS vs venue); idempotent runs; persisted summary or diff
+- [ ] **Misc jobs**
+  - Same runner for housekeeping, cache warm, or other batch tasks — documented registry, no ad-hoc one-off processes
+- [ ] **Deploy**
+  - Docker service `scheduler` (or `batch_jobs`) on the multistrat network; env per service isolation (e.g. `SCHEDULER_*` in `.env.example`)
+
+### Acceptance
+
+- [ ] At least one scheduled **report** and one **reconciliation** job run successfully in Docker; failures are isolated and logged.
+
+---
+
+## Phase 6: Strategy modules
 
 **Goal:** One or more strategies that read market data, produce order intents to `strategy_orders`; Risk consumes and approves/rejects to `risk_approved`.
 
@@ -184,6 +214,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 - Phase 1, 2, 4 (Redis streams; OMS/Booking/Position; Market Data in Postgres—**Redis market keys optional** until PHASE4 §9.7–9.8)
 - Phase 3 optional but recommended (Admin to start/stop strategies)
+- Phase 5 optional (scheduled recon/reports may feed ops but are not required for strategy E2E)
 
 ### Deliverables
 
@@ -216,7 +247,8 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 | 2     | OMS, Booking, Position (Binance) | 1       | E2E order → fill → positions/balances/margin    |
 | 3     | Admin                         | 1, 2       | Commands via streams; view positions/fills      |
 | 4     | Market data                   | 1          | Postgres `ohlcv` (Redis hot path deferred)      |
-| 5     | Strategy modules              | 1, 2, 4    | Strategies → Risk → OMS → Booking automated     |
+| 5     | Scheduler / batch jobs        | 1, 2       | Reports, reconciliation, misc scheduled tasks   |
+| 6     | Strategy modules              | 1, 2, 4    | Strategies → Risk → OMS → Booking automated     |
 
 ---
 
@@ -230,7 +262,8 @@ The plans do not yet define automated tests for every deliverable. Below is a su
 | **2** | **Unit:** Component tests with mocked dependencies (API client, Redis store, consumer/producer). **Integration:** OMS flow with fakeredis and mock adapters (`test_oms_integration.py`). **E2E (code-level):** Real Redis + Binance testnet (`test_oms_redis_testnet.py`). **E2E (service-level):** Black-box script (`scripts/full_pipeline_test.py`) assumes running services. See [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md#165-test-classification-and-file-mapping) for test classification. | Mock or testnet only; avoid real money. |
 | **3** | **Integration:** Admin publishes command to stream; target service consumes and reacts. **Smoke:** Manual order and cancel from CLI or GUI. | |
 | **4** | **Integration:** Market data service writes `ohlcv` to Postgres; query by symbol/interval. **(Deferred)** Hot keys to Redis. **Smoke:** `ohlcv` rows for configured symbols. | See PHASE4 §0. |
-| **5** | **Unit:** Strategy `next_signal()` given mock state; Risk checks (limits, margin). **Integration:** Strategy → Risk → `risk_approved`; full E2E with testnet. | |
+| **5** | **Unit:** Individual job functions with mocked DB/broker; schedule parsing. **Integration:** Runner executes at least one report and one recon job against test DB/Redis. **Smoke:** Docker service completes a scheduled tick. | See PHASE5_DETAILED_PLAN.md. |
+| **6** | **Unit:** Strategy `next_signal()` given mock state; Risk checks (limits, margin). **Integration:** Strategy → Risk → `risk_approved`; full E2E with testnet. | |
 
 - **Where to put tests:** Per-service (e.g. `oms/tests/`, `booking/tests/`) or a top-level `tests/` with subdirs per phase/service. Use one runner (e.g. pytest) and `requirements-dev.txt` if needed.
 - **CI:** Run Phase 1 verification on every PR; add Phase 2+ tests as those services land.
@@ -251,10 +284,11 @@ multistrat/
 ├── oms/                  # OMS service (Redis staging + Postgres sync, Binance adapter)
 ├── booking/              # Booking service
 ├── pms/                  # PMS (Portfolio Management System) — source of truth for PnL/margin
-├── risk/                 # Risk service (minimal in P2, full in P5)
+├── risk/                 # Risk service (minimal in P2, full in P6)
 ├── admin/                # Admin service + CLI or GUI (Phase 3)
 ├── market_data/          # Market data service (Phase 4)
-├── strategies/           # Strategy runner + strategy modules (Phase 5)
+├── scheduler/            # Scheduled reports, reconciliation, misc batch jobs (Phase 5)
+├── strategies/           # Strategy runner + strategy modules (Phase 6)
 └── config/               # Shared config files (optional)
 ```
 

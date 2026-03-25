@@ -13,7 +13,7 @@
 - **Not on the execution critical path:** OMS already consumes `risk_approved` and `cancel_requested`. Admin adds no new execution logic—only a safer, repeatable way to publish and inspect. Manual `XADD` / small scripts are sufficient until operator volume justifies a package.
 - **Visibility already exists:** Phase 1–2 data lives in Postgres tables and Redis keys/streams; Compose includes **pgadmin** and **redisinsight** for ad-hoc read-only access. Planned Admin “read-only views” are **application-level** listings (or equivalent SQL from Python), not a prerequisite for correctness.
 - **No extra runtime today:** `docker-compose.yml` has no Admin service; deferring avoids another process, image surface, and maintenance until needed—relevant for **tight dev machines** (e.g. low RAM) or **24/7 laptop** setups where fewer containers is preferable.
-- **Downstream phases are unblocked:** Market data (Phase 4), strategies (Phase 5), and external batch jobs (e.g. hourly portfolio work with **pre-shipped** models) do not require a formal Admin CLI or HTTP API.
+- **Downstream phases are unblocked:** Market data (Phase 4), scheduler / batch jobs (Phase 5), strategies (Phase 6), and external batch jobs (e.g. hourly portfolio work with **pre-shipped** models) do not require a formal Admin CLI or HTTP API.
 - **DB views are optional:** Ordinary Postgres `VIEW`s do not improve performance vs the same query from Python; materialized views are only worth it for heavy, stale-tolerant aggregates. Deferring Admin does not force a separate “view layer” in the database.
 
 **When Phase 3 is picked up:** Follow the task checklist in §9 in order — shared publish helpers and unit tests (**3.1.1**), then CLI order/cancel (**3.1.2–3.1.3**), then read-only query helpers and list commands (**3.2.x**), then optional **3.3.x**.
@@ -35,7 +35,7 @@
 
 - **Phase 1:** Postgres, Redis, Docker network.
 - **Phase 2:** OMS (consumes `risk_approved`, `cancel_requested`), Risk (optional; consumes `strategy_orders`), PMS (writes `positions`). Streams and Postgres schema exist.
-- **No Phase 4/5 required** for basic Admin (manual order, cancel, view); strategy start/stop can be stubbed or deferred to Phase 5.
+- **No Phase 4–6 required** for basic Admin (manual order, cancel, view); strategy start/stop can be stubbed or deferred to Phase 6.
 
 ---
 
@@ -49,7 +49,7 @@
 | **Cancel order** | OMS | `cancel_requested` (existing) | OMS |
 | **Flush risk queue** | Risk | Optional: `admin_commands` or Redis key/signal; Risk consumes and clears or skips pending. | Risk (Phase 3 or later) |
 | **Refresh balance/margin** | OMS | Optional: trigger OMS periodic refresh (e.g. Redis key or `admin_commands`); or rely on existing periodic sync. | OMS |
-| **Start/stop strategy** | Strategy runner | Phase 5; optional placeholder command in Phase 3. | Phase 5 |
+| **Start/stop strategy** | Strategy runner | Phase 6; optional placeholder command in Phase 3. | Phase 6 |
 
 **Phase 3 minimum:** Manual order (publish to `risk_approved`), cancel order (publish to `cancel_requested`). Flush/refresh/strategy can be added incrementally.
 
@@ -144,7 +144,7 @@ CLI uses `.env` for `REDIS_URL`, `DATABASE_URL`; no separate Admin server.
 
 - **OMS:** Already consumes `cancel_requested` and `risk_approved`. No Phase 3 change required for basic Admin; Admin just publishes to those streams.
 - **Risk:** If “flush risk queue” is implemented, Risk (or a separate loop) consumes from `admin_commands` or a dedicated stream and clears/skips pending strategy_orders. Can be Phase 3 or later.
-- **Strategy runner (Phase 5):** Consumes start/stop from admin; Phase 3 can define the command format and leave consumer for Phase 5.
+- **Strategy runner (Phase 6):** Consumes start/stop from admin; Phase 3 can define the command format and leave consumer for Phase 6.
 
 ---
 

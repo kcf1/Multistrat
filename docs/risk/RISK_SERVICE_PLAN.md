@@ -8,7 +8,7 @@
 
 - **Input:**
   - Order intent from strategies (via `strategy_orders` stream): `account_id`, `strategy_id`/`book`, `broker`, `symbol`, `side`, `quantity`, `order_type`, optional `limit_price`, `time_in_force`, `comment`, timestamps.
-  - Account & portfolio snapshot from PMS/OMS: positions, balances, margin-related metrics as available (Phase 2: minimal; Phase 5: full).
+  - Account & portfolio snapshot from PMS/OMS: positions, balances, margin-related metrics as available (Phase 2: minimal; Phase 6: full).
   - Risk configuration: per-account / per-strategy / global limits for order size, exposure, drawdown, etc.
 - **Output:**
   - Decision:
@@ -18,7 +18,7 @@
   - Approved orders are written to `risk_approved` stream in the same schema OMS expects (plus optional risk metadata).
 - **Position in pipeline:**
   - **Phase 2:** Optional; can still be a pass-through for initial E2E testing (see PHASE2_DETAILED_PLAN §12.4).
-  - **Phase 5:** Becomes the **mandatory gate** between strategies and OMS.
+  - **Phase 6:** Becomes the **mandatory gate** between strategies and OMS.
 
 ---
 
@@ -131,7 +131,7 @@ The list below is intentionally broad; you can enable only the rules you want fo
 - **ACCT_01_SUFFICIENT_BUYING_POWER**
   - For **buys**:
     - `order_notional <= available_buying_power`.
-    - `available_buying_power` derived from balances/margin snapshot (Phase 2: may be simple spot cash; Phase 5: richer).
+    - `available_buying_power` derived from balances/margin snapshot (Phase 2: may be simple spot cash; Phase 6: richer).
   - For **sells**:
     - Optional check that margin requirement does not exceed available collateral.
 
@@ -232,7 +232,7 @@ The list below is intentionally broad; you can enable only the rules you want fo
       - `VENUE_01_ALLOWED_VENUES`
 - **Account data source:** For Phase 2, account/balance/position data comes primarily from OMS + PMS. Risk can start with **no stateful checks** (or only conservative static caps) and add state-dependent rules once PMS outputs are stable.
 
-### 5.2 Phase 5 (full Risk)
+### 5.2 Phase 6 (full Risk)
 
 - **Goal:** Risk acts as a robust pre-trade gate using all relevant account and portfolio signals.
 - **Implementation:**
@@ -277,7 +277,7 @@ The list below is intentionally broad; you can enable only the rules you want fo
 
 ### 6.4 E2E tests (with OMS/PMS)
 
-- Reuse existing Phase 2/5 E2E harness:
+- Reuse existing Phase 2/6 E2E harness:
   - Inject orders at `strategy_orders`:
     - Orders that should pass Risk and reach Binance via OMS.
     - Orders that should be blocked by Risk (e.g. exceeding max size, long-only violation).
@@ -292,6 +292,6 @@ The list below is intentionally broad; you can enable only the rules you want fo
 1. **No-rule interface first:** Implement consume from `strategy_orders` and publish to `risk_approved` with the same (or richer) schema OMS expects; schema validation only. See **PHASE2_DETAILED_PLAN.md** §12.5.1.
 2. **Rule engine shell:** Add registry + pipeline; empty pipeline = pass-through. See §12.5.2.
 3. Define concrete schemas in `risk` service code: Pydantic models for `OrderIntent` (from `strategy_orders`) and output to `risk_approved` (align with OMS `RiskApprovedOrder`).
-4. **Add rules on demand:** Enable a minimal subset for Phase 2 (e.g. ORDER_01_MIN_QTY, ORDER_02_MAX_QTY, VENUE_01_ALLOWED_VENUES); add further rules as needed in Phase 5. See §12.5.3.
-5. Wire the `risk` service into Docker (optional in Phase 2; mandatory in Phase 5). See §12.5.4.
+4. **Add rules on demand:** Enable a minimal subset for Phase 2 (e.g. ORDER_01_MIN_QTY, ORDER_02_MAX_QTY, VENUE_01_ALLOWED_VENUES); add further rules as needed in Phase 6. See §12.5.3.
+5. Wire the `risk` service into Docker (optional in Phase 2; mandatory in Phase 6). See §12.5.4.
 

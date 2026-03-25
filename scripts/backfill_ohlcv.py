@@ -98,7 +98,7 @@ def _log_completeness_summary(
             r = by_key[(sym, iv)]
             iv_ms = interval_to_millis(iv)
             exp_pol = expected_ohlcv_slots(horizon_ms, end_ms, iv_ms)
-            stored, oldest, _ = ohlcv_window_stats(
+            stored, oldest, newest = ohlcv_window_stats(
                 conn, sym, iv, open_time_ge=start_dt, open_time_le=end_dt
             )
             pct_pol = (100.0 * stored / exp_pol) if exp_pol else 0.0
@@ -111,6 +111,7 @@ def _log_completeness_summary(
                 exp_span = 0
                 pct_span = 0.0
                 oldest_s = ""
+            newest_s = newest.isoformat() if newest is not None else ""
             rows.append(
                 {
                     "symbol": sym,
@@ -123,6 +124,7 @@ def _log_completeness_summary(
                     "upserted_run": r.bars_upserted,
                     "fetch_give_ups": len(r.fetch_give_ups),
                     "oldest_open_utc": oldest_s,
+                    "newest_open_utc": newest_s,
                     "give_up_detail": "; ".join(r.fetch_give_ups),
                 }
             )

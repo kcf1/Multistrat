@@ -80,7 +80,7 @@ def _log_summary(conn, *, end_ms: int, backfill_days: int, results: list) -> Non
                 r = by_key[(symbol, contract_type, period)]
                 pd_ms = interval_to_millis(period)
                 exp_pol = expected_ohlcv_slots(horizon_ms, end_ms, pd_ms)
-                stored, oldest, _ = open_interest_window_stats(
+                stored, oldest, newest = open_interest_window_stats(
                     conn,
                     symbol,
                     contract_type,
@@ -100,6 +100,7 @@ def _log_summary(conn, *, end_ms: int, backfill_days: int, results: list) -> Non
                         "upserted_run": r.rows_upserted,
                         "fetch_give_ups": len(r.fetch_give_ups),
                         "oldest_sample_utc": oldest.isoformat() if oldest is not None else "",
+                        "newest_sample_utc": newest.isoformat() if newest is not None else "",
                         "give_up_detail": "; ".join(r.fetch_give_ups),
                     }
                 )

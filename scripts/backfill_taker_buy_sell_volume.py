@@ -76,7 +76,7 @@ def _log_summary(conn, *, end_ms: int, backfill_days: int, results: list) -> Non
             r = by_key[(symbol, period)]
             pd_ms = interval_to_millis(period)
             exp_pol = expected_ohlcv_slots(horizon_ms, end_ms, pd_ms)
-            stored, oldest, _ = taker_buy_sell_volume_window_stats(
+            stored, oldest, newest = taker_buy_sell_volume_window_stats(
                 conn,
                 symbol,
                 period,
@@ -94,6 +94,7 @@ def _log_summary(conn, *, end_ms: int, backfill_days: int, results: list) -> Non
                     "upserted_run": r.rows_upserted,
                     "fetch_give_ups": len(r.fetch_give_ups),
                     "oldest_sample_utc": oldest.isoformat() if oldest is not None else "",
+                    "newest_sample_utc": newest.isoformat() if newest is not None else "",
                     "give_up_detail": "; ".join(r.fetch_give_ups),
                 }
             )

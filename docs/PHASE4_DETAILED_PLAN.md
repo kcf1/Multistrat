@@ -1,6 +1,6 @@
 # Phase 4: Detailed Plan — Market Data
 
-**Goal:** Run a dedicated **market data** process that ingests **public** market feeds from a primary venue (**Binance first**, consistent with Phase 2 OMS), writes **historical** series to **Postgres** and (when **§9.7–9.8** are done) **live / hot** snapshots to **Redis**, so **Phase 5 strategies** (and optional **PMS** mark-price reads) can consume a single, documented contract. **Current tranche:** Postgres + REST only (**§0**). No order placement, no account streams—**read-only market APIs only**.
+**Goal:** Run a dedicated **market data** process that ingests **public** market feeds from a primary venue (**Binance first**, consistent with Phase 2 OMS), writes **historical** series to **Postgres** and (when **§9.7–9.8** are done) **live / hot** snapshots to **Redis**, so **Phase 6 strategies** (and optional **PMS** mark-price reads) can consume a single, documented contract. **Current tranche:** Postgres + REST only (**§0**). No order placement, no account streams—**read-only market APIs only**.
 
 **Current architecture:** [docs/ARCHITECTURE.md](ARCHITECTURE.md). Phase 2 PMS today uses **`PMS_MARK_PRICE_SOURCE=binance`** for mark prices; Phase 4 adds a path where PMS (or strategies) reads **Redis/Postgres** fed by this service—see [docs/pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md) §11 and `PMS_MARK_PRICE_SOURCE`.
 
@@ -14,7 +14,7 @@
 
 - **Sufficient for batch / hourly workflows:** Historical bars in Postgres support backtests, factor work, and scheduled rebalance without sub-second Redis or push streams.
 - **Lower operational surface:** No WS reconnect logic, combined-stream limits, or TTL/staleness contract to maintain on Redis for market keys yet.
-- **Phase 5 can start on SQL:** Strategies may read **`ohlcv`** from Postgres (poll or scheduled) until **§9.7–9.8** deliver the low-latency Redis contract and real-time updates.
+- **Phase 6 strategies can start on SQL:** Strategies may read **`ohlcv`** from Postgres (poll or scheduled) until **§9.7–9.8** deliver the low-latency Redis contract and real-time updates.
 - **PMS unchanged:** Keep **`PMS_MARK_PRICE_SOURCE=binance`** (or Postgres-derived marks later); **§9.9.1** (Redis-fed mark) stays optional and blocked on **§9.7** anyway.
 
 **When picked up:** Implement **§9.7** (Redis publisher + tests), then **§9.8** (WS + wire to Redis + closed-bar Postgres), then extend **§9.6** (`main`) to run WS alongside the REST job scheduler.
@@ -94,7 +94,7 @@
 
 ## 5. Redis key layout (contract for consumers)
 
-Document in code (e.g. `market_data/redis_keys.py`) and in this section. **Names are illustrative—finalize in implementation and keep stable for Phase 5.**
+Document in code (e.g. `market_data/redis_keys.py`) and in this section. **Names are illustrative—finalize in implementation and keep stable for Phase 6 strategies (and other consumers).**
 
 | Pattern | Content | TTL |
 |---------|---------|-----|
@@ -269,9 +269,10 @@ See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) testing table for Phase 4.
 
 ---
 
-## 12. Handoff to Phase 5
+## 12. Handoff to Phase 6 (strategies)
 
 - **Until §9.7–9.8:** strategies should use **SQL** against `ohlcv` (and optional `trades`) as the supported contract. **After deferral lift:** add dependence on **documented** Redis keys (§5) for low-latency reads.
+- **Phase 5 (scheduler)** may also read `ohlcv` or snapshots for **reports**; it does not define the real-time market contract.
 - Risk / OMS unchanged; no new streams required for market data (unless you later add a **cache invalidation** stream—**not** in Phase 4 minimum).
 
 ---
