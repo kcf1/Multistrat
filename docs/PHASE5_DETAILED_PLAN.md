@@ -164,10 +164,13 @@ chmod +x scripts/deploy_stack.sh   # once
 Optional flags:
 
 - **`--no-build`** — skip image build (faster iteration if the image is already current).
-- **`--destructive-seed`** — run `scripts/reset_and_seed_assets.py` instead of `init_assets.py` (truncates **`assets`** and reloads stables + configured feed list; use for a clean dev DB).
 - **`--with-tools`** — also start **`pgadmin`** and **`redisinsight`** (see `docker-compose.yml` ports).
+- **`--skip-existing`** — only for backfill: attempt to skip contiguous existing history when possible.
+- **`--dry-run`** — print commands without running.
 
-The script: builds app images → **`docker compose run --rm oms python -m alembic upgrade head`** → seed → **`docker compose up -d`** for Postgres, Redis, and all app services.
+The script: builds app images → **`docker compose up -d`** for `postgres` + `redis` → **`docker compose run --rm oms python -m alembic upgrade head`** → starts core apps (`oms`, `pms`, `risk`, `scheduler`) → runs **`scripts/backfill_all_no_watermarks.py`** → starts `market_data`.
+
+Legacy behavior (seed + start *all* services immediately) is preserved as `scripts/deploy_stack_legacy_all_services.sh`.
 
 Windows equivalent for “rebuild apps + migrate” only: **`scripts/update_and_deploy.ps1`** (assumes Postgres already running). For a full first-time Windows bootstrap, mirror the same steps as the shell script (compose up infra, `run oms … alembic`, seed, compose up apps).
 
