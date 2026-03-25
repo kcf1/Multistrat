@@ -41,7 +41,7 @@
 ## 3. Suggested layout
 
 - **Package:** `scheduler/` (or `jobs/`) at repo root: `main` loop, `registry.py`, `config.py`, subpackages `jobs/reports/`, `jobs/reconciliation/`, `jobs/misc/`.
-- **Config:** Per workspace rules — **intervals, enabled schedules, symbol scope** in code or small config modules; **secrets/URLs** in `.env` (e.g. `SCHEDULER_DATABASE_URL`, `SCHEDULER_REDIS_URL` if isolated).
+- **Config:** Per workspace rules — **intervals, enabled schedules, symbol scope** in code or small config modules; **secrets/URLs** use shared **`DATABASE_URL`** / **`REDIS_URL`** (no scheduler-specific DB/Redis env).
 
 ---
 
@@ -51,14 +51,14 @@ Order: **skeleton → config → runner/observability → persistence (optional)
 
 ### 4.1 Package skeleton and job contract
 
-- [ ] **5.1.1** Create `scheduler/` at repo root: package layout, `python -m scheduler` (or `scheduler.main`) entrypoint.
-- [ ] **5.1.2** Define a small **job interface** (callable or Protocol): `job_id`, async or sync `run(ctx)`, optional **timeout** per job.
-- [ ] **5.1.3** **`registry.py`:** register jobs with **schedule** (cron string or fixed interval seconds) and **`enabled`** flag; load from `scheduler/config.py` (micro), not scattered literals.
+- [x] **5.1.1** Create `scheduler/` at repo root: package layout, `python -m scheduler` (or `scheduler.main`) entrypoint.
+- [x] **5.1.2** Define a small **job interface** (callable or Protocol): `job_id`, async or sync `run(ctx)`, optional **timeout** per job.
+- [x] **5.1.3** **`registry.py`:** register jobs with **schedule** (cron string or fixed interval seconds) and **`enabled`** flag; load from `scheduler/config.py` (micro), not scattered literals.
 
 ### 4.2 Configuration (macro vs micro)
 
-- [ ] **5.2.1** **`scheduler/config.py`:** intervals, default timeouts, which jobs are on — **code/constants** per [env-and-config](../.cursor/rules/env-and-config.mdc) unless you need per-deployment toggles only.
-- [ ] **5.2.2** **Env (macro):** e.g. `SCHEDULER_DATABASE_URL` (or alias to `DATABASE_URL`), `SCHEDULER_REDIS_URL` if using locks — document in **`.env.example`**; no per-symbol report lists in `.env`.
+- [x] **5.2.1** **`scheduler/config.py`:** intervals, default timeouts, which jobs are on — **code/constants** per [env-and-config](../.cursor/rules/env-and-config.mdc) unless you need per-deployment toggles only.
+- [x] **5.2.2** **Env (macro):** shared **`DATABASE_URL`** and **`REDIS_URL`** (same as other services); document only if adding scheduler-only secrets later — no per-symbol report lists in `.env`.
 
 ### 4.3 Runner loop, isolation, and shutdown
 

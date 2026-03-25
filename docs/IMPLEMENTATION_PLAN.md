@@ -198,7 +198,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 - [ ] **Misc jobs**
   - Same runner for housekeeping, cache warm, or other batch tasks — documented registry, no ad-hoc one-off processes
 - [ ] **Deploy**
-  - Docker service `scheduler` (or `batch_jobs`) on the multistrat network; env per service isolation (e.g. `SCHEDULER_*` in `.env.example`)
+  - Docker service `scheduler` (or `batch_jobs`) on the multistrat network; use shared `DATABASE_URL` / `REDIS_URL` like other app services
 
 ### Acceptance
 
