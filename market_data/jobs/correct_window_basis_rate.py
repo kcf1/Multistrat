@@ -56,22 +56,6 @@ def _log_basis_drifts(
         )
         if not same:
             n += 1
-            logger.debug(
-                "market_data basis drift pair={} contract_type={} period={} sample_time={} "
-                "db=({}, {}, {}, {}) api=({}, {}, {}, {})",
-                r.pair,
-                r.contract_type,
-                r.period,
-                r.sample_time,
-                old[0],
-                old[1],
-                old[2],
-                old[3],
-                r.basis,
-                r.basis_rate,
-                r.futures_price,
-                r.index_price,
-            )
     return n
 
 

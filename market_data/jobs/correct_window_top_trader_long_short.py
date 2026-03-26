@@ -54,19 +54,6 @@ def _log_top_trader_long_short_drifts(
         same = old == (r.long_short_ratio, r.long_account_ratio, r.short_account_ratio)
         if not same:
             n += 1
-            logger.debug(
-                "market_data top_trader_long_short drift symbol={} period={} sample_time={} "
-                "db=({}, {}, {}) api=({}, {}, {})",
-                r.symbol,
-                r.period,
-                r.sample_time,
-                old[0],
-                old[1],
-                old[2],
-                r.long_short_ratio,
-                r.long_account_ratio,
-                r.short_account_ratio,
-            )
     return n
 
 
