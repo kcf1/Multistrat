@@ -31,6 +31,7 @@ import argparse
 import csv
 import statistics
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -548,15 +549,26 @@ def main() -> None:
         default=0,
         help="If computed start_ms >= end_ms, force timing by fetching a non-empty window of N intervals (e.g. 1 for 1h).",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers across symbols (default: 1, sequential).",
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help="Repeat the full symbol set N times and report average total wall-clock.",
+    )
     args = parser.parse_args()
 
     settings = load_settings()
     symbols = list(settings.symbols) if args.all_symbols else [args.symbol]
+    workers = max(1, int(args.workers))
+    runs = max(1, int(args.runs))
 
-    rows: list[dict[str, Any]] = []
-    t_all0 = time.perf_counter()
-    for i, sym in enumerate(symbols, start=1):
-        logger.info("Running timing for {}/{}: {} {}", i, len(symbols), sym, args.interval)
+    def _run_one_symbol(sym: str) -> dict[str, Any]:
         t0 = time.perf_counter()
         stats = run_time_ohlcv_ingest_once(
             symbol=sym,
@@ -583,8 +595,7 @@ def main() -> None:
         total_commit_s = sum(p.commit_s for p in stats.pages)
         total_pages = len(stats.pages)
         total_attempts = sum(len(p.attempts) for p in stats.pages)
-
-        row = {
+        return {
             "symbol": stats.symbol,
             "interval": stats.interval,
             "start_ms": stats.start_ms,
@@ -605,21 +616,72 @@ def main() -> None:
             "commit_s": total_commit_s,
             "wall_clock_s": t1 - t0,
         }
-        rows.append(row)
-        logger.info(
-            "done {}: pages={} attempts={} bars={} http={:.3f}s json={:.3f}s parse={:.3f}s validate={:.3f}s wall={:.3f}s",
-            row["symbol"],
-            row["pages"],
-            row["attempts"],
-            row["bars_upserted"],
-            row["http_get_s"],
-            row["json_decode_s"],
-            row["parse_s"],
-            row["validate_s"],
-            row["wall_clock_s"],
-        )
 
-    t_all1 = time.perf_counter()
+    rows: list[dict[str, Any]] = []
+    run_totals_s: list[float] = []
+    for run_idx in range(1, runs + 1):
+        logger.info(
+            "Run {}/{} starting: symbols={} interval={} workers={} write={}",
+            run_idx,
+            runs,
+            len(symbols),
+            args.interval,
+            workers,
+            args.write,
+        )
+        t_run0 = time.perf_counter()
+        run_rows: list[dict[str, Any]] = []
+        if workers <= 1:
+            for i, sym in enumerate(symbols, start=1):
+                logger.info("Running timing for {}/{}: {} {}", i, len(symbols), sym, args.interval)
+                row = _run_one_symbol(sym)
+                run_rows.append(row)
+                logger.info(
+                    "done {}: pages={} attempts={} bars={} http={:.3f}s json={:.3f}s parse={:.3f}s validate={:.3f}s wall={:.3f}s",
+                    row["symbol"],
+                    row["pages"],
+                    row["attempts"],
+                    row["bars_upserted"],
+                    row["http_get_s"],
+                    row["json_decode_s"],
+                    row["parse_s"],
+                    row["validate_s"],
+                    row["wall_clock_s"],
+                )
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(_run_one_symbol, sym): sym for sym in symbols}
+                done_count = 0
+                for fut in as_completed(futures):
+                    done_count += 1
+                    sym = futures[fut]
+                    row = fut.result()
+                    run_rows.append(row)
+                    logger.info(
+                        "done {}/{} {}: pages={} attempts={} bars={} http={:.3f}s parse={:.3f}s validate={:.3f}s wall={:.3f}s",
+                        done_count,
+                        len(symbols),
+                        sym,
+                        row["pages"],
+                        row["attempts"],
+                        row["bars_upserted"],
+                        row["http_get_s"],
+                        row["parse_s"],
+                        row["validate_s"],
+                        row["wall_clock_s"],
+                    )
+            run_rows.sort(key=lambda r: str(r["symbol"]))
+
+        t_run1 = time.perf_counter()
+        run_total_s = t_run1 - t_run0
+        run_totals_s.append(run_total_s)
+        rows.extend(run_rows)
+        logger.info(
+            "Run {}/{} finished: total_wall_clock={:.3f}s",
+            run_idx,
+            runs,
+            run_total_s,
+        )
 
     if args.output_csv:
         out_path = Path(args.output_csv)
@@ -673,11 +735,17 @@ def main() -> None:
 
     logger.info("=== OHLCV ingest timing aggregate summary ===")
     logger.info(
-        "symbols={} interval={} write={} total_wall_clock={:.3f}s",
-        len(rows),
+        "symbols_per_run={} runs={} interval={} workers={} write={}",
+        len(symbols),
+        runs,
         args.interval,
+        workers,
         args.write,
-        t_all1 - t_all0,
+    )
+    _summary("run_total_wall_clock_s", run_totals_s)
+    logger.info(
+        "run_total_wall_clock_s_avg={:.3f}s",
+        statistics.mean(run_totals_s),
     )
     _summary("fetch_total_s", [float(r["fetch_total_s"]) for r in rows])
     _summary("http_get_s", [float(r["http_get_s"]) for r in rows])

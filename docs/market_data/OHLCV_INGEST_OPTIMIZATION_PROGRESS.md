@@ -65,6 +65,42 @@ Enhancements added for reliable benchmarking:
 | `commit_s` | 0.001 | 0.002 | 0.009 | 0.009 | 0.003 |
 | `wall_clock_s` | 0.383 | 0.454 | 0.506 | 0.522 | 0.447 |
 
+### Aggregate Metrics - Run C Recheck (Post-Workers Instrumentation)
+
+Command baseline (sequential):
+
+- `python scripts/time_ohlcv_ingest.py --all-symbols --interval 1h --force-fetch-window-intervals 500 --max-pages 1 --write --workers 1 --runs 3`
+
+Command parallel (`4` workers):
+
+- `python scripts/time_ohlcv_ingest.py --all-symbols --interval 1h --force-fetch-window-intervals 500 --max-pages 1 --write --workers 4 --runs 3`
+
+Command parallel (`8` workers), pass 1:
+
+- `python scripts/time_ohlcv_ingest.py --all-symbols --interval 1h --force-fetch-window-intervals 500 --max-pages 1 --write --workers 8 --runs 3`
+
+Command parallel (`8` workers), pass 2 (repeat):
+
+- `python scripts/time_ohlcv_ingest.py --all-symbols --interval 1h --force-fetch-window-intervals 500 --max-pages 1 --write --workers 8 --runs 3`
+
+| Profile | runs | avg total wall clock (s) | min run (s) | max run (s) | Speedup vs workers=1 |
+|---|---:|---:|---:|---:|---:|
+| workers=`1` | 3 | 23.534 | 23.106 | 24.348 | 1.00x |
+| workers=`4` | 3 | 7.934 | 7.672 | 8.304 | 2.97x |
+| workers=`8` (pass 1) | 3 | 5.333 | 5.258 | 5.467 | 4.41x |
+| workers=`8` (pass 2) | 3 | 5.317 | 5.279 | 5.379 | 4.43x |
+
+| Metric (`workers=8`, pass 2) | min (s) | p50 (s) | p95 (s) | max (s) | avg (s) |
+|---|---:|---:|---:|---:|---:|
+| `fetch_total_s` | 0.433 | 0.666 | 0.739 | 0.800 | 0.664 |
+| `http_get_s` | 0.428 | 0.659 | 0.731 | 0.795 | 0.658 |
+| `json_decode_s` | 0.000 | 0.000 | 0.001 | 0.001 | 0.000 |
+| `parse_s` | 0.003 | 0.005 | 0.007 | 0.016 | 0.005 |
+| `validate_s` | 0.000 | 0.000 | 0.001 | 0.001 | 0.001 |
+| `upsert_s` | 0.025 | 0.074 | 0.095 | 0.114 | 0.075 |
+| `commit_s` | 0.001 | 0.002 | 0.044 | 0.071 | 0.009 |
+| `wall_clock_s` | 0.556 | 0.780 | 0.856 | 0.981 | 0.779 |
+
 ## Current Findings
 
 | # | Finding | Evidence |
