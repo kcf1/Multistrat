@@ -7,7 +7,7 @@ import sys
 
 import pandas as pd
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -54,7 +54,7 @@ def main() -> None:
     print(average_return_by_bin(frame, horizon=1))
     print("ls_stats:", long_short_stats(frame, horizon=1))
 
-    out_dir = ROOT / "research" / "plots_out"
+    out_dir = ROOT / "strategies" / "research" / "plots_out"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     figs = {

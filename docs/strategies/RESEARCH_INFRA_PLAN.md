@@ -92,12 +92,12 @@ Rules:
 - [x] Implement `analytics.py` summary statistics.
 - [x] Implement `plots.py` for distribution + bin charts.
 - [x] Implement `backtest.py` wrapper + stats report.
-- [x] Add a runnable sample in `research/` (script or notebook).
+- [x] Add a runnable sample in `strategies/research/` (script or notebook).
 - [x] Document usage examples and defaults.
 
 Quick usage:
 
-- Example script: `python research/run_research_core_example.py`
+- Example script: `python strategies/research/run_research_core_example.py`
 - Typical flow:
   1. `build_signal_frame(...)`
   2. `winsorize_by_ts(...)`
