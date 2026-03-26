@@ -58,21 +58,6 @@ def _log_drifts(
         )
         if not same:
             n += 1
-            logger.debug(
-                "market_data OHLC drift symbol={} interval={} open_time={} "
-                "db=({}, {}, {}, {}) api=({}, {}, {}, {})",
-                b.symbol,
-                b.interval,
-                b.open_time,
-                o,
-                h,
-                l,
-                c,
-                b.open,
-                b.high,
-                b.low,
-                b.close,
-            )
     return n
 
 

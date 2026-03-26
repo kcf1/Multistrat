@@ -58,19 +58,6 @@ def _log_taker_buy_sell_volume_drifts(
         )
         if not same:
             n += 1
-            logger.debug(
-                "market_data taker_buy_sell_volume drift symbol={} period={} sample_time={} "
-                "db=({}, {}, {}) api=({}, {}, {})",
-                r.symbol,
-                r.period,
-                r.sample_time,
-                old[0],
-                old[1],
-                old[2],
-                r.buy_sell_ratio,
-                r.buy_vol,
-                r.sell_vol,
-            )
     return n
 
 
