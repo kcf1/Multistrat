@@ -8,15 +8,19 @@ from typing import Any, Optional
 
 from .binance import BinanceAssetPriceProvider
 from .interface import AssetPriceProvider
+from .ohlcv_db import OhlcvDbAssetPriceProvider
 
 
 def get_asset_price_provider(
     name: str,
     *,
+    pg_connect: Optional[Any] = None,
     base_url: Optional[str] = None,
     timeout: float = 10.0,
     use_testnet: bool = True,
     quote_asset: str = "USDT",
+    interval: str = "1h",
+    max_staleness_seconds: int = 7200,
     **kwargs: Any,
 ) -> Optional[AssetPriceProvider]:
     """
@@ -40,5 +44,13 @@ def get_asset_price_provider(
             timeout=timeout,
             use_testnet=use_testnet,
             quote_asset=quote_asset,
+        )
+    if src == "ohlcv_db":
+        if pg_connect is None:
+            return None
+        return OhlcvDbAssetPriceProvider(
+            pg_connect=pg_connect,
+            interval=interval,
+            max_staleness_seconds=max_staleness_seconds,
         )
     return None
