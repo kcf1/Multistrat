@@ -324,8 +324,8 @@ while preserving correctness and operational safety under production cadence.
 | 5 | PE9-5 | Benchmark OHLCV correct/repair workers=`1` vs workers=`N` and record speedup + guardrails | scripts + logs | Done |
 | 6 | PE9-6 | Extend same pattern to futures `correct_window_*` jobs | basis/open-interest/taker/top-trader | Done |
 | 7 | PE9-7 | Extend same pattern to futures `repair_gap_*` jobs | basis/open-interest/taker/top-trader | Done |
-| 8 | PE9-8 | Optional central shared futures executor lifecycle in `main.py` (single pool reused across futures jobs) | `market_data/main.py` | Planned |
-| 9 | PE9-9 | End-to-end scheduler validation and staged rollout notes | scheduler + docs | Planned |
+| 8 | PE9-8 | Optional central shared futures executor lifecycle in `main.py` (single pool reused across futures jobs) | `market_data/main.py` | Skipped (not required) |
+| 9 | PE9-9 | End-to-end scheduler validation and staged rollout notes | scheduler + docs | Done |
 
 ### Design Constraints / Guardrails
 
@@ -392,4 +392,35 @@ Guardrail notes:
 
 - No task-level fatal failures observed in benchmark logs.
 - Parallel runs preserved completion counts (`submitted=51`, `completed=51`, `failed=0`) for both jobs.
+
+### PE9 Runtime Validation Snapshot (PE9-9)
+
+Validation command:
+
+- `python -m market_data.main --once --with-repair`
+
+Execution result:
+
+- Process exited successfully (`exit_code=0`) with no `step failed`/traceback/error entries.
+
+Run summary (selected):
+
+| Step | Result |
+|---|---|
+| `ingest_ohlcv` | submitted=51, completed=51, failed=0, wall_clock_s=0.190 |
+| `correct_window` | submitted=51, completed=51, failed=0, wall_clock_s=1.775 |
+| `repair_gap` | submitted=51, completed=51, failed=0, wall_clock_s=3.581 |
+| `correct_window_basis_rate` | submitted=51, completed=51, failed=0, wall_clock_s=1.398 |
+| `repair_gap_basis_rate` | submitted=51, completed=51, failed=0, wall_clock_s=0.187 |
+| `correct_window_open_interest` | submitted=51, completed=51, failed=0, wall_clock_s=1.506 |
+| `repair_gap_open_interest` | submitted=51, completed=51, failed=0, wall_clock_s=0.186 |
+| `correct_window_top_trader_long_short` | submitted=51, completed=51, failed=0, wall_clock_s=1.400 |
+| `repair_gap_top_trader_long_short` | submitted=51, completed=51, failed=0, wall_clock_s=0.181 |
+| `correct_window_taker_buy_sell_volume` | submitted=51, completed=51, failed=0, wall_clock_s=1.405 |
+| `repair_gap_taker_buy_sell_volume` | submitted=51, completed=51, failed=0, wall_clock_s=0.210 |
+
+Staged rollout note:
+
+- Keep current default parallel settings and monitor scheduler cycles for retry/give-up spikes and DB latency.
+- Immediate fallback remains available by setting relevant worker caps to `1`.
 
