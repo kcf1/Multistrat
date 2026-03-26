@@ -101,6 +101,39 @@ Command parallel (`8` workers), pass 2 (repeat):
 | `commit_s` | 0.001 | 0.002 | 0.044 | 0.071 | 0.009 |
 | `wall_clock_s` | 0.556 | 0.780 | 0.856 | 0.981 | 0.779 |
 
+## PE-8 Expansion Snapshot (2026-03-26)
+
+Parallel ingest pattern has been extended from OHLCV to the other provider-compatible futures datasets:
+
+- `ingest_basis_rate`
+- `ingest_open_interest`
+- `ingest_taker_buy_sell_volume`
+- `ingest_top_trader_long_short`
+
+Scope implemented per dataset:
+
+- ProviderExecutor-backed parallel task submission
+- Per-task DB connection lifecycle (thread-safe)
+- Failure isolation with aggregated task-level error reporting
+- Run-level observability (submitted/completed/failed/wall-clock logging)
+- Shared global worker cap via `GLOBAL_PROVIDER_MAX_WORKERS` (currently `6`)
+
+Validation:
+
+- `python -m pytest market_data/tests/test_jobs.py -q`
+- Result: `44 passed`
+
+## Worker Pool Overhead Check (2026-03-26)
+
+Micro-benchmark (`ProviderExecutor`, `max_workers=6`, 2000 iterations):
+
+| Scenario | min (ms) | p50 (ms) | p95 (ms) | max (ms) | avg (ms) |
+|---|---:|---:|---:|---:|---:|
+| create + shutdown | 0.0019 | 0.0021 | 0.0034 | 0.0363 | 0.0022 |
+| create + submit(1) + result + shutdown | 0.1141 | 0.1663 | 0.3094 | 0.7780 | 0.1842 |
+
+Conclusion: worker-pool setup overhead is negligible relative to ingest network and write costs.
+
 ## Current Findings
 
 | # | Finding | Evidence |
@@ -111,6 +144,28 @@ Command parallel (`8` workers), pass 2 (repeat):
 | 4 | Commit cost is noticeable and variable. | `commit_s` p50 0.041s, p95 0.050s, max 0.070s. |
 | 5 | End-to-end all-symbol write pass remains sub-20s in this forced 1-interval setup. | Run B total wall clock 19.615s for 51 symbols. |
 | 6 | In larger windows, HTTP still dominates while parse/validate remain comparatively small. | Run C: `http_get_s` p50 0.320s vs `parse_s` p50 0.005s and `validate_s` p50 0.000s. |
+
+## Current Bottleneck and Optimization Direction
+
+### Current bottleneck
+
+| Area | Status | Why |
+|---|---|---|
+| Network fetch (`http_get_s`) | Primary bottleneck | Dominant share of per-symbol wall-clock in both sequential and parallel runs. |
+| Parse / validation | Minor | Low single-digit milliseconds; not a material share today. |
+| Worker pool setup | Negligible | Micro-benchmark shows sub-ms overhead even with submit+shutdown. |
+| DB writes (`upsert_s` / `commit_s`) | Secondary bottleneck | Smaller than network cost, but commit tail latency remains visible. |
+
+### Most promising optimization targets
+
+| Priority | Candidate | Rationale |
+|---:|---|---|
+| 1 | Transport/network tuning to Binance (endpoint path/region/connection reuse) | Largest current contributor (`http_get_s`). |
+| 2 | Concurrency tuning (workers + in-flight fetch cap) with venue-safety guardrails | Already showing strong throughput gains; may still have headroom before error-rate trade-offs. |
+| 3 | Commit/write path tuning (batching strategy, commit cadence by dataset) | Secondary latency contributor; can improve total wall-clock once network is optimized. |
+| 4 | Retry/backoff policy refinement under load | Can reduce p95 tails when transient API slowness appears. |
+
+Practical conclusion: keep optimization focus on **network fetch path first**, then **DB commit/write behavior**; parse/validation and worker-pool construction are currently low ROI.
 
 ## Decision (Current Focus)
 
