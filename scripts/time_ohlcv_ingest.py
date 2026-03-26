@@ -36,6 +36,7 @@ from market_data.config import (
     load_settings,
 )
 from market_data.intervals import interval_to_millis
+from market_data.intervals import floor_align_ms_to_interval
 from market_data.jobs.common import open_time_plus_interval_ms, utc_now_ms
 from market_data.schemas import OhlcvBar
 from market_data.storage import (
@@ -299,11 +300,14 @@ def run_time_ohlcv_ingest_once(
     use_watermark: bool,
     max_pages: int | None,
     write: bool,
+    force_fetch_window_intervals: int = 0,
+    override_start_ms: int | None = None,
+    override_end_ms: int | None = None,
 ) -> IngestStats:
     settings = load_settings()
     conn = psycopg2.connect(settings.database_url)
     try:
-        end_ms = now_ms if now_ms is not None else utc_now_ms()
+        end_ms = override_end_ms if override_end_ms is not None else (now_ms if now_ms is not None else utc_now_ms())
         start_ms, horizon_ms, cursor_s, max_open_s = _resolve_ingest_start_ms(
             conn,
             symbol,
@@ -312,6 +316,15 @@ def run_time_ohlcv_ingest_once(
             backfill_days=backfill_days,
             use_watermark=use_watermark,
         )
+
+        if override_start_ms is not None:
+            start_ms = override_start_ms
+        elif force_fetch_window_intervals > 0 and start_ms >= end_ms:
+            # Force a non-empty fetch window for timing comparisons.
+            # This helps when the real ingest job would be a no-op due to cursor catching up.
+            iv_ms = interval_to_millis(interval)
+            forced_start = end_ms - int(force_fetch_window_intervals) * iv_ms
+            start_ms = floor_align_ms_to_interval(forced_start, interval)
 
         stats = IngestStats(
             symbol=symbol,
@@ -326,7 +339,11 @@ def run_time_ohlcv_ingest_once(
         )
 
         if start_ms >= end_ms:
-            logger.info("No-op ingest: start_ms >= end_ms (start_ms={}, end_ms={})", start_ms, end_ms)
+            logger.info(
+                "No-op ingest: start_ms >= end_ms (start_ms={}, end_ms={}); set --force-fetch-window-intervals to time REST+validation",
+                start_ms,
+                end_ms,
+            )
             return stats
 
         iv_ms = interval_to_millis(interval)
@@ -420,6 +437,14 @@ def main() -> None:
     parser.add_argument("--no-watermark", action="store_true", help="Start from horizon_ms instead of watermark.")
     parser.add_argument("--max-pages", type=int, default=None, help="Stop after N REST pages.")
     parser.add_argument("--write", action="store_true", help="Upsert + commit to Postgres (default: off).")
+    parser.add_argument("--override-start-ms", type=int, default=None, help="Force start_ms (ms since epoch UTC) regardless of cursor.")
+    parser.add_argument("--override-end-ms", type=int, default=None, help="Force end_ms (ms since epoch UTC) regardless of now.")
+    parser.add_argument(
+        "--force-fetch-window-intervals",
+        type=int,
+        default=0,
+        help="If computed start_ms >= end_ms, force timing by fetching a non-empty window of N intervals (e.g. 1 for 1h).",
+    )
     args = parser.parse_args()
 
     t0 = time.perf_counter()
@@ -432,6 +457,9 @@ def main() -> None:
         use_watermark=not args.no_watermark,
         max_pages=args.max_pages,
         write=args.write,
+        force_fetch_window_intervals=args.force_fetch_window_intervals,
+        override_start_ms=args.override_start_ms,
+        override_end_ms=args.override_end_ms,
     )
     t1 = time.perf_counter()
 
