@@ -208,7 +208,10 @@ class TestOhlcvDbAssetPriceProvider:
         now = datetime.now(timezone.utc)
         mock_conn = self._mock_conn_with_rows(
             [("BTC", "BTCUSDT"), ("ETH", "ETHUSDT")],
-            [("BTCUSDT", now - timedelta(minutes=5), 50123.5), ("ETHUSDT", now - timedelta(minutes=10), 3123.0)],
+            [
+                ("BTCUSDT", now - timedelta(hours=10), 50123.5, now - timedelta(minutes=5)),
+                ("ETHUSDT", now - timedelta(hours=8), 3123.0, now - timedelta(minutes=10)),
+            ],
         )
         p = OhlcvDbAssetPriceProvider(lambda: mock_conn, interval="1h", max_staleness_seconds=7200)
         out = p.get_prices(["BTC", "ETH"])
@@ -218,7 +221,7 @@ class TestOhlcvDbAssetPriceProvider:
         now = datetime.now(timezone.utc)
         mock_conn = self._mock_conn_with_rows(
             [("BTC", "BTCUSDT")],
-            [("BTCUSDT", now - timedelta(hours=5), 50123.5)],
+            [("BTCUSDT", now - timedelta(minutes=5), 50123.5, now - timedelta(hours=5))],
         )
         p = OhlcvDbAssetPriceProvider(lambda: mock_conn, interval="1h", max_staleness_seconds=3600)
         out = p.get_prices(["BTC"])
@@ -228,7 +231,7 @@ class TestOhlcvDbAssetPriceProvider:
         now = datetime.now(timezone.utc)
         mock_conn = self._mock_conn_with_rows(
             [("BTC", "BTCUSDT")],
-            [("BTCUSDT", now - timedelta(minutes=2), 50000.0)],
+            [("BTCUSDT", now - timedelta(minutes=2), 50000.0, now - timedelta(minutes=2))],
         )
         p = OhlcvDbAssetPriceProvider(lambda: mock_conn, interval="1h", max_staleness_seconds=7200)
         out = p.get_prices(["BTC", "DOGE"])
