@@ -75,9 +75,11 @@ OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS: int = 300
 OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS: int = 3600
 # ``0`` disables scheduled policy-window gap repair (use ``scripts/backfill_ohlcv.py`` / ``--with-repair``).
 OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS: int = 0
+# Global provider worker cap (threads) for market data jobs.
+GLOBAL_PROVIDER_MAX_WORKERS: int = 6
 # Provider-scoped worker pool size for OHLCV ingest orchestration.
 # ``1`` preserves sequential behavior; increase cautiously after benchmark validation.
-OHLCV_PROVIDER_MAX_WORKERS: int = 4
+OHLCV_PROVIDER_MAX_WORKERS: int = GLOBAL_PROVIDER_MAX_WORKERS
 # Guardrail for concurrent in-flight OHLCV fetch calls per provider pool.
 # Keep this conservative relative to venue limits; ``1`` effectively serializes fetch calls.
 OHLCV_PROVIDER_MAX_IN_FLIGHT_FETCHES: int = 4
