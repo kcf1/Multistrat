@@ -320,8 +320,8 @@ while preserving correctness and operational safety under production cadence.
 | 1 | PE9-1 | Add/confirm shared worker-cap constants for correct/repair orchestration | `market_data/config.py` | Done |
 | 2 | PE9-2 | Parallelize OHLCV `correct_window` first (pilot) with provider executor + per-task DB connections | `jobs/correct_window.py` | Done |
 | 3 | PE9-3 | Parallelize OHLCV `repair_gap` with same safety pattern + failure aggregation | `jobs/repair_gap.py` | Done |
-| 4 | PE9-4 | Add tests for OHLCV correct/repair: parity, failure isolation, thread-safety assumptions | `market_data/tests/test_jobs.py` | Planned |
-| 5 | PE9-5 | Benchmark OHLCV correct/repair workers=`1` vs workers=`N` and record speedup + guardrails | scripts + logs | Planned |
+| 4 | PE9-4 | Add tests for OHLCV correct/repair: parity, failure isolation, thread-safety assumptions | `market_data/tests/test_jobs.py` | Done |
+| 5 | PE9-5 | Benchmark OHLCV correct/repair workers=`1` vs workers=`N` and record speedup + guardrails | scripts + logs | Done |
 | 6 | PE9-6 | Extend same pattern to futures `correct_window_*` jobs | basis/open-interest/taker/top-trader | Planned |
 | 7 | PE9-7 | Extend same pattern to futures `repair_gap_*` jobs | basis/open-interest/taker/top-trader | Planned |
 | 8 | PE9-8 | Optional central shared futures executor lifecycle in `main.py` (single pool reused across futures jobs) | `market_data/main.py` | Planned |
@@ -362,4 +362,34 @@ while preserving correctness and operational safety under production cadence.
 ### Current conclusion for next step
 
 Start with **PE9-R1 (OHLCV correct-window pilot)**, then proceed one phase at a time with test gates before widening scope.
+
+### PE9 Execution Snapshot (PE9-4, PE9-5)
+
+PE9-4 tests added/executed:
+
+- `test_run_correct_window_parallel_failure_isolated_and_raised`
+- `test_run_repair_gap_parallel_failure_isolated_and_raised`
+- `test_run_correct_window_uses_separate_connection_per_symbol`
+- `test_run_repair_gap_uses_separate_connection_per_symbol`
+
+Validation run:
+
+- `python -m pytest market_data/tests/test_jobs.py -q`
+- Result: `48 passed`
+
+PE9-5 benchmark command (same runtime environment, two repeats each):
+
+- `python -c "<benchmark harness invoking run_correct_window + run_repair_gaps_policy_window_all_series with ProviderExecutor workers 1 vs 6>"`
+
+| Job | Workers | Runs (s) | Avg (s) | Speedup vs w=1 |
+|---|---:|---|---:|---:|
+| `correct_window` | 1 | `7.002`, `7.021` | 7.011 | 1.00x |
+| `correct_window` | 6 | `1.848`, `1.735` | 1.792 | 3.91x |
+| `repair_gap` (`backfill_days=30`) | 1 | `1.410`, `1.322` | 1.366 | 1.00x |
+| `repair_gap` (`backfill_days=30`) | 6 | `0.529`, `0.482` | 0.505 | 2.70x |
+
+Guardrail notes:
+
+- No task-level fatal failures observed in benchmark logs.
+- Parallel runs preserved completion counts (`submitted=51`, `completed=51`, `failed=0`) for both jobs.
 

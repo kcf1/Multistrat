@@ -534,6 +534,27 @@ def test_run_correct_window_uses_separate_connection_per_symbol() -> None:
     assert fake_conns[1].close.called
 
 
+def test_run_correct_window_parallel_failure_isolated_and_raised() -> None:
+    settings = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"), intervals=("1h",), database_url="postgresql://db")
+    calls: list[str] = []
+
+    def _series(conn, provider, sym, iv, lookback_bars=None):
+        calls.append(sym)
+        if sym == "ETHUSDT":
+            raise RuntimeError("boom")
+        return CorrectWindowResult(sym, iv, 1, 0)
+
+    ex = ProviderExecutor[CorrectWindowResult](ProviderExecutorConfig(max_workers=2))
+    with (
+        patch("market_data.jobs.correct_window.psycopg2.connect", return_value=MagicMock()),
+        patch("market_data.jobs.correct_window.run_correct_window_series", side_effect=_series),
+    ):
+        with pytest.raises(RuntimeError, match="ETHUSDT/1h"):
+            run_correct_window(settings, provider=MagicMock(), provider_executor=ex)
+    ex.shutdown(wait=True)
+    assert sorted(calls) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+
 def test_run_repair_gap_parallel_failure_isolated_and_raised() -> None:
     settings = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"), intervals=("1h",), database_url="postgresql://db")
     call_symbols: list[str] = []
@@ -552,6 +573,19 @@ def test_run_repair_gap_parallel_failure_isolated_and_raised() -> None:
             run_repair_gaps_policy_window_all_series(settings, provider=MagicMock())
 
     assert sorted(call_symbols) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+
+def test_run_repair_gap_uses_separate_connection_per_symbol() -> None:
+    settings = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT"), intervals=("1h",), database_url="postgresql://db")
+    fake_conns = [MagicMock(name="conn1"), MagicMock(name="conn2")]
+    with (
+        patch("market_data.jobs.repair_gap.psycopg2.connect", side_effect=fake_conns),
+        patch("market_data.jobs.repair_gap.detect_ohlcv_time_gaps", return_value=[]),
+    ):
+        out = run_repair_gaps_policy_window_all_series(settings, provider=MagicMock())
+    assert [r.symbol for r in out] == ["BTCUSDT", "ETHUSDT"]
+    assert fake_conns[0].close.called
+    assert fake_conns[1].close.called
 
 
 def test_resolve_basis_ingest_start_backfill_when_empty() -> None:
