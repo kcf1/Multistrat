@@ -97,3 +97,101 @@ Enhancements added for reliable benchmarking:
 3. Reduce commit overhead by batching commits across multiple symbols (evaluate durability trade-offs).
 4. Add equivalent timing for `correct_window` to attribute total hourly runtime split.
 
+## Planned Task: Parallel OHLCV Ingest (4 Workers)
+
+### Task Plan
+
+| Task ID | Task | Owner | Status |
+|---|---|---|---|
+| P4-1 | Add configurable worker count constant for OHLCV ingest (default `4`). | TBD | Planned |
+| P4-2 | Refactor `run_ingest_ohlcv` to execute symbols in a `ThreadPoolExecutor(max_workers=4)`. | TBD | Planned |
+| P4-3 | Ensure one DB connection per worker/thread (no shared psycopg2 connection across threads). | TBD | Planned |
+| P4-4 | Keep API throttling safe under concurrency (shared limiter or equivalent cap). | TBD | Planned |
+| P4-5 | Preserve result ordering/log readability and error isolation per symbol. | TBD | Planned |
+| P4-6 | Add/adjust tests for parallel execution and failure isolation behavior. | TBD | Planned |
+| P4-7 | Run benchmark before/after and update this document with measured speedup. | TBD | Planned |
+
+### Acceptance Criteria
+
+| ID | Criteria |
+|---|---|
+| AC-1 | Functional parity: same rows/cursors as sequential ingest for equivalent input window. |
+| AC-2 | No shared-connection threading bugs (each worker manages its own connection lifecycle). |
+| AC-3 | No material increase in fetch give-ups/retry failures at default worker count (`4`). |
+| AC-4 | Observable runtime improvement vs sequential baseline on identical benchmark setup. |
+| AC-5 | Rollback path available (set worker count to `1` to restore sequential behavior). |
+
+### Test Plan
+
+| Test ID | Test | How | Expected |
+|---|---|---|---|
+| T-1 | Unit/integration existing market_data test suite | Run existing tests touching ingest path | No regressions |
+| T-2 | Deterministic one-shot ingest parity | Compare sequential (`workers=1`) vs parallel (`workers=4`) on same fixed window | Same row counts/cursor end points |
+| T-3 | Failure isolation | Inject provider error for one symbol under parallel run | Other symbols still ingest; failed symbol reported |
+| T-4 | Performance benchmark | Repeat timing script / one-shot job runs before and after | Total ingest wall time improves |
+| T-5 | Safety under load | Observe retries/HTTP errors/DB commit latency during run | No unacceptable error spike |
+
+### Rollout Notes
+
+| Item | Decision |
+|---|---|
+| Initial worker count | `4` |
+| Tuning sequence | Evaluate `1 -> 2 -> 4 -> 6` only if needed |
+| Fallback | Set worker count to `1` immediately |
+| Primary KPI | Total ingest wall clock per scheduler cycle |
+| Guardrail KPI | Fetch give-up rate / retry escalation / DB health |
+
+## Provider-Scoped Executor Implementation Plan
+
+### Workflow (Target)
+
+| Step | Description |
+|---:|---|
+| 1 | Create provider-scoped executor(s) at startup (or run start). |
+| 2 | Pass executor handle(s) to dataset jobs. |
+| 3 | Dataset job submits symbol tasks and waits for completion. |
+| 4 | Log dataset-level summary and per-symbol failures/success. |
+| 5 | Reuse same executor for next dataset if provider type matches. |
+| 6 | Shutdown executor(s) cleanly at end of run. |
+
+### Implementation Tasks
+
+| Task ID | Task | Notes | Status |
+|---|---|---|---|
+| PE-1 | Add provider-level worker settings (default `4`) | `1` must preserve sequential behavior | Planned |
+| PE-2 | Introduce `ProviderExecutor` abstraction | Wrap `ThreadPoolExecutor`, submit/wait/error helpers | Planned |
+| PE-3 | Initialize provider + executor lifecycle centrally | Create once, reuse, shutdown at end | Planned |
+| PE-4 | Integrate OHLCV job with executor first | Submit per-symbol tasks; preserve current ingest logic | Planned |
+| PE-5 | Enforce DB safety | One psycopg2 connection per task/worker; no shared connection | Planned |
+| PE-6 | Keep rate-limit safety under concurrency | Shared limiter/cap per provider pool | Planned |
+| PE-7 | Add concurrency observability | Task counts, failures, dataset wall clock | Planned |
+| PE-8 | Extend to other datasets after OHLCV validation | basis/open-interest/taker/top-trader | Planned |
+
+### Test Plan
+
+| Test ID | Test | Method | Expected |
+|---|---|---|---|
+| PE-T1 | Functional parity | Compare workers=`1` vs `4` on fixed window | Same row/cursor outcomes |
+| PE-T2 | Failure isolation | Inject one symbol failure in parallel run | Other tasks complete; failure isolated |
+| PE-T3 | Thread/connection safety | Run with concurrency and inspect errors | No shared-connection/thread exceptions |
+| PE-T4 | Performance | Before/after benchmark on identical setup | Wall-clock improvement |
+| PE-T5 | Stability guardrails | Monitor retries/give-ups/DB commit latency | No unacceptable degradation |
+
+### Rollout Plan
+
+| Phase | Action | Exit Criteria |
+|---|---|---|
+| R1 | Implement PE-1..PE-7 for OHLCV only | Tests PE-T1..PE-T5 pass |
+| R2 | Benchmark and record speedup in this document | KPI improvement confirmed |
+| R3 | Extend pattern to other provider-compatible datasets | No regression from R1 baseline |
+| R4 | Keep fallback path | workers=`1` fully functional |
+
+### Success Criteria
+
+| ID | Criteria |
+|---|---|
+| PE-S1 | Total ingest wall clock improves at workers=`4` vs workers=`1`. |
+| PE-S2 | Data correctness parity is maintained (rows + cursors). |
+| PE-S3 | Error profile remains healthy (no significant give-up spike). |
+| PE-S4 | Operational fallback is immediate by setting workers=`1`. |
+
