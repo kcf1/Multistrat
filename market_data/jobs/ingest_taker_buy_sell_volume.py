@@ -9,11 +9,15 @@ Uses ``taker_buy_sell_volume_cursor`` and ``MAX(sample_time)`` to choose the nex
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import time
 import psycopg2
+from loguru import logger
 
 from market_data.config import (
+    GLOBAL_PROVIDER_MAX_WORKERS,
     OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
     TAKER_BUYSELL_VOLUME_FETCH_CHUNK_LIMIT,
     TAKER_BUYSELL_VOLUME_INITIAL_BACKFILL_DAYS,
@@ -33,6 +37,7 @@ from market_data.jobs.repair_gap_taker_buy_sell_volume import (
 )
 from market_data.providers.base import TakerBuySellVolumeProvider
 from market_data.providers.binance_perps import build_binance_perps_provider
+from market_data.providers.executor import ProviderExecutor, ProviderExecutorConfig
 from market_data.schemas import TakerBuySellVolumePoint
 from market_data.storage import (
     get_taker_buy_sell_volume_cursor,
@@ -259,28 +264,95 @@ def run_ingest_taker_buy_sell_volume(
     settings: MarketDataSettings,
     *,
     provider: TakerBuySellVolumeProvider | None = None,
+    provider_executor: ProviderExecutor[IngestTakerBuySellVolumeSeriesResult] | None = None,
     use_watermark: bool = True,
     skip_existing_when_no_watermark: bool = False,
 ) -> list[IngestTakerBuySellVolumeSeriesResult]:
     prov = provider if provider is not None else build_binance_perps_provider(settings)
-    conn = psycopg2.connect(settings.database_url)
+    own_executor = False
+    ex = provider_executor
+    if ex is None:
+        ex = ProviderExecutor[IngestTakerBuySellVolumeSeriesResult](
+            ProviderExecutorConfig(max_workers=GLOBAL_PROVIDER_MAX_WORKERS)
+        )
+        own_executor = True
+
+    tasks: list[tuple[str, str]] = [
+        (symbol, period)
+        for symbol in TAKER_BUYSELL_VOLUME_SYMBOLS
+        for period in TAKER_BUYSELL_VOLUME_PERIODS
+    ]
+
+    def _ingest_task(symbol: str, period: str) -> IngestTakerBuySellVolumeSeriesResult:
+        conn = psycopg2.connect(settings.database_url)
+        try:
+            return ingest_taker_buy_sell_volume_series(
+                conn,
+                prov,
+                symbol,
+                period,
+                chunk_limit=TAKER_BUYSELL_VOLUME_FETCH_CHUNK_LIMIT,
+                backfill_days=TAKER_BUYSELL_VOLUME_INITIAL_BACKFILL_DAYS,
+                use_watermark=use_watermark,
+                skip_existing_when_no_watermark=skip_existing_when_no_watermark,
+            )
+        finally:
+            conn.close()
+
     try:
+        t0 = time.perf_counter()
+        logger.info(
+            "ingest_taker_buy_sell_volume run start: tasks={} workers={}",
+            len(tasks),
+            ex.max_workers,
+        )
         out: list[IngestTakerBuySellVolumeSeriesResult] = []
-        for symbol in TAKER_BUYSELL_VOLUME_SYMBOLS:
-            for period in TAKER_BUYSELL_VOLUME_PERIODS:
-                out.append(
-                    ingest_taker_buy_sell_volume_series(
-                        conn,
-                        prov,
-                        symbol,
-                        period,
-                        chunk_limit=TAKER_BUYSELL_VOLUME_FETCH_CHUNK_LIMIT,
-                        backfill_days=TAKER_BUYSELL_VOLUME_INITIAL_BACKFILL_DAYS,
-                        use_watermark=use_watermark,
-                        skip_existing_when_no_watermark=skip_existing_when_no_watermark,
-                    )
+        if ex.max_workers <= 1:
+            for symbol, period in tasks:
+                out.append(_ingest_task(symbol, period))
+            logger.info(
+                "ingest_taker_buy_sell_volume run done: submitted={} completed={} failed=0 wall_clock_s={:.3f}",
+                len(tasks),
+                len(tasks),
+                time.perf_counter() - t0,
+            )
+            return out
+
+        futures: list[Future[IngestTakerBuySellVolumeSeriesResult]] = []
+        future_to_task: dict[Future[IngestTakerBuySellVolumeSeriesResult], tuple[str, str]] = {}
+        for symbol, period in tasks:
+            fut = ex.submit(_ingest_task, symbol, period)
+            futures.append(fut)
+            future_to_task[fut] = (symbol, period)
+
+        failed_tasks: list[tuple[str, str]] = []
+        for fut in futures:
+            symbol, period = future_to_task[fut]
+            try:
+                out.append(fut.result())
+            except Exception:
+                failed_tasks.append((symbol, period))
+                logger.exception(
+                    "ingest_taker_buy_sell_volume task failed: symbol={} period={}",
+                    symbol,
+                    period,
                 )
+
+        logger.info(
+            "ingest_taker_buy_sell_volume run done: submitted={} completed={} failed={} wall_clock_s={:.3f}",
+            len(tasks),
+            len(tasks) - len(failed_tasks),
+            len(failed_tasks),
+            time.perf_counter() - t0,
+        )
+        if failed_tasks:
+            failed_labels = [f"{symbol}/{period}" for symbol, period in failed_tasks]
+            raise RuntimeError(
+                "ingest_taker_buy_sell_volume failed for task(s): "
+                + ", ".join(sorted(failed_labels))
+            )
         return out
     finally:
-        conn.close()
+        if own_executor and ex is not None:
+            ex.shutdown(wait=True)
 

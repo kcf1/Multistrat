@@ -201,7 +201,7 @@ Command parallel (`8` workers), pass 2 (repeat):
 | PE-5 | Enforce DB safety | One psycopg2 connection per task/worker; no shared connection | Done |
 | PE-6 | Keep rate-limit safety under concurrency | Shared limiter/cap per provider pool | Done |
 | PE-7 | Add concurrency observability | Task counts, failures, dataset wall clock | Done |
-| PE-8 | Extend to other datasets after OHLCV validation | basis/open-interest/taker/top-trader | Planned |
+| PE-8 | Extend to other datasets after OHLCV validation | basis/open-interest/taker/top-trader | Done |
 
 ### Test Plan
 
