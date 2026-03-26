@@ -20,6 +20,7 @@ from market_data.config import (
     OHLCV_INTERVALS,
     OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
     OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS,
+    OHLCV_PROVIDER_MAX_WORKERS,
     OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
     MarketDataSettings,
 )
@@ -113,6 +114,7 @@ def test_scheduler_cadence_is_module_constants() -> None:
     assert OHLCV_SCHEDULER_INGEST_INTERVAL_SECONDS == 300
     assert OHLCV_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS == 3600
     assert OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS == 0
+    assert OHLCV_PROVIDER_MAX_WORKERS == 4
 
 
 def test_basis_and_open_interest_series_defaults_align() -> None:

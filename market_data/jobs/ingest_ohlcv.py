@@ -18,6 +18,7 @@ import psycopg2
 from market_data.config import (
     OHLCV_INITIAL_BACKFILL_DAYS,
     OHLCV_KLINES_CHUNK_LIMIT,
+    OHLCV_PROVIDER_MAX_WORKERS,
     OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
     MarketDataSettings,
 )
@@ -31,6 +32,7 @@ from market_data.jobs.repair_gap import detect_ohlcv_time_gaps
 from market_data.schemas import OhlcvBar
 from market_data.providers.base import KlinesProvider
 from market_data.providers.binance_spot import build_binance_spot_provider
+from market_data.providers.executor import ProviderExecutor, ProviderExecutorConfig
 from market_data.storage import (
     get_ingestion_cursor,
     max_open_time_ohlcv,
@@ -276,26 +278,39 @@ def run_ingest_ohlcv(
     settings: MarketDataSettings,
     *,
     provider: KlinesProvider | None = None,
+    provider_executor: ProviderExecutor[IngestSeriesResult] | None = None,
     use_watermark: bool = True,
     skip_existing_when_no_watermark: bool = False,
 ) -> list[IngestSeriesResult]:
     """Run ingest for every ``(symbol, interval)`` in settings (sequential, shared limiter)."""
     prov = provider if provider is not None else build_binance_spot_provider(settings)
-    conn = psycopg2.connect(settings.database_url)
+    own_executor = False
+    ex = provider_executor
+    if ex is None:
+        ex = ProviderExecutor[IngestSeriesResult](
+            ProviderExecutorConfig(max_workers=OHLCV_PROVIDER_MAX_WORKERS)
+        )
+        own_executor = True
+
     try:
-        out: list[IngestSeriesResult] = []
-        for sym in settings.symbols:
-            for iv in settings.intervals:
-                out.append(
-                    ingest_ohlcv_series(
-                        conn,
-                        prov,
-                        sym,
-                        iv,
-                        use_watermark=use_watermark,
-                        skip_existing_when_no_watermark=skip_existing_when_no_watermark,
+        conn = psycopg2.connect(settings.database_url)
+        try:
+            out: list[IngestSeriesResult] = []
+            for sym in settings.symbols:
+                for iv in settings.intervals:
+                    out.append(
+                        ingest_ohlcv_series(
+                            conn,
+                            prov,
+                            sym,
+                            iv,
+                            use_watermark=use_watermark,
+                            skip_existing_when_no_watermark=skip_existing_when_no_watermark,
+                        )
                     )
-                )
-        return out
+            return out
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        if own_executor and ex is not None:
+            ex.shutdown(wait=True)
