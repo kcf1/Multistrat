@@ -11,11 +11,15 @@ from market_data.universe import DATA_COLLECTION_BASE_ASSETS
 # Asset price feed runs every tick; interval reserved for future use (seconds).
 ASSET_PRICE_FEED_INTERVAL_SECONDS: float = 60.0
 
-# Asset price feed source: "binance" or "" to disable. Not from env.
-ASSET_PRICE_FEED_SOURCE: str = "binance"
+# Asset price feed source: "ohlcv_db", "binance", or "" to disable. Not from env.
+ASSET_PRICE_FEED_SOURCE: str = "ohlcv_db"
 
 # Bases to update from the price feed — same as ``market_data.universe.DATA_COLLECTION_BASE_ASSETS``.
 ASSET_PRICE_FEED_ASSETS: tuple[str, ...] = DATA_COLLECTION_BASE_ASSETS
+
+# Internal OHLCV DB feed config (micro, in-code): interval and freshness guard.
+ASSET_PRICE_FEED_OHLCV_INTERVAL: str = "1h"
+ASSET_PRICE_FEED_OHLCV_MAX_STALENESS_SECONDS: int = 1800
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
