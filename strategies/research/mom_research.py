@@ -7,6 +7,7 @@ import pathlib
 import sys
 
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
@@ -18,6 +19,7 @@ if str(ROOT) not in sys.path:
 from strategies.research_core.analytics import average_return_by_bin, signal_summary
 from strategies.research_core.backtest import long_short_stats
 from strategies.research_core.cleaning import winsorize_by_ts, robust_clip
+from strategies.research_core.constants import BIN_COL
 from strategies.research_core.forward_returns import add_forward_returns
 from strategies.research_core.plots import (
     plot_bin_average_bar,
@@ -36,7 +38,6 @@ def main() -> None:
         raise ValueError("DATABASE_URL is not set. Add it to .env or environment variables.")
 
     engine = create_engine(database_url)
-    n = 24
     df = pd.read_sql_query(
         """
         SELECT 
@@ -51,7 +52,9 @@ def main() -> None:
         con=engine
     )
     df = df.sort_values(by=["ts","symbol"])
-    df["signal_raw"] = df.groupby("symbol")["close"].pct_change(n)
+    n = 24
+    df["close_log"] = np.log(df["close"])
+    df["signal_raw"] = df.groupby("symbol")["close_log"].diff(n)
     df = df.dropna(subset=["signal_raw"])
     
 
@@ -61,24 +64,25 @@ def main() -> None:
     frame = add_cross_sectional_ranks(frame, signal_col="signal_clean")
     frame = assign_bins(frame, n_bins=10)
     sub = frame[frame["ts"] == "2024-01-01"]
-    plt.scatter(sub['signal_clean'], sub['rank'])
+    plt.scatter(sub['signal_clean'], sub[BIN_COL])
     plt.show()
     frame = add_equal_weight_by_bin(frame)
-    frame = add_forward_returns(frame, horizons=(1,))
+    h = 24
+    frame = add_forward_returns(frame, horizons=(h,))
 
     print("signal_summary:", signal_summary(frame))
     print("bin_returns:")
-    print(average_return_by_bin(frame, horizon=1))
-    print("ls_stats:", long_short_stats(frame, horizon=1))
+    print(average_return_by_bin(frame, horizon=h))
+    print("ls_stats:", long_short_stats(frame, horizon=h))
 
     out_dir = ROOT / "strategies" / "research" / "plots_out" / "factor_ls"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     figs = {
         f"signal_distribution_ts_winsorized_{n}.png": plot_signal_distribution(frame, signal_col="signal_clean"),
-        "bin_avg_bar_h1.png": plot_bin_average_bar(frame, horizon=1),
-        "bin_box_h1.png": plot_bin_return_box(frame, horizon=1),
-        "bin_cumulative_h1.png": plot_bin_cumulative(frame, horizon=1),
+        "bin_avg_bar_h1.png": plot_bin_average_bar(frame, horizon=h),
+        "bin_box_h1.png": plot_bin_return_box(frame, horizon=h),
+        "bin_cumulative_h1.png": plot_bin_cumulative(frame, horizon=h),
     }
     
     plt.show()

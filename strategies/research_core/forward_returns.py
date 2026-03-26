@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import numpy as np
 
 from strategies.research_core.constants import CLOSE_COL, SYMBOL_COL
 
@@ -19,7 +20,7 @@ def add_forward_returns(
     for h in horizons:
         if h <= 0:
             raise ValueError("Horizon must be positive")
-        fwd = grouped.shift(-h) / out[price_col] - 1.0
+        fwd = np.log(grouped.shift(-h) / out[price_col])
         out[f"fwd_ret_{h}"] = fwd
     return out
 
