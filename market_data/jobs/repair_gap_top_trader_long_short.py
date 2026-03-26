@@ -4,13 +4,16 @@ Targeted range repair and gap detection for top trader long/short snapshots.
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import time
 
 import psycopg2
 from loguru import logger
 
 from market_data.config import (
+    FUTURES_REPAIR_GAP_MAX_WORKERS,
     OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
     TOP_TRADER_LONG_SHORT_FETCH_CHUNK_LIMIT,
     TOP_TRADER_LONG_SHORT_INITIAL_BACKFILL_DAYS,
@@ -22,6 +25,7 @@ from market_data.intervals import interval_to_millis
 from market_data.jobs.common import floor_align_ms_to_interval, utc_now_ms
 from market_data.providers.base import TopTraderLongShortPositionRatioProvider
 from market_data.providers.binance_perps import build_binance_perps_provider
+from market_data.providers.executor import ProviderExecutor, ProviderExecutorConfig
 from market_data.storage import upsert_top_trader_long_short_points
 
 
@@ -154,6 +158,7 @@ def run_repair_top_trader_long_short_gaps_policy_window_all_series(
     settings: MarketDataSettings,
     *,
     provider: TopTraderLongShortPositionRatioProvider | None = None,
+    provider_executor: ProviderExecutor[PolicyTopTraderLongShortRepairSeriesResult] | None = None,
     backfill_days: int | None = None,
     gap_multiple: float | None = None,
 ) -> list[PolicyTopTraderLongShortRepairSeriesResult]:
@@ -171,48 +176,115 @@ def run_repair_top_trader_long_short_gaps_policy_window_all_series(
     range_end = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
 
     prov = provider if provider is not None else build_binance_perps_provider(settings)
-    conn = psycopg2.connect(settings.database_url)
+    own_executor = False
+    ex = provider_executor
+    if ex is None:
+        ex = ProviderExecutor[PolicyTopTraderLongShortRepairSeriesResult](
+            ProviderExecutorConfig(max_workers=FUTURES_REPAIR_GAP_MAX_WORKERS)
+        )
+        own_executor = True
+
+    tasks: list[tuple[str, str]] = [
+        (symbol, period)
+        for symbol in TOP_TRADER_LONG_SHORT_SYMBOLS
+        for period in TOP_TRADER_LONG_SHORT_PERIODS
+    ]
+
+    def _run_task(symbol: str, period: str) -> PolicyTopTraderLongShortRepairSeriesResult:
+        conn = psycopg2.connect(settings.database_url)
+        try:
+            start_ms = end_ms - days * 86_400_000
+            start_ms = floor_align_ms_to_interval(start_ms, period)
+            range_start = datetime.fromtimestamp(
+                start_ms / 1000.0,
+                tz=timezone.utc,
+            )
+
+            gaps = detect_top_trader_long_short_time_gaps(
+                conn,
+                symbol,
+                period,
+                range_start,
+                range_end,
+                gap_multiple=gm,
+            )
+            if not gaps:
+                return PolicyTopTraderLongShortRepairSeriesResult(symbol, period, 0, 0)
+
+            n = run_repair_detected_top_trader_long_short_gaps(
+                conn,
+                prov,
+                symbol,
+                period,
+                gaps,
+            )
+            logger.info(
+                "market_data top trader long/short gap repair symbol={} period={} gap_spans={} rows_upserted={}",
+                symbol,
+                period,
+                len(gaps),
+                n,
+            )
+            return PolicyTopTraderLongShortRepairSeriesResult(
+                symbol, period, len(gaps), n
+            )
+        finally:
+            conn.close()
+
     out: list[PolicyTopTraderLongShortRepairSeriesResult] = []
     try:
-        for symbol in TOP_TRADER_LONG_SHORT_SYMBOLS:
-            for period in TOP_TRADER_LONG_SHORT_PERIODS:
-                start_ms = end_ms - days * 86_400_000
-                start_ms = floor_align_ms_to_interval(start_ms, period)
-                range_start = datetime.fromtimestamp(
-                    start_ms / 1000.0,
-                    tz=timezone.utc,
+        t0 = time.perf_counter()
+        logger.info(
+            "repair_gap_top_trader_long_short run start: tasks={} workers={}",
+            len(tasks),
+            ex.max_workers,
+        )
+        if ex.max_workers <= 1:
+            for symbol, period in tasks:
+                out.append(_run_task(symbol, period))
+            logger.info(
+                "repair_gap_top_trader_long_short run done: submitted={} completed={} failed=0 wall_clock_s={:.3f}",
+                len(tasks),
+                len(tasks),
+                time.perf_counter() - t0,
+            )
+            return out
+
+        futures: list[Future[PolicyTopTraderLongShortRepairSeriesResult]] = []
+        future_to_task: dict[Future[PolicyTopTraderLongShortRepairSeriesResult], tuple[str, str]] = {}
+        for symbol, period in tasks:
+            fut = ex.submit(_run_task, symbol, period)
+            futures.append(fut)
+            future_to_task[fut] = (symbol, period)
+
+        failed_tasks: list[tuple[str, str]] = []
+        for fut in futures:
+            symbol, period = future_to_task[fut]
+            try:
+                out.append(fut.result())
+            except Exception:
+                failed_tasks.append((symbol, period))
+                logger.exception(
+                    "repair_gap_top_trader_long_short task failed: symbol={} period={}",
+                    symbol,
+                    period,
                 )
 
-                gaps = detect_top_trader_long_short_time_gaps(
-                    conn,
-                    symbol,
-                    period,
-                    range_start,
-                    range_end,
-                    gap_multiple=gm,
-                )
-                if not gaps:
-                    out.append(PolicyTopTraderLongShortRepairSeriesResult(symbol, period, 0, 0))
-                    continue
-
-                n = run_repair_detected_top_trader_long_short_gaps(
-                    conn,
-                    prov,
-                    symbol,
-                    period,
-                    gaps,
-                )
-                logger.info(
-                    "market_data top trader long/short gap repair symbol={} period={} gap_spans={} rows_upserted={}",
-                    symbol,
-                    period,
-                    len(gaps),
-                    n,
-                )
-                out.append(
-                    PolicyTopTraderLongShortRepairSeriesResult(symbol, period, len(gaps), n)
-                )
+        logger.info(
+            "repair_gap_top_trader_long_short run done: submitted={} completed={} failed={} wall_clock_s={:.3f}",
+            len(tasks),
+            len(tasks) - len(failed_tasks),
+            len(failed_tasks),
+            time.perf_counter() - t0,
+        )
+        if failed_tasks:
+            failed_labels = [f"{symbol}/{period}" for symbol, period in failed_tasks]
+            raise RuntimeError(
+                "repair_gap_top_trader_long_short failed for task(s): "
+                + ", ".join(sorted(failed_labels))
+            )
         return out
     finally:
-        conn.close()
+        if own_executor and ex is not None:
+            ex.shutdown(wait=True)
 

@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+import time
 from typing import Mapping
 
 import psycopg2
 from loguru import logger
 
 from market_data.config import (
+    FUTURES_CORRECT_WINDOW_MAX_WORKERS,
     OPEN_INTEREST_CONTRACT_TYPES,
     OPEN_INTEREST_CORRECT_WINDOW_POINTS,
     OPEN_INTEREST_FETCH_CHUNK_LIMIT,
@@ -22,6 +25,7 @@ from market_data.intervals import interval_to_millis
 from market_data.jobs.common import chunk_fetch_open_interest_forward, utc_now_ms
 from market_data.providers.base import OpenInterestProvider
 from market_data.providers.binance_perps import build_binance_perps_provider
+from market_data.providers.executor import ProviderExecutor, ProviderExecutorConfig
 from market_data.schemas import OpenInterestPoint
 from market_data.storage import fetch_open_interest_by_sample_times, upsert_open_interest_points
 
@@ -108,25 +112,95 @@ def run_correct_window_open_interest(
     settings: MarketDataSettings,
     *,
     provider: OpenInterestProvider | None = None,
+    provider_executor: ProviderExecutor[CorrectOpenInterestWindowResult] | None = None,
     lookback_points: int | None = None,
 ) -> list[CorrectOpenInterestWindowResult]:
     prov = provider if provider is not None else build_binance_perps_provider(settings)
-    conn = psycopg2.connect(settings.database_url)
+    own_executor = False
+    ex = provider_executor
+    if ex is None:
+        ex = ProviderExecutor[CorrectOpenInterestWindowResult](
+            ProviderExecutorConfig(max_workers=FUTURES_CORRECT_WINDOW_MAX_WORKERS)
+        )
+        own_executor = True
+
+    tasks: list[tuple[str, str, str]] = [
+        (symbol, contract_type, period)
+        for symbol in OPEN_INTEREST_SYMBOLS
+        for contract_type in OPEN_INTEREST_CONTRACT_TYPES
+        for period in OPEN_INTEREST_PERIODS
+    ]
+
+    def _run_task(symbol: str, contract_type: str, period: str) -> CorrectOpenInterestWindowResult:
+        conn = psycopg2.connect(settings.database_url)
+        try:
+            return run_correct_window_open_interest_series(
+                conn,
+                prov,
+                symbol,
+                contract_type,
+                period,
+                lookback_points=lookback_points,
+            )
+        finally:
+            conn.close()
     try:
+        t0 = time.perf_counter()
+        logger.info(
+            "correct_window_open_interest run start: tasks={} workers={}",
+            len(tasks),
+            ex.max_workers,
+        )
         out: list[CorrectOpenInterestWindowResult] = []
-        for symbol in OPEN_INTEREST_SYMBOLS:
-            for contract_type in OPEN_INTEREST_CONTRACT_TYPES:
-                for period in OPEN_INTEREST_PERIODS:
-                    out.append(
-                        run_correct_window_open_interest_series(
-                            conn,
-                            prov,
-                            symbol,
-                            contract_type,
-                            period,
-                            lookback_points=lookback_points,
-                        )
-                    )
+        if ex.max_workers <= 1:
+            for symbol, contract_type, period in tasks:
+                out.append(_run_task(symbol, contract_type, period))
+            logger.info(
+                "correct_window_open_interest run done: submitted={} completed={} failed=0 wall_clock_s={:.3f}",
+                len(tasks),
+                len(tasks),
+                time.perf_counter() - t0,
+            )
+            return out
+
+        futures: list[Future[CorrectOpenInterestWindowResult]] = []
+        future_to_task: dict[Future[CorrectOpenInterestWindowResult], tuple[str, str, str]] = {}
+        for symbol, contract_type, period in tasks:
+            fut = ex.submit(_run_task, symbol, contract_type, period)
+            futures.append(fut)
+            future_to_task[fut] = (symbol, contract_type, period)
+
+        failed_tasks: list[tuple[str, str, str]] = []
+        for fut in futures:
+            symbol, contract_type, period = future_to_task[fut]
+            try:
+                out.append(fut.result())
+            except Exception:
+                failed_tasks.append((symbol, contract_type, period))
+                logger.exception(
+                    "correct_window_open_interest task failed: symbol={} contract_type={} period={}",
+                    symbol,
+                    contract_type,
+                    period,
+                )
+
+        logger.info(
+            "correct_window_open_interest run done: submitted={} completed={} failed={} wall_clock_s={:.3f}",
+            len(tasks),
+            len(tasks) - len(failed_tasks),
+            len(failed_tasks),
+            time.perf_counter() - t0,
+        )
+        if failed_tasks:
+            failed_labels = [
+                f"{symbol}/{contract_type}/{period}"
+                for symbol, contract_type, period in failed_tasks
+            ]
+            raise RuntimeError(
+                "correct_window_open_interest failed for task(s): "
+                + ", ".join(sorted(failed_labels))
+            )
         return out
     finally:
-        conn.close()
+        if own_executor and ex is not None:
+            ex.shutdown(wait=True)

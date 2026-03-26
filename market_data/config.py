@@ -86,6 +86,10 @@ OHLCV_CORRECT_WINDOW_MAX_WORKERS: int = GLOBAL_PROVIDER_MAX_WORKERS
 # Worker pool size for OHLCV policy-window gap-repair orchestration.
 # ``1`` preserves sequential behavior.
 OHLCV_REPAIR_GAP_MAX_WORKERS: int = GLOBAL_PROVIDER_MAX_WORKERS
+# Worker pool size for futures correct-window orchestration.
+FUTURES_CORRECT_WINDOW_MAX_WORKERS: int = GLOBAL_PROVIDER_MAX_WORKERS
+# Worker pool size for futures policy-window gap-repair orchestration.
+FUTURES_REPAIR_GAP_MAX_WORKERS: int = GLOBAL_PROVIDER_MAX_WORKERS
 # Guardrail for concurrent in-flight OHLCV fetch calls per provider pool.
 # Keep this conservative relative to venue limits; ``1`` effectively serializes fetch calls.
 OHLCV_PROVIDER_MAX_IN_FLIGHT_FETCHES: int = 4

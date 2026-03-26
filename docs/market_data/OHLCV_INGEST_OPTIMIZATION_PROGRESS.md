@@ -322,8 +322,8 @@ while preserving correctness and operational safety under production cadence.
 | 3 | PE9-3 | Parallelize OHLCV `repair_gap` with same safety pattern + failure aggregation | `jobs/repair_gap.py` | Done |
 | 4 | PE9-4 | Add tests for OHLCV correct/repair: parity, failure isolation, thread-safety assumptions | `market_data/tests/test_jobs.py` | Done |
 | 5 | PE9-5 | Benchmark OHLCV correct/repair workers=`1` vs workers=`N` and record speedup + guardrails | scripts + logs | Done |
-| 6 | PE9-6 | Extend same pattern to futures `correct_window_*` jobs | basis/open-interest/taker/top-trader | Planned |
-| 7 | PE9-7 | Extend same pattern to futures `repair_gap_*` jobs | basis/open-interest/taker/top-trader | Planned |
+| 6 | PE9-6 | Extend same pattern to futures `correct_window_*` jobs | basis/open-interest/taker/top-trader | Done |
+| 7 | PE9-7 | Extend same pattern to futures `repair_gap_*` jobs | basis/open-interest/taker/top-trader | Done |
 | 8 | PE9-8 | Optional central shared futures executor lifecycle in `main.py` (single pool reused across futures jobs) | `market_data/main.py` | Planned |
 | 9 | PE9-9 | End-to-end scheduler validation and staged rollout notes | scheduler + docs | Planned |
 
