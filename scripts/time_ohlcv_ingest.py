@@ -6,7 +6,9 @@ one ``(symbol, interval)`` and records durations for:
 - DB cursor reads (``get_ingestion_cursor``, ``max_open_time_ohlcv``)
 - REST call (HTTP GET duration)
 - JSON decode duration (``resp.json()``)
-- Validation/parsing (``process_binance_klines_payload``; includes pydantic + rule checks)
+- Parsing + validation split:
+  - Parse (row -> ``OhlcvBar``; includes pydantic field/model checks)
+  - Validate (batch/rule checks: ordering, overlap, span coverage)
 - Filter step (drop bars with ``open_time`` after ``end_ms``)
 - DB writes: ``upsert_ohlcv_bars``, ``upsert_ingestion_cursor``, and ``conn.commit()``
 
@@ -50,14 +52,19 @@ from market_data.config import (
 from market_data.intervals import interval_to_millis
 from market_data.intervals import floor_align_ms_to_interval
 from market_data.jobs.common import open_time_plus_interval_ms, utc_now_ms
-from market_data.schemas import OhlcvBar
+from market_data.schemas import OhlcvBar, parse_binance_kline
 from market_data.storage import (
     get_ingestion_cursor,
     max_open_time_ohlcv,
     upsert_ohlcv_bars,
     upsert_ingestion_cursor,
 )
-from market_data.validation import process_binance_klines_payload
+from market_data.validation import (
+    _batch_integrity_issues,
+    _interior_overlap_issues,
+    _span_coverage_issues,
+    _warn_large_open_time_gaps,
+)
 from market_data.rate_limit import ProviderRateLimiter
 
 
@@ -70,7 +77,8 @@ class AttemptStats:
     ok: bool
     http_get_s: float = 0.0
     json_decode_s: float = 0.0
-    process_s: float = 0.0
+    parse_s: float = 0.0
+    validate_s: float = 0.0
     sleep_s: float = 0.0
     total_s: float = 0.0
     error: Optional[str] = None
@@ -205,6 +213,83 @@ def _filter_bars_not_after_end(
     return out, len(bars) - len(out), t1 - t0
 
 
+def _parse_and_validate_klines_timed(
+    raw: Any,
+    *,
+    symbol: str,
+    interval: str,
+    start_time_ms: int | None,
+    end_time_ms: int | None,
+    request_limit: int | None,
+) -> tuple[list[OhlcvBar], float, float]:
+    """
+    Split parse vs validation timings:
+    - parse: row decoding into OhlcvBar (includes pydantic field/model checks)
+    - validate: batch/rule checks over parsed rows
+    """
+    if not isinstance(raw, list):
+        raise ValueError("Binance klines response must be a JSON array")
+
+    sym = symbol.strip().upper()
+    iv = interval.strip()
+    iv_ms = interval_to_millis(iv)
+
+    t_parse0 = time.perf_counter()
+    row_errors: list[str] = []
+    bars: list[OhlcvBar] = []
+    for i, row in enumerate(raw):
+        if not isinstance(row, list):
+            row_errors.append(f"row[{i}] is not a list")
+            continue
+        try:
+            bars.append(parse_binance_kline(row, symbol=sym, interval=iv))
+        except Exception as e:  # noqa: BLE001
+            row_errors.append(f"row[{i}]: {e}")
+    t_parse1 = time.perf_counter()
+    parse_s = t_parse1 - t_parse0
+
+    if row_errors:
+        head = "; ".join(row_errors[:15])
+        more = f" ... (+{len(row_errors) - 15} more)" if len(row_errors) > 15 else ""
+        raise ValueError(f"klines row errors ({len(row_errors)}): {head}{more}")
+
+    t_validate0 = time.perf_counter()
+    batch_issues = _batch_integrity_issues(bars)
+    if batch_issues:
+        raise ValueError("klines batch integrity: " + "; ".join(batch_issues))
+
+    overlaps = _interior_overlap_issues(bars, iv_ms)
+    if overlaps:
+        raise ValueError("klines open_time overlap: " + "; ".join(overlaps))
+
+    _warn_large_open_time_gaps(bars, iv_ms, symbol=sym, interval=iv)
+
+    if (
+        start_time_ms is not None
+        and end_time_ms is not None
+        and request_limit is not None
+        and bars
+    ):
+        span_issues = _span_coverage_issues(
+            bars,
+            start_ms=start_time_ms,
+            end_ms=end_time_ms,
+            iv_ms=iv_ms,
+            request_limit=request_limit,
+        )
+        fatal = [
+            m
+            for m in span_issues
+            if not (m.startswith("tail shortfall:") or m.startswith("head slack:"))
+        ]
+        if fatal:
+            raise ValueError("klines span/coverage: " + "; ".join(fatal))
+    t_validate1 = time.perf_counter()
+    validate_s = t_validate1 - t_validate0
+
+    return bars, parse_s, validate_s
+
+
 def _fetch_ohlcv_page_timed(
     *,
     session: requests.Session,
@@ -264,8 +349,7 @@ def _fetch_ohlcv_page_timed(
             t_json1 = time.perf_counter()
             attempt_stats.json_decode_s = t_json1 - t_json0
 
-            t_proc0 = time.perf_counter()
-            bars = process_binance_klines_payload(
+            bars, parse_s, validate_s = _parse_and_validate_klines_timed(
                 raw,
                 symbol=symbol,
                 interval=interval,
@@ -273,8 +357,8 @@ def _fetch_ohlcv_page_timed(
                 end_time_ms=int(end_time_ms),
                 request_limit=int(limit),
             )
-            t_proc1 = time.perf_counter()
-            attempt_stats.process_s = t_proc1 - t_proc0
+            attempt_stats.parse_s = parse_s
+            attempt_stats.validate_s = validate_s
 
             attempt_stats.rows_returned = len(bars)
             attempt_stats.ok = True
@@ -490,6 +574,10 @@ def main() -> None:
         t1 = time.perf_counter()
 
         total_fetch_s = sum(p.fetch_s_total for p in stats.pages)
+        total_http_get_s = sum(a.http_get_s for p in stats.pages for a in p.attempts)
+        total_json_decode_s = sum(a.json_decode_s for p in stats.pages for a in p.attempts)
+        total_parse_s = sum(a.parse_s for p in stats.pages for a in p.attempts)
+        total_validate_s = sum(a.validate_s for p in stats.pages for a in p.attempts)
         total_upsert_s = sum(p.upsert_s for p in stats.pages)
         total_cursor_upsert_s = sum(p.cursor_upsert_s for p in stats.pages)
         total_commit_s = sum(p.commit_s for p in stats.pages)
@@ -506,7 +594,11 @@ def main() -> None:
             "bars_upserted": stats.bars_upserted,
             "cursor_read_s": stats.cursor_read_s,
             "max_open_time_s": stats.max_open_time_s,
-            "fetch_parse_validate_s": total_fetch_s,
+            "fetch_total_s": total_fetch_s,
+            "http_get_s": total_http_get_s,
+            "json_decode_s": total_json_decode_s,
+            "parse_s": total_parse_s,
+            "validate_s": total_validate_s,
             "filter_s": stats.filter_s_total,
             "upsert_s": total_upsert_s,
             "cursor_upsert_s": total_cursor_upsert_s,
@@ -515,12 +607,15 @@ def main() -> None:
         }
         rows.append(row)
         logger.info(
-            "done {}: pages={} attempts={} bars={} fetch_parse_validate={:.3f}s wall={:.3f}s",
+            "done {}: pages={} attempts={} bars={} http={:.3f}s json={:.3f}s parse={:.3f}s validate={:.3f}s wall={:.3f}s",
             row["symbol"],
             row["pages"],
             row["attempts"],
             row["bars_upserted"],
-            row["fetch_parse_validate_s"],
+            row["http_get_s"],
+            row["json_decode_s"],
+            row["parse_s"],
+            row["validate_s"],
             row["wall_clock_s"],
         )
 
@@ -539,7 +634,11 @@ def main() -> None:
             "bars_upserted",
             "cursor_read_s",
             "max_open_time_s",
-            "fetch_parse_validate_s",
+            "fetch_total_s",
+            "http_get_s",
+            "json_decode_s",
+            "parse_s",
+            "validate_s",
             "filter_s",
             "upsert_s",
             "cursor_upsert_s",
@@ -580,7 +679,11 @@ def main() -> None:
         args.write,
         t_all1 - t_all0,
     )
-    _summary("fetch_parse_validate_s", [float(r["fetch_parse_validate_s"]) for r in rows])
+    _summary("fetch_total_s", [float(r["fetch_total_s"]) for r in rows])
+    _summary("http_get_s", [float(r["http_get_s"]) for r in rows])
+    _summary("json_decode_s", [float(r["json_decode_s"]) for r in rows])
+    _summary("parse_s", [float(r["parse_s"]) for r in rows])
+    _summary("validate_s", [float(r["validate_s"]) for r in rows])
     _summary("wall_clock_s", [float(r["wall_clock_s"]) for r in rows])
     _summary("cursor_read_s", [float(r["cursor_read_s"]) for r in rows])
     if args.write:
