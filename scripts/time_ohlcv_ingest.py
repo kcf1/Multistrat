@@ -16,10 +16,22 @@ Run (example):
 
 from __future__ import annotations
 
+import os
+import sys
+
+# When executing `python scripts/<this_file>.py`, Python puts `scripts/` on `sys.path`
+# (but not the repo root), so sibling packages like `market_data/` may not import.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import argparse
+import csv
+import statistics
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlencode
 
@@ -425,6 +437,7 @@ def run_time_ohlcv_ingest_once(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Time OHLCV ingest sub-steps (single series).")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="OHLCV symbol (e.g. BTCUSDT).")
+    parser.add_argument("--all-symbols", action="store_true", help="Run timing for all configured OHLCV symbols.")
     parser.add_argument("--interval", type=str, default="1h", help="OHLCV interval (e.g. 1m, 1h).")
     parser.add_argument("--now-ms", type=int, default=None, help="Override 'now' (ms since epoch UTC).")
     parser.add_argument(
@@ -437,6 +450,12 @@ def main() -> None:
     parser.add_argument("--no-watermark", action="store_true", help="Start from horizon_ms instead of watermark.")
     parser.add_argument("--max-pages", type=int, default=None, help="Stop after N REST pages.")
     parser.add_argument("--write", action="store_true", help="Upsert + commit to Postgres (default: off).")
+    parser.add_argument(
+        "--output-csv",
+        type=str,
+        default=None,
+        help="Optional CSV path for per-symbol timing rows.",
+    )
     parser.add_argument("--override-start-ms", type=int, default=None, help="Force start_ms (ms since epoch UTC) regardless of cursor.")
     parser.add_argument("--override-end-ms", type=int, default=None, help="Force end_ms (ms since epoch UTC) regardless of now.")
     parser.add_argument(
@@ -447,73 +466,126 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    t0 = time.perf_counter()
-    stats = run_time_ohlcv_ingest_once(
-        symbol=args.symbol,
-        interval=args.interval,
-        now_ms=args.now_ms,
-        backfill_days=args.backfill_days,
-        chunk_limit=args.chunk_limit,
-        use_watermark=not args.no_watermark,
-        max_pages=args.max_pages,
-        write=args.write,
-        force_fetch_window_intervals=args.force_fetch_window_intervals,
-        override_start_ms=args.override_start_ms,
-        override_end_ms=args.override_end_ms,
-    )
-    t1 = time.perf_counter()
+    settings = load_settings()
+    symbols = list(settings.symbols) if args.all_symbols else [args.symbol]
 
-    total_fetch_s = sum(p.fetch_s_total for p in stats.pages)
-    total_upsert_s = sum(p.upsert_s for p in stats.pages)
-    total_cursor_upsert_s = sum(p.cursor_upsert_s for p in stats.pages)
-    total_commit_s = sum(p.commit_s for p in stats.pages)
-
-    total_pages = len(stats.pages)
-    total_attempts = sum(len(p.attempts) for p in stats.pages)
-
-    logger.info("=== OHLCV ingest timing summary ===")
-    logger.info(
-        "series: {} {}  start_ms={}  end_ms={}  write={}",
-        stats.symbol,
-        stats.interval,
-        stats.start_ms,
-        stats.end_ms,
-        args.write,
-    )
-    logger.info("pages: {} (attempts: {})  bars_upserted: {}", total_pages, total_attempts, stats.bars_upserted)
-    logger.info(
-        "cursor reads: {:.3f}s  max_open_time: {:.3f}s",
-        stats.cursor_read_s,
-        stats.max_open_time_s,
-    )
-    logger.info(
-        "fetch+parse+validate: {:.3f}s  filter: {:.3f}s",
-        total_fetch_s,
-        stats.filter_s_total,
-    )
-    logger.info(
-        "db: upsert={:.3f}s  cursor_upsert={:.3f}s  commit={:.3f}s  wall_clock={:.3f}s",
-        total_upsert_s,
-        total_cursor_upsert_s,
-        total_commit_s,
-        t1 - t0,
-    )
-
-    # Per-page detail (small output).
-    for idx, p in enumerate(stats.pages[:5], start=1):
-        last_attempt = p.attempts[-1] if p.attempts else None
-        logger.info(
-            "page#{} start_ms={} limit={} bars_after_filter={} filtered_out={} fetch_s_total={:.3f} upsert_s={:.3f} commit_s={:.3f} last_ok={}",
-            idx,
-            p.start_time_ms,
-            p.limit,
-            p.bars_after_filter,
-            p.filtered_out,
-            p.fetch_s_total,
-            p.upsert_s,
-            p.commit_s,
-            getattr(last_attempt, "ok", None),
+    rows: list[dict[str, Any]] = []
+    t_all0 = time.perf_counter()
+    for i, sym in enumerate(symbols, start=1):
+        logger.info("Running timing for {}/{}: {} {}", i, len(symbols), sym, args.interval)
+        t0 = time.perf_counter()
+        stats = run_time_ohlcv_ingest_once(
+            symbol=sym,
+            interval=args.interval,
+            now_ms=args.now_ms,
+            backfill_days=args.backfill_days,
+            chunk_limit=args.chunk_limit,
+            use_watermark=not args.no_watermark,
+            max_pages=args.max_pages,
+            write=args.write,
+            force_fetch_window_intervals=args.force_fetch_window_intervals,
+            override_start_ms=args.override_start_ms,
+            override_end_ms=args.override_end_ms,
         )
+        t1 = time.perf_counter()
+
+        total_fetch_s = sum(p.fetch_s_total for p in stats.pages)
+        total_upsert_s = sum(p.upsert_s for p in stats.pages)
+        total_cursor_upsert_s = sum(p.cursor_upsert_s for p in stats.pages)
+        total_commit_s = sum(p.commit_s for p in stats.pages)
+        total_pages = len(stats.pages)
+        total_attempts = sum(len(p.attempts) for p in stats.pages)
+
+        row = {
+            "symbol": stats.symbol,
+            "interval": stats.interval,
+            "start_ms": stats.start_ms,
+            "end_ms": stats.end_ms,
+            "pages": total_pages,
+            "attempts": total_attempts,
+            "bars_upserted": stats.bars_upserted,
+            "cursor_read_s": stats.cursor_read_s,
+            "max_open_time_s": stats.max_open_time_s,
+            "fetch_parse_validate_s": total_fetch_s,
+            "filter_s": stats.filter_s_total,
+            "upsert_s": total_upsert_s,
+            "cursor_upsert_s": total_cursor_upsert_s,
+            "commit_s": total_commit_s,
+            "wall_clock_s": t1 - t0,
+        }
+        rows.append(row)
+        logger.info(
+            "done {}: pages={} attempts={} bars={} fetch_parse_validate={:.3f}s wall={:.3f}s",
+            row["symbol"],
+            row["pages"],
+            row["attempts"],
+            row["bars_upserted"],
+            row["fetch_parse_validate_s"],
+            row["wall_clock_s"],
+        )
+
+    t_all1 = time.perf_counter()
+
+    if args.output_csv:
+        out_path = Path(args.output_csv)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = [
+            "symbol",
+            "interval",
+            "start_ms",
+            "end_ms",
+            "pages",
+            "attempts",
+            "bars_upserted",
+            "cursor_read_s",
+            "max_open_time_s",
+            "fetch_parse_validate_s",
+            "filter_s",
+            "upsert_s",
+            "cursor_upsert_s",
+            "commit_s",
+            "wall_clock_s",
+        ]
+        with out_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        logger.info("Wrote per-symbol timings to {}", out_path)
+
+    if not rows:
+        logger.warning("No symbols timed")
+        return
+
+    def _summary(label: str, values: list[float]) -> None:
+        vals = sorted(values)
+        n = len(vals)
+        p95_idx = max(0, min(n - 1, int(round(0.95 * (n - 1)))))
+        logger.info(
+            "{}: n={} min={:.3f}s p50={:.3f}s p95={:.3f}s max={:.3f}s avg={:.3f}s",
+            label,
+            n,
+            vals[0],
+            statistics.median(vals),
+            vals[p95_idx],
+            vals[-1],
+            statistics.mean(vals),
+        )
+
+    logger.info("=== OHLCV ingest timing aggregate summary ===")
+    logger.info(
+        "symbols={} interval={} write={} total_wall_clock={:.3f}s",
+        len(rows),
+        args.interval,
+        args.write,
+        t_all1 - t_all0,
+    )
+    _summary("fetch_parse_validate_s", [float(r["fetch_parse_validate_s"]) for r in rows])
+    _summary("wall_clock_s", [float(r["wall_clock_s"]) for r in rows])
+    _summary("cursor_read_s", [float(r["cursor_read_s"]) for r in rows])
+    if args.write:
+        _summary("upsert_s", [float(r["upsert_s"]) for r in rows])
+        _summary("commit_s", [float(r["commit_s"]) for r in rows])
 
 
 if __name__ == "__main__":
