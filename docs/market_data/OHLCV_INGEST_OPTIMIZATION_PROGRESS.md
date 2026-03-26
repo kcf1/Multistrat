@@ -302,3 +302,64 @@ Practical conclusion: keep optimization focus on **network fetch path first**, t
 |---|---|
 | Split timing CSV (post PE-6/7) | `scheduler/reports_out/ohlcv_ingest_timing_all_symbols_write_split_500iv_post_pe67.csv` |
 
+## Planned Task: PE-9 Parallelize Correct/Repair Jobs (Step-by-Step)
+
+### Objective
+
+Apply the same provider-executor parallelization approach used in ingest jobs to:
+
+- `correct_window*` jobs
+- `repair_gap*` jobs
+
+while preserving correctness and operational safety under production cadence.
+
+### Stepwise Execution Plan
+
+| Step | Task ID | Task | Target scope | Status |
+|---:|---|---|---|---|
+| 1 | PE9-1 | Add/confirm shared worker-cap constants for correct/repair orchestration | `market_data/config.py` | Planned |
+| 2 | PE9-2 | Parallelize OHLCV `correct_window` first (pilot) with provider executor + per-task DB connections | `jobs/correct_window.py` | Planned |
+| 3 | PE9-3 | Parallelize OHLCV `repair_gap` with same safety pattern + failure aggregation | `jobs/repair_gap.py` | Planned |
+| 4 | PE9-4 | Add tests for OHLCV correct/repair: parity, failure isolation, thread-safety assumptions | `market_data/tests/test_jobs.py` | Planned |
+| 5 | PE9-5 | Benchmark OHLCV correct/repair workers=`1` vs workers=`N` and record speedup + guardrails | scripts + logs | Planned |
+| 6 | PE9-6 | Extend same pattern to futures `correct_window_*` jobs | basis/open-interest/taker/top-trader | Planned |
+| 7 | PE9-7 | Extend same pattern to futures `repair_gap_*` jobs | basis/open-interest/taker/top-trader | Planned |
+| 8 | PE9-8 | Optional central shared futures executor lifecycle in `main.py` (single pool reused across futures jobs) | `market_data/main.py` | Planned |
+| 9 | PE9-9 | End-to-end scheduler validation and staged rollout notes | scheduler + docs | Planned |
+
+### Design Constraints / Guardrails
+
+| Area | Constraint |
+|---|---|
+| DB safety | No shared psycopg2 connection across worker threads; each task owns its connection lifecycle. |
+| Failure model | One-symbol/task failures are isolated; batch raises aggregated summary after all tasks complete. |
+| Rate-limit safety | Preserve existing limiter/fetch-cap semantics per provider; do not increase implicit request burst without explicit tuning. |
+| Fallback | Worker count `1` must preserve sequential behavior for all corrected/refactored jobs. |
+| Observability | Log run start/end with submitted/completed/failed counts and wall-clock. |
+
+### PE-9 Test Plan
+
+| Test ID | Test | Method | Expected |
+|---|---|---|---|
+| PE9-T1 | Correct-window parity | workers=`1` vs workers=`N` on fixed window | Same drift-row outcomes per series |
+| PE9-T2 | Repair-gap parity | workers=`1` vs workers=`N` on fixed horizon | Same repaired spans/rows/cursor endpoints |
+| PE9-T3 | Failure isolation | Inject single task/provider exception | Remaining tasks complete; aggregated failure raised |
+| PE9-T4 | Thread/connection safety | Run parallel load with logging/assertions | No thread-share connection errors |
+| PE9-T5 | Performance | Before/after benchmark on identical setup | Wall-clock improvement for correct/repair passes |
+| PE9-T6 | Stability guardrails | Observe retries, give-ups, DB latency in run logs | No unacceptable degradation |
+
+### Rollout Sequence
+
+| Phase | Action | Exit Criteria |
+|---|---|---|
+| PE9-R1 | Implement OHLCV correct only (pilot) | PE9-T1/T3/T4 pass |
+| PE9-R2 | Implement OHLCV repair | PE9-T2/T3/T4 pass |
+| PE9-R3 | Measure and document performance/stability | PE9-T5/T6 pass |
+| PE9-R4 | Extend to futures correct jobs | No regression vs OHLCV baseline |
+| PE9-R5 | Extend to futures repair jobs | No regression; guardrails stable |
+| PE9-R6 | Optional shared futures pool in `main.py` | Equivalent behavior + reduced orchestration overhead |
+
+### Current conclusion for next step
+
+Start with **PE9-R1 (OHLCV correct-window pilot)**, then proceed one phase at a time with test gates before widening scope.
+
