@@ -109,9 +109,9 @@ Do not add `.env` keys for every strategy threshold/interval/symbol list unless 
 
 ## 6. Implementation tasks (small and concrete)
 
-- [ ] Create `strategies/` package skeleton (`core`, `runner`, `modules`, `registry.py`, `config.py`).
-- [ ] Define base contracts and schemas (`contracts.py`, `schemas.py`).
-- [ ] Implement one reference strategy under `modules/` with `pipeline.py`.
+- [x] Create `strategies/` package skeleton (`core`, `runner`, `modules`, `registry.py`, `config.py`).
+- [x] Define base contracts and schemas (`contracts.py`, `schemas.py`).
+- [x] Implement one reference strategy under `modules/` with `pipeline.py`.
 - [ ] Wire runner to publish validated order intents to `strategy_orders`.
 - [ ] Add model metadata persistence + artifact path convention.
 - [ ] Add strategy registry (enabled/disabled, schedule/interval).
