@@ -153,3 +153,11 @@ Do not add `.env` keys for every strategy threshold/interval/symbol list unless 
 - At least one strategy is implemented using shared contracts.
 - Order intents are schema-valid and accepted by Risk/OMS path.
 - Strategy tests (unit + contract + integration) are added and runnable.
+
+---
+
+## 9. Research-first follow-up
+
+For factor-research infrastructure planning (raw transform, outlier handling, bin portfolios, forward returns, plotting, and backtest statistics), see:
+
+- [RESEARCH_INFRA_PLAN.md](RESEARCH_INFRA_PLAN.md)
