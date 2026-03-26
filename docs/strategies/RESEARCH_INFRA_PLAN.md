@@ -84,16 +84,28 @@ Rules:
 
 ## 5) Implementation tasks (small and concrete)
 
-- [ ] Create `strategies/research_core/` package scaffold.
-- [ ] Implement `transform.py` entrypoint (`build_signal_frame`).
-- [ ] Implement `cleaning.py` (winsorize/robust clipping).
-- [ ] Implement `portfolio.py` (rank/bin/EW weights).
-- [ ] Implement `forward_returns.py` (multi-horizon returns).
-- [ ] Implement `analytics.py` summary statistics.
-- [ ] Implement `plots.py` for distribution + bin charts.
-- [ ] Implement `backtest.py` wrapper + stats report.
-- [ ] Add a runnable sample in `research/` (script or notebook).
-- [ ] Document usage examples and defaults.
+- [x] Create `strategies/research_core/` package scaffold.
+- [x] Implement `transform.py` entrypoint (`build_signal_frame`).
+- [x] Implement `cleaning.py` (winsorize/robust clipping).
+- [x] Implement `portfolio.py` (rank/bin/EW weights).
+- [x] Implement `forward_returns.py` (multi-horizon returns).
+- [x] Implement `analytics.py` summary statistics.
+- [x] Implement `plots.py` for distribution + bin charts.
+- [x] Implement `backtest.py` wrapper + stats report.
+- [x] Add a runnable sample in `research/` (script or notebook).
+- [x] Document usage examples and defaults.
+
+Quick usage:
+
+- Example script: `python research/run_research_core_example.py`
+- Typical flow:
+  1. `build_signal_frame(...)`
+  2. `winsorize_by_ts(...)`
+  3. `add_cross_sectional_ranks(...)`
+  4. `assign_bins(...)`
+  5. `add_equal_weight_by_bin(...)`
+  6. `add_forward_returns(...)`
+  7. `signal_summary(...)`, `average_return_by_bin(...)`, `long_short_stats(...)`
 
 ---
 
