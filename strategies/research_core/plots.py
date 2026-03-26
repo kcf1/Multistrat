@@ -16,10 +16,31 @@ def _plt():
 def plot_signal_distribution(df: pd.DataFrame, *, signal_col: str):
     plt = _plt()
     fig, ax = plt.subplots()
-    pd.to_numeric(df[signal_col], errors="coerce").dropna().hist(ax=ax, bins=40)
+    series = pd.to_numeric(df[signal_col], errors="coerce").dropna()
+    series.hist(ax=ax, bins=40)
     ax.set_title(f"Distribution: {signal_col}")
     ax.set_xlabel(signal_col)
     ax.set_ylabel("count")
+
+    if not series.empty:
+        moments_text = "\n".join(
+            [
+                f"mean: {series.mean():.4f}",
+                f"std: {series.std(ddof=1):.4f}",
+                f"skew: {series.skew():.4f}",
+                f"kurt: {series.kurt():.4f}",
+            ]
+        )
+        ax.text(
+            0.98,
+            0.98,
+            moments_text,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            bbox={"boxstyle": "round", "alpha": 0.15},
+        )
     return fig
 
 

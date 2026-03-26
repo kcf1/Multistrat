@@ -33,18 +33,30 @@ def winsorize_by_ts(
 
 
 def robust_clip(
-    series: pd.Series,
+    df: pd.DataFrame,
     *,
+    source_col: str = SIGNAL_RAW_COL,
+    output_col: str = SIGNAL_CLEAN_COL,
+    group_col: str = TS_COL,
     zmax: float = 5.0,
-) -> pd.Series:
-    """Robust z-score clipping using median absolute deviation."""
+) -> pd.DataFrame:
+    """Cross-sectional robust clipping using median absolute deviation by group."""
     if zmax <= 0:
         raise ValueError("zmax must be > 0")
-    median = series.median()
-    mad = (series - median).abs().median()
-    if pd.isna(mad) or mad == 0:
-        return series.copy()
-    robust_z = 0.6745 * (series - median) / mad
-    clipped_z = robust_z.clip(-zmax, zmax)
-    return median + (clipped_z * mad / 0.6745)
+    if group_col not in df.columns or source_col not in df.columns:
+        raise ValueError(f"DataFrame must include `{group_col}` and `{source_col}`")
+
+    out = df.copy()
+
+    def _clip_group(series: pd.Series) -> pd.Series:
+        median = series.median()
+        mad = (series - median).abs().median()
+        if pd.isna(mad) or mad == 0:
+            return series.copy()
+        robust_z = 0.6745 * (series - median) / mad
+        clipped_z = robust_z.clip(-zmax, zmax)
+        return median + (clipped_z * mad / 0.6745)
+
+    out[output_col] = out.groupby(group_col, group_keys=False)[source_col].transform(_clip_group)
+    return out
 

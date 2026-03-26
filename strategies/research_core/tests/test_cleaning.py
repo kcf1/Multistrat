@@ -18,8 +18,14 @@ def test_winsorize_by_ts_clips_extremes() -> None:
 
 
 def test_robust_clip_preserves_nans() -> None:
-    series = pd.Series([1.0, 2.0, float("nan"), 3.0, 100.0])
-    out = robust_clip(series, zmax=2.0)
-    assert out.isna().sum() == 1
-    assert out.dropna().max() < 100.0
+    df = pd.DataFrame(
+        {
+            "ts": ["2026-01-01"] * 5,
+            "symbol": ["A", "B", "C", "D", "E"],
+            "signal_raw": [1.0, 2.0, float("nan"), 3.0, 100.0],
+        }
+    )
+    out = robust_clip(df, zmax=2.0)
+    assert out["signal_clean"].isna().sum() == 1
+    assert out["signal_clean"].dropna().max() < 100.0
 
