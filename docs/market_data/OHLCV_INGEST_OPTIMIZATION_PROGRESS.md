@@ -317,9 +317,9 @@ while preserving correctness and operational safety under production cadence.
 
 | Step | Task ID | Task | Target scope | Status |
 |---:|---|---|---|---|
-| 1 | PE9-1 | Add/confirm shared worker-cap constants for correct/repair orchestration | `market_data/config.py` | Planned |
-| 2 | PE9-2 | Parallelize OHLCV `correct_window` first (pilot) with provider executor + per-task DB connections | `jobs/correct_window.py` | Planned |
-| 3 | PE9-3 | Parallelize OHLCV `repair_gap` with same safety pattern + failure aggregation | `jobs/repair_gap.py` | Planned |
+| 1 | PE9-1 | Add/confirm shared worker-cap constants for correct/repair orchestration | `market_data/config.py` | Done |
+| 2 | PE9-2 | Parallelize OHLCV `correct_window` first (pilot) with provider executor + per-task DB connections | `jobs/correct_window.py` | Done |
+| 3 | PE9-3 | Parallelize OHLCV `repair_gap` with same safety pattern + failure aggregation | `jobs/repair_gap.py` | Done |
 | 4 | PE9-4 | Add tests for OHLCV correct/repair: parity, failure isolation, thread-safety assumptions | `market_data/tests/test_jobs.py` | Planned |
 | 5 | PE9-5 | Benchmark OHLCV correct/repair workers=`1` vs workers=`N` and record speedup + guardrails | scripts + logs | Planned |
 | 6 | PE9-6 | Extend same pattern to futures `correct_window_*` jobs | basis/open-interest/taker/top-trader | Planned |

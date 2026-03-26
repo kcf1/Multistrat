@@ -14,8 +14,10 @@ compared endpoint extrema.
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import time
 
 import psycopg2
 from loguru import logger
@@ -23,6 +25,7 @@ from loguru import logger
 from market_data.config import (
     OHLCV_INITIAL_BACKFILL_DAYS,
     OHLCV_KLINES_CHUNK_LIMIT,
+    OHLCV_REPAIR_GAP_MAX_WORKERS,
     OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
     MarketDataSettings,
 )
@@ -30,6 +33,7 @@ from market_data.intervals import interval_to_millis
 from market_data.jobs.common import iter_kline_batches_forward, utc_now_ms
 from market_data.providers.base import KlinesProvider
 from market_data.providers.binance_spot import build_binance_spot_provider
+from market_data.providers.executor import ProviderExecutor, ProviderExecutorConfig
 from market_data.storage import upsert_ohlcv_bars
 
 
@@ -147,6 +151,7 @@ def run_repair_gaps_policy_window_all_series(
     settings: MarketDataSettings,
     *,
     provider: KlinesProvider | None = None,
+    provider_executor: ProviderExecutor[PolicyRepairSeriesResult] | None = None,
     backfill_days: int | None = None,
     gap_multiple: float | None = None,
 ) -> list[PolicyRepairSeriesResult]:
@@ -165,29 +170,89 @@ def run_repair_gaps_policy_window_all_series(
     range_end = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
 
     prov = provider if provider is not None else build_binance_spot_provider(settings)
-    conn = psycopg2.connect(settings.database_url)
+    own_executor = False
+    ex = provider_executor
+    if ex is None:
+        ex = ProviderExecutor[PolicyRepairSeriesResult](
+            ProviderExecutorConfig(max_workers=OHLCV_REPAIR_GAP_MAX_WORKERS)
+        )
+        own_executor = True
+
+    tasks: list[tuple[str, str]] = [
+        (sym, iv) for sym in settings.symbols for iv in settings.intervals
+    ]
+
+    def _run_task(sym: str, iv: str) -> PolicyRepairSeriesResult:
+        conn = psycopg2.connect(settings.database_url)
+        try:
+            gaps = detect_ohlcv_time_gaps(
+                conn, sym, iv, range_start, range_end, gap_multiple=gm
+            )
+            if not gaps:
+                return PolicyRepairSeriesResult(sym, iv, 0, 0)
+            n = run_repair_detected_gaps(conn, prov, sym, iv, gaps)
+            logger.info(
+                "market_data gap repair symbol={} interval={} gap_spans={} bars_upserted={}",
+                sym,
+                iv,
+                len(gaps),
+                n,
+            )
+            return PolicyRepairSeriesResult(sym, iv, len(gaps), n)
+        finally:
+            conn.close()
+
     out: list[PolicyRepairSeriesResult] = []
     try:
-        for sym in settings.symbols:
-            for iv in settings.intervals:
-                gaps = detect_ohlcv_time_gaps(
-                    conn, sym, iv, range_start, range_end, gap_multiple=gm
-                )
-                if not gaps:
-                    out.append(PolicyRepairSeriesResult(sym, iv, 0, 0))
-                    continue
-                n = run_repair_detected_gaps(conn, prov, sym, iv, gaps)
-                logger.info(
-                    "market_data gap repair symbol={} interval={} gap_spans={} bars_upserted={}",
-                    sym,
-                    iv,
-                    len(gaps),
-                    n,
-                )
-                out.append(PolicyRepairSeriesResult(sym, iv, len(gaps), n))
+        t0 = time.perf_counter()
+        logger.info(
+            "repair_gap run start: tasks={} workers={}",
+            len(tasks),
+            ex.max_workers,
+        )
+        if ex.max_workers <= 1:
+            for sym, iv in tasks:
+                out.append(_run_task(sym, iv))
+            logger.info(
+                "repair_gap run done: submitted={} completed={} failed=0 wall_clock_s={:.3f}",
+                len(tasks),
+                len(tasks),
+                time.perf_counter() - t0,
+            )
+            return out
+
+        futures: list[Future[PolicyRepairSeriesResult]] = []
+        future_to_task: dict[Future[PolicyRepairSeriesResult], tuple[str, str]] = {}
+        for sym, iv in tasks:
+            fut = ex.submit(_run_task, sym, iv)
+            futures.append(fut)
+            future_to_task[fut] = (sym, iv)
+
+        failed_tasks: list[tuple[str, str]] = []
+        for fut in futures:
+            sym, iv = future_to_task[fut]
+            try:
+                out.append(fut.result())
+            except Exception:
+                failed_tasks.append((sym, iv))
+                logger.exception("repair_gap task failed: symbol={} interval={}", sym, iv)
+
+        logger.info(
+            "repair_gap run done: submitted={} completed={} failed={} wall_clock_s={:.3f}",
+            len(tasks),
+            len(tasks) - len(failed_tasks),
+            len(failed_tasks),
+            time.perf_counter() - t0,
+        )
+        if failed_tasks:
+            failed_labels = [f"{sym}/{iv}" for sym, iv in failed_tasks]
+            raise RuntimeError(
+                "repair_gap failed for task(s): " + ", ".join(sorted(failed_labels))
+            )
         return out
     finally:
-        conn.close()
+        if own_executor and ex is not None:
+            ex.shutdown(wait=True)
 
 
 def run_repair_detected_gaps(

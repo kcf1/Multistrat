@@ -23,7 +23,12 @@ from market_data.jobs.common import (
     iter_kline_batches_forward,
     open_time_plus_interval_ms,
 )
-from market_data.jobs.correct_window import _log_drifts, run_correct_window_series
+from market_data.jobs.correct_window import (
+    CorrectWindowResult,
+    _log_drifts,
+    run_correct_window,
+    run_correct_window_series,
+)
 from market_data.jobs.correct_window_basis_rate import (
     _log_basis_drifts,
     run_correct_window_basis_series,
@@ -66,7 +71,11 @@ from market_data.jobs.repair_gap_basis_rate import (
     detect_basis_time_gaps,
     run_repair_basis_gap,
 )
-from market_data.jobs.repair_gap import detect_ohlcv_time_gaps, run_repair_gap
+from market_data.jobs.repair_gap import (
+    detect_ohlcv_time_gaps,
+    run_repair_gap,
+    run_repair_gaps_policy_window_all_series,
+)
 from market_data.schemas import BasisPoint, OhlcvBar, OpenInterestPoint
 from market_data.jobs.correct_window_taker_buy_sell_volume import (
     CorrectTakerBuySellVolumeWindowResult,
@@ -504,6 +513,45 @@ def test_run_correct_window_series_upserts() -> None:
     assert r.drift_rows == 0
     uo.assert_called_once_with(conn, bars)
     conn.commit.assert_called_once()
+
+
+def test_run_correct_window_uses_separate_connection_per_symbol() -> None:
+    settings = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT"), intervals=("1h",), database_url="postgresql://db")
+    fake_conns = [MagicMock(name="conn1"), MagicMock(name="conn2")]
+    with (
+        patch("market_data.jobs.correct_window.psycopg2.connect", side_effect=fake_conns),
+        patch(
+            "market_data.jobs.correct_window.run_correct_window_series",
+            side_effect=[
+                CorrectWindowResult("BTCUSDT", "1h", 10, 0),
+                CorrectWindowResult("ETHUSDT", "1h", 11, 1),
+            ],
+        ),
+    ):
+        out = run_correct_window(settings, provider=MagicMock())
+    assert [r.symbol for r in out] == ["BTCUSDT", "ETHUSDT"]
+    assert fake_conns[0].close.called
+    assert fake_conns[1].close.called
+
+
+def test_run_repair_gap_parallel_failure_isolated_and_raised() -> None:
+    settings = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"), intervals=("1h",), database_url="postgresql://db")
+    call_symbols: list[str] = []
+
+    def _detect(conn, symbol, interval, rs, re, gap_multiple=1.5):
+        call_symbols.append(symbol)
+        if symbol == "ETHUSDT":
+            raise RuntimeError("boom")
+        return []
+
+    with (
+        patch("market_data.jobs.repair_gap.detect_ohlcv_time_gaps", side_effect=_detect),
+        patch("market_data.jobs.repair_gap.psycopg2.connect", return_value=MagicMock()),
+    ):
+        with pytest.raises(RuntimeError, match="ETHUSDT/1h"):
+            run_repair_gaps_policy_window_all_series(settings, provider=MagicMock())
+
+    assert sorted(call_symbols) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 
 def test_resolve_basis_ingest_start_backfill_when_empty() -> None:
