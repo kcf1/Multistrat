@@ -19,7 +19,7 @@ ASSET_PRICE_FEED_ASSETS: tuple[str, ...] = DATA_COLLECTION_BASE_ASSETS
 
 # Internal OHLCV DB feed config (micro, in-code): interval and freshness guard.
 ASSET_PRICE_FEED_OHLCV_INTERVAL: str = "1h"
-ASSET_PRICE_FEED_OHLCV_MAX_STALENESS_SECONDS: int = 7200
+ASSET_PRICE_FEED_OHLCV_MAX_STALENESS_SECONDS: int = 1800
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
