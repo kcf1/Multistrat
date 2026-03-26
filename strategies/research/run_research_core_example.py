@@ -54,7 +54,7 @@ def main() -> None:
     print(average_return_by_bin(frame, horizon=1))
     print("ls_stats:", long_short_stats(frame, horizon=1))
 
-    out_dir = ROOT / "strategies" / "research" / "plots_out"
+    out_dir = ROOT / "strategies" / "research" / "plots_out" / "example"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     figs = {
