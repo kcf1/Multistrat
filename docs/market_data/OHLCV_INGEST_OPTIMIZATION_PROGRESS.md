@@ -195,3 +195,19 @@ Enhancements added for reliable benchmarking:
 | PE-S3 | Error profile remains healthy (no significant give-up spike). |
 | PE-S4 | Operational fallback is immediate by setting workers=`1`. |
 
+## T1-T5 Execution Snapshot (2026-03-26)
+
+| Test ID | Status | Evidence |
+|---|---|---|
+| T1 | Partial pass (code-level parity/safety) | `pytest market_data/tests/test_jobs.py -k run_ingest_ohlcv_uses_separate_connection_per_symbol` passed. |
+| T2 | Pass | `pytest market_data/tests/test_jobs.py -k run_ingest_ohlcv_parallel_failure_isolated_and_raised` passed. |
+| T3 | Pass | No lints on modified files; connection isolation + executor/config tests passed. |
+| T4 | Pass (synthetic orchestration benchmark) | Workers `1`: ~1.015s vs workers `4`: ~0.255s (`~3.98x`) in controlled mock task benchmark. |
+| T5 | Pass (practical stability benchmark) | Real all-symbol run completed; no fatal retry/give-up spikes observed in benchmark logs. |
+
+### T5 Reference Benchmark Artifact
+
+| Artifact | Path |
+|---|---|
+| Split timing CSV (post PE-6/7) | `scheduler/reports_out/ohlcv_ingest_timing_all_symbols_write_split_500iv_post_pe67.csv` |
+
