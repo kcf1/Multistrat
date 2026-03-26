@@ -210,6 +210,8 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 
 **Goal:** One or more strategies that read market data, produce order intents to `strategy_orders`; Risk consumes and approves/rejects to `risk_approved`.
 
+**Detailed architecture:** [docs/strategies/STRATEGY_MODULE_ARCHITECTURE.md](strategies/STRATEGY_MODULE_ARCHITECTURE.md) — dedicated strategy package layout, contracts, model persistence policy, and test plan.
+
 ### Dependencies
 
 - Phase 1, 2, 4 (Redis streams; OMS/Booking/Position; Market Data in Postgres—**Redis market keys optional** until PHASE4 §9.7–9.8)
@@ -219,6 +221,7 @@ Phased rollout for the multistrategy trading system. Each phase is designed to d
 ### Deliverables
 
 - [ ] **Strategy runner / harness**
+  - Keep strategy code isolated in `strategies/` (separate from infra modules). Reuse infra only via explicit contracts/interfaces.
   - Single process per strategy (or one process that runs multiple strategies in threads/async): loop over each strategy’s interval
   - For each strategy: read from Postgres (`ohlcv`) and/or Redis (ticker when available); positions from Redis/Postgres as today; compute signals; produce order intents (symbol, side, qty, type, etc.) to `strategy_orders`
   - Config: which strategies enabled; params per strategy

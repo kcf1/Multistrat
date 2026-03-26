@@ -2,7 +2,7 @@
 
 Single reference for the multistrategy trading system: directory layout by module, Postgres schema (all tables), Redis streams and keys, and pointers to detailed docs.
 
-**See also:** [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md), [PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md), [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md), [DATASET_INGESTION_STEPS.md](market_data/DATASET_INGESTION_STEPS.md), [oms/OMS_ARCHITECTURE.md](oms/OMS_ARCHITECTURE.md), [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md), [risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md).
+**See also:** [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md), [PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md), [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md), [DATASET_INGESTION_STEPS.md](market_data/DATASET_INGESTION_STEPS.md), [oms/OMS_ARCHITECTURE.md](oms/OMS_ARCHITECTURE.md), [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md), [risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md), [strategies/STRATEGY_MODULE_ARCHITECTURE.md](strategies/STRATEGY_MODULE_ARCHITECTURE.md).
 
 ---
 
@@ -51,6 +51,7 @@ Single reference for the multistrategy trading system: directory layout by modul
 | **pms/** | PMS | Portfolio: read Postgres only (orders, balance_changes, symbols, assets) → derive positions → write `positions` table. Does not consume Redis. |
 | **risk/** | Risk | Pre-trade: consume `strategy_orders`, rule engine (optional), produce `risk_approved`. |
 | **market_data/** | (Phase 4) | Public market feeds → Postgres (`ohlcv`, …) + Redis hot keys (`market:{symbol}:…`). Default symbol universe: [`market_data/universe.py`](../market_data/universe.py) (`DATA_COLLECTION_SYMBOLS`, USDT spot only). See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md). |
+| **strategies/** | (Phase 6) | Dedicated strategy domain package (isolated from infra modules): strategy runner, shared strategy contracts, and per-strategy modules producing `strategy_orders`. See [strategies/STRATEGY_MODULE_ARCHITECTURE.md](strategies/STRATEGY_MODULE_ARCHITECTURE.md). |
 | **admin/** | (Phase 3) | Admin CLI/API: publish commands to streams, read-only views over Postgres/Redis. |
 | **scheduler/** | (Phase 5) | Scheduled **reports**, **reconciliation** (orders/positions vs venue), and **misc** batch jobs; not streaming OMS/PMS. See [scheduler/SCHEDULER_ARCHITECTURE.md](scheduler/SCHEDULER_ARCHITECTURE.md) and [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md). |
 | **alembic/** | Shared | Postgres migrations; schema owned by OMS (orders, accounts, balances, balance_changes) and PMS (symbols, assets, positions). |
