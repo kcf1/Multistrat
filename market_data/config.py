@@ -78,6 +78,9 @@ OHLCV_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS: int = 0
 # Provider-scoped worker pool size for OHLCV ingest orchestration.
 # ``1`` preserves sequential behavior; increase cautiously after benchmark validation.
 OHLCV_PROVIDER_MAX_WORKERS: int = 4
+# Guardrail for concurrent in-flight OHLCV fetch calls per provider pool.
+# Keep this conservative relative to venue limits; ``1`` effectively serializes fetch calls.
+OHLCV_PROVIDER_MAX_IN_FLIGHT_FETCHES: int = 4
 
 # Basis (Binance futures basis endpoint) micro constants.
 BASIS_PAIRS: tuple[str, ...] = DATA_COLLECTION_SYMBOLS

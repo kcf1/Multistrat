@@ -9,16 +9,20 @@ policy window, not a bare ``max(open_time)`` resume.
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import psycopg2
+from loguru import logger
 
 from market_data.config import (
     OHLCV_INITIAL_BACKFILL_DAYS,
     OHLCV_KLINES_CHUNK_LIMIT,
+    OHLCV_PROVIDER_MAX_IN_FLIGHT_FETCHES,
     OHLCV_PROVIDER_MAX_WORKERS,
     OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
     MarketDataSettings,
@@ -49,6 +53,36 @@ class IngestSeriesResult:
     bars_upserted: int
     chunks: int
     fetch_give_ups: tuple[str, ...] = ()
+
+
+class _KlinesProviderFetchGate:
+    """Bound concurrent in-flight fetches to protect venue/infra under threaded ingest."""
+
+    def __init__(self, provider: KlinesProvider, semaphore: threading.BoundedSemaphore) -> None:
+        self._provider = provider
+        self._sem = semaphore
+
+    @property
+    def fetch_give_ups(self):  # noqa: ANN201 - passthrough for provider diagnostics
+        return getattr(self._provider, "fetch_give_ups", [])
+
+    def fetch_klines(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[OhlcvBar]:
+        with self._sem:
+            return self._provider.fetch_klines(
+                symbol,
+                interval,
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+                limit=limit,
+            )
 
 
 def resolve_ingest_start_ms(
@@ -284,7 +318,9 @@ def run_ingest_ohlcv(
     skip_existing_when_no_watermark: bool = False,
 ) -> list[IngestSeriesResult]:
     """Run ingest for every ``(symbol, interval)`` in settings."""
-    prov = provider if provider is not None else build_binance_spot_provider(settings)
+    base_provider = provider if provider is not None else build_binance_spot_provider(settings)
+    fetch_semaphore = threading.BoundedSemaphore(max(1, int(OHLCV_PROVIDER_MAX_IN_FLIGHT_FETCHES)))
+    prov: KlinesProvider = _KlinesProviderFetchGate(base_provider, fetch_semaphore)
     own_executor = False
     ex = provider_executor
     if ex is None:
@@ -313,17 +349,56 @@ def run_ingest_ohlcv(
             conn.close()
 
     try:
+        t0 = time.perf_counter()
+        n_tasks = len(settings.symbols)
+        logger.info(
+            "ingest_ohlcv run start: symbols={} intervals={} workers={} in_flight_fetch_cap={}",
+            len(settings.symbols),
+            len(settings.intervals),
+            ex.max_workers,
+            max(1, int(OHLCV_PROVIDER_MAX_IN_FLIGHT_FETCHES)),
+        )
         out: list[IngestSeriesResult] = []
         if ex.max_workers <= 1:
             for sym in settings.symbols:
                 out.extend(_ingest_symbol(sym))
+                logger.info("ingest_ohlcv symbol completed: {}", sym)
+            logger.info(
+                "ingest_ohlcv run done: submitted={} completed={} failed=0 wall_clock_s={:.3f}",
+                n_tasks,
+                n_tasks,
+                time.perf_counter() - t0,
+            )
             return out
 
         futures: list[Future[list[IngestSeriesResult]]] = []
+        future_to_symbol: dict[Future[list[IngestSeriesResult]], str] = {}
         for sym in settings.symbols:
-            futures.append(ex.submit(_ingest_symbol, sym))
+            fut = ex.submit(_ingest_symbol, sym)
+            futures.append(fut)
+            future_to_symbol[fut] = sym
+
+        failed_symbols: list[str] = []
         for fut in futures:
-            out.extend(fut.result())
+            sym = future_to_symbol[fut]
+            try:
+                out.extend(fut.result())
+                logger.info("ingest_ohlcv symbol completed: {}", sym)
+            except Exception:
+                failed_symbols.append(sym)
+                logger.exception("ingest_ohlcv symbol failed: {}", sym)
+
+        logger.info(
+            "ingest_ohlcv run done: submitted={} completed={} failed={} wall_clock_s={:.3f}",
+            n_tasks,
+            n_tasks - len(failed_symbols),
+            len(failed_symbols),
+            time.perf_counter() - t0,
+        )
+        if failed_symbols:
+            raise RuntimeError(
+                "ingest_ohlcv failed for symbol(s): " + ", ".join(sorted(failed_symbols))
+            )
         return out
     finally:
         if own_executor and ex is not None:

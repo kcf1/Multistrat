@@ -53,6 +53,7 @@ from market_data.jobs.ingest_top_trader_long_short import (
     run_ingest_top_trader_long_short,
 )
 from market_data.jobs.ingest_ohlcv import ingest_ohlcv_series
+from market_data.providers.executor import ProviderExecutor, ProviderExecutorConfig
 from market_data.jobs.repair_gap_open_interest import (
     detect_open_interest_time_gaps,
     run_repair_open_interest_gap,
@@ -400,6 +401,41 @@ def test_run_ingest_ohlcv_uses_separate_connection_per_symbol(monkeypatch: pytes
     for c in conns:
         c.close.assert_called_once()
     assert len(out) == 2
+
+
+def test_run_ingest_ohlcv_parallel_failure_isolated_and_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from market_data.jobs.ingest_ohlcv import IngestSeriesResult, run_ingest_ohlcv
+
+    calls: list[str] = []
+
+    def fake_connect(_url: str) -> MagicMock:
+        c = MagicMock()
+        c.close = MagicMock()
+        return c
+
+    def fake_ingest(conn, _prov, symbol: str, interval: str, **_kwargs) -> IngestSeriesResult:
+        _ = conn
+        calls.append(symbol)
+        if symbol == "ETHUSDT":
+            raise ValueError("boom")
+        return IngestSeriesResult(symbol, interval, 1, 1, ())
+
+    monkeypatch.setattr("market_data.jobs.ingest_ohlcv.psycopg2.connect", fake_connect)
+    monkeypatch.setattr("market_data.jobs.ingest_ohlcv.ingest_ohlcv_series", fake_ingest)
+
+    settings = SimpleNamespace(
+        database_url="postgresql://test",
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"),
+        intervals=("1h",),
+    )
+    ex = ProviderExecutor[IngestSeriesResult](ProviderExecutorConfig(max_workers=2))
+    with pytest.raises(RuntimeError, match="ETHUSDT"):
+        run_ingest_ohlcv(settings, provider=MagicMock(), provider_executor=ex)
+    ex.shutdown(wait=True)
+
+    assert sorted(calls) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 
 def test_run_repair_gap_noop_on_bad_range() -> None:
