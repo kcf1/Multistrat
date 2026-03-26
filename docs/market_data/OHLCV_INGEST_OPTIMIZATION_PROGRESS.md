@@ -161,8 +161,8 @@ Enhancements added for reliable benchmarking:
 | PE-1 | Add provider-level worker settings (default `4`) | `1` must preserve sequential behavior | Done |
 | PE-2 | Introduce `ProviderExecutor` abstraction | Wrap `ThreadPoolExecutor`, submit/wait/error helpers | Done |
 | PE-3 | Initialize provider + executor lifecycle centrally | Create once, reuse, shutdown at end | Done |
-| PE-4 | Integrate OHLCV job with executor first | Submit per-symbol tasks; preserve current ingest logic | Planned |
-| PE-5 | Enforce DB safety | One psycopg2 connection per task/worker; no shared connection | Planned |
+| PE-4 | Integrate OHLCV job with executor first | Submit per-symbol tasks; preserve current ingest logic | Done |
+| PE-5 | Enforce DB safety | One psycopg2 connection per task/worker; no shared connection | Done |
 | PE-6 | Keep rate-limit safety under concurrency | Shared limiter/cap per provider pool | Planned |
 | PE-7 | Add concurrency observability | Task counts, failures, dataset wall clock | Planned |
 | PE-8 | Extend to other datasets after OHLCV validation | basis/open-interest/taker/top-trader | Planned |

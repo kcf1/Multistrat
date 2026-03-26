@@ -10,6 +10,7 @@ policy window, not a bare ``max(open_time)`` resume.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -282,7 +283,7 @@ def run_ingest_ohlcv(
     use_watermark: bool = True,
     skip_existing_when_no_watermark: bool = False,
 ) -> list[IngestSeriesResult]:
-    """Run ingest for every ``(symbol, interval)`` in settings (sequential, shared limiter)."""
+    """Run ingest for every ``(symbol, interval)`` in settings."""
     prov = provider if provider is not None else build_binance_spot_provider(settings)
     own_executor = False
     ex = provider_executor
@@ -292,25 +293,38 @@ def run_ingest_ohlcv(
         )
         own_executor = True
 
-    try:
+    def _ingest_symbol(symbol: str) -> list[IngestSeriesResult]:
         conn = psycopg2.connect(settings.database_url)
         try:
-            out: list[IngestSeriesResult] = []
-            for sym in settings.symbols:
-                for iv in settings.intervals:
-                    out.append(
-                        ingest_ohlcv_series(
-                            conn,
-                            prov,
-                            sym,
-                            iv,
-                            use_watermark=use_watermark,
-                            skip_existing_when_no_watermark=skip_existing_when_no_watermark,
-                        )
+            out_symbol: list[IngestSeriesResult] = []
+            for iv in settings.intervals:
+                out_symbol.append(
+                    ingest_ohlcv_series(
+                        conn,
+                        prov,
+                        symbol,
+                        iv,
+                        use_watermark=use_watermark,
+                        skip_existing_when_no_watermark=skip_existing_when_no_watermark,
                     )
-            return out
+                )
+            return out_symbol
         finally:
             conn.close()
+
+    try:
+        out: list[IngestSeriesResult] = []
+        if ex.max_workers <= 1:
+            for sym in settings.symbols:
+                out.extend(_ingest_symbol(sym))
+            return out
+
+        futures: list[Future[list[IngestSeriesResult]]] = []
+        for sym in settings.symbols:
+            futures.append(ex.submit(_ingest_symbol, sym))
+        for fut in futures:
+            out.extend(fut.result())
+        return out
     finally:
         if own_executor and ex is not None:
             ex.shutdown(wait=True)

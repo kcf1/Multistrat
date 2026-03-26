@@ -367,6 +367,41 @@ def test_ingest_ohlcv_series_commits_per_chunk() -> None:
     assert conn.commit.call_count == 2
 
 
+def test_run_ingest_ohlcv_uses_separate_connection_per_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    from market_data.jobs.ingest_ohlcv import IngestSeriesResult, run_ingest_ohlcv
+
+    conns: list[MagicMock] = []
+    ingest_calls: list[tuple[int, str, str]] = []
+
+    def fake_connect(_url: str) -> MagicMock:
+        c = MagicMock()
+        c.close = MagicMock()
+        conns.append(c)
+        return c
+
+    def fake_ingest(conn, _prov, symbol: str, interval: str, **_kwargs) -> IngestSeriesResult:
+        ingest_calls.append((id(conn), symbol, interval))
+        return IngestSeriesResult(symbol, interval, 0, 0, ())
+
+    monkeypatch.setattr("market_data.jobs.ingest_ohlcv.psycopg2.connect", fake_connect)
+    monkeypatch.setattr("market_data.jobs.ingest_ohlcv.ingest_ohlcv_series", fake_ingest)
+
+    settings = SimpleNamespace(
+        database_url="postgresql://test",
+        symbols=("BTCUSDT", "ETHUSDT"),
+        intervals=("1h",),
+    )
+    out = run_ingest_ohlcv(settings, provider=MagicMock())
+
+    assert len(conns) == 2
+    assert len({id(c) for c in conns}) == 2
+    assert len(ingest_calls) == 2
+    assert ingest_calls[0][0] != ingest_calls[1][0]
+    for c in conns:
+        c.close.assert_called_once()
+    assert len(out) == 2
+
+
 def test_run_repair_gap_noop_on_bad_range() -> None:
     conn = MagicMock()
     p = MagicMock()
