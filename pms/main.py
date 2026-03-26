@@ -13,7 +13,12 @@ import sys
 
 from pms.asset_init import init_assets_stables, sync_assets_from_symbols
 from pms.asset_price_feed import run_asset_price_feed_step
-from pms.config import ASSET_PRICE_FEED_ASSETS, ASSET_PRICE_FEED_SOURCE
+from pms.config import (
+    ASSET_PRICE_FEED_ASSETS,
+    ASSET_PRICE_FEED_OHLCV_INTERVAL,
+    ASSET_PRICE_FEED_OHLCV_MAX_STALENESS_SECONDS,
+    ASSET_PRICE_FEED_SOURCE,
+)
 from pms.asset_price_providers import get_asset_price_provider
 from pms.config import PmsSettings
 from pms.log import logger
@@ -62,7 +67,10 @@ def main() -> None:
     if ASSET_PRICE_FEED_SOURCE and ASSET_PRICE_FEED_SOURCE.strip():
         feed_provider = get_asset_price_provider(
             ASSET_PRICE_FEED_SOURCE.strip(),
+            pg_connect=settings.database_url,
             base_url=settings.binance_price_feed_base_url,
+            interval=ASSET_PRICE_FEED_OHLCV_INTERVAL,
+            max_staleness_seconds=ASSET_PRICE_FEED_OHLCV_MAX_STALENESS_SECONDS,
         )
         if feed_provider is not None:
             feed_assets = list(ASSET_PRICE_FEED_ASSETS)

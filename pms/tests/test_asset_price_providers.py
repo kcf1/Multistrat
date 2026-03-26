@@ -5,6 +5,7 @@ See docs/pms/ASSET_PRICE_FEED_PLAN.md §3.2 step 5.
 """
 
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -12,6 +13,7 @@ from pms.asset_price_providers import (
     AssetPriceProvider,
     AssetPriceProviderError,
     BinanceAssetPriceProvider,
+    OhlcvDbAssetPriceProvider,
     get_asset_price_provider,
 )
 
@@ -183,3 +185,51 @@ class TestGetAssetPriceProvider:
         assert p is not None
         assert p.timeout == 5.0
         assert p.quote_asset == "BUSD"
+
+    def test_ohlcv_db_returns_provider(self):
+        p = get_asset_price_provider("ohlcv_db", pg_connect="postgres://localhost/db")
+        assert p is not None
+        assert isinstance(p, OhlcvDbAssetPriceProvider)
+
+    def test_ohlcv_db_without_pg_connect_returns_none(self):
+        p = get_asset_price_provider("ohlcv_db")
+        assert p is None
+
+
+class TestOhlcvDbAssetPriceProvider:
+    def _mock_conn_with_rows(self, assets_rows, ohlcv_rows):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_cur.fetchall.side_effect = [assets_rows, ohlcv_rows]
+        return mock_conn
+
+    def test_returns_fresh_close_prices(self):
+        now = datetime.now(timezone.utc)
+        mock_conn = self._mock_conn_with_rows(
+            [("BTC", "BTCUSDT"), ("ETH", "ETHUSDT")],
+            [("BTCUSDT", now - timedelta(minutes=5), 50123.5), ("ETHUSDT", now - timedelta(minutes=10), 3123.0)],
+        )
+        p = OhlcvDbAssetPriceProvider(lambda: mock_conn, interval="1h", max_staleness_seconds=7200)
+        out = p.get_prices(["BTC", "ETH"])
+        assert out == {"BTC": 50123.5, "ETH": 3123.0}
+
+    def test_excludes_stale_rows(self):
+        now = datetime.now(timezone.utc)
+        mock_conn = self._mock_conn_with_rows(
+            [("BTC", "BTCUSDT")],
+            [("BTCUSDT", now - timedelta(hours=5), 50123.5)],
+        )
+        p = OhlcvDbAssetPriceProvider(lambda: mock_conn, interval="1h", max_staleness_seconds=3600)
+        out = p.get_prices(["BTC"])
+        assert out == {}
+
+    def test_skips_assets_without_usd_symbol_or_missing_ohlcv(self):
+        now = datetime.now(timezone.utc)
+        mock_conn = self._mock_conn_with_rows(
+            [("BTC", "BTCUSDT")],
+            [("BTCUSDT", now - timedelta(minutes=2), 50000.0)],
+        )
+        p = OhlcvDbAssetPriceProvider(lambda: mock_conn, interval="1h", max_staleness_seconds=7200)
+        out = p.get_prices(["BTC", "DOGE"])
+        assert out == {"BTC": 50000.0}
