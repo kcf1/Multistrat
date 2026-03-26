@@ -34,6 +34,7 @@ import signal
 import sys
 import threading
 import time
+from typing import Any
 
 from loguru import logger
 
@@ -103,6 +104,47 @@ def _sleep_deadline(next_run: float | None) -> float:
     return 0.0 if next_run is None else next_run
 
 
+def _log_series_keys_summary(step_name: str, results: list[Any]) -> None:
+    """One-line summary of series keys processed/retrieved."""
+    if not results:
+        logger.info("{} series keys: none", step_name)
+        return
+
+    keys: set[str] = set()
+    for r in results:
+        if hasattr(r, "pair"):
+            pair = getattr(r, "pair")
+            contract_type = getattr(r, "contract_type", None)
+            period = getattr(r, "period", None)
+            keys.add("/".join([str(x) for x in (pair, contract_type, period) if x is not None]))
+            continue
+        symbol = getattr(r, "symbol", None)
+        if symbol is None:
+            continue
+        interval = getattr(r, "interval", None)
+        contract_type = getattr(r, "contract_type", None)
+        period = getattr(r, "period", None)
+        parts = [str(symbol)]
+        if contract_type is not None:
+            parts.append(str(contract_type))
+        if interval is not None:
+            parts.append(str(interval))
+        elif period is not None:
+            parts.append(str(period))
+        keys.add("/".join(parts))
+
+    if not keys:
+        logger.info("{} series keys: none", step_name)
+        return
+
+    shown = sorted(keys)
+    max_show = 12
+    preview = ", ".join(shown[:max_show])
+    if len(shown) > max_show:
+        preview += f", ... (+{len(shown) - max_show} more)"
+    logger.info("{} series keys: {}", step_name, preview)
+
+
 def _run_ingest_step() -> None:
     settings = load_settings()
     results = run_ingest_ohlcv(settings)
@@ -112,6 +154,7 @@ def _run_ingest_step() -> None:
         len(results),
         n,
     )
+    _log_series_keys_summary("ingest_ohlcv", results)
 
 
 def _run_correct_step() -> None:
@@ -123,6 +166,7 @@ def _run_correct_step() -> None:
         len(results),
         d,
     )
+    _log_series_keys_summary("correct_window", results)
 
 
 def _run_repair_step() -> None:
@@ -136,6 +180,7 @@ def _run_repair_step() -> None:
         with_gaps,
         bars,
     )
+    _log_series_keys_summary("repair_gap", results)
 
 
 def _run_basis_ingest_step() -> None:
@@ -147,6 +192,7 @@ def _run_basis_ingest_step() -> None:
         len(results),
         n,
     )
+    _log_series_keys_summary("ingest_basis_rate", results)
 
 
 def _run_basis_correct_step() -> None:
@@ -158,6 +204,7 @@ def _run_basis_correct_step() -> None:
         len(results),
         d,
     )
+    _log_series_keys_summary("correct_window_basis_rate", results)
 
 
 def _run_basis_repair_step() -> None:
@@ -171,6 +218,7 @@ def _run_basis_repair_step() -> None:
         with_gaps,
         rows,
     )
+    _log_series_keys_summary("repair_gap_basis_rate", results)
 
 
 def _run_open_interest_ingest_step() -> None:
@@ -182,6 +230,7 @@ def _run_open_interest_ingest_step() -> None:
         len(results),
         n,
     )
+    _log_series_keys_summary("ingest_open_interest", results)
 
 
 def _run_taker_ingest_step() -> None:
@@ -193,6 +242,7 @@ def _run_taker_ingest_step() -> None:
         len(results),
         n,
     )
+    _log_series_keys_summary("ingest_taker_buy_sell_volume", results)
 
 
 def _run_top_trader_ingest_step() -> None:
@@ -204,6 +254,7 @@ def _run_top_trader_ingest_step() -> None:
         len(results),
         n,
     )
+    _log_series_keys_summary("ingest_top_trader_long_short", results)
 
 
 def _run_open_interest_correct_step() -> None:
@@ -215,6 +266,7 @@ def _run_open_interest_correct_step() -> None:
         len(results),
         d,
     )
+    _log_series_keys_summary("correct_window_open_interest", results)
 
 
 def _run_taker_correct_step() -> None:
@@ -226,6 +278,7 @@ def _run_taker_correct_step() -> None:
         len(results),
         d,
     )
+    _log_series_keys_summary("correct_window_taker_buy_sell_volume", results)
 
 
 def _run_top_trader_correct_step() -> None:
@@ -237,6 +290,7 @@ def _run_top_trader_correct_step() -> None:
         len(results),
         d,
     )
+    _log_series_keys_summary("correct_window_top_trader_long_short", results)
 
 
 def _run_taker_repair_step() -> None:
@@ -250,6 +304,7 @@ def _run_taker_repair_step() -> None:
         with_gaps,
         rows,
     )
+    _log_series_keys_summary("repair_gap_taker_buy_sell_volume", results)
 
 
 def _run_top_trader_repair_step() -> None:
@@ -263,6 +318,7 @@ def _run_top_trader_repair_step() -> None:
         with_gaps,
         rows,
     )
+    _log_series_keys_summary("repair_gap_top_trader_long_short", results)
 
 
 def _run_open_interest_repair_step() -> None:
@@ -276,6 +332,7 @@ def _run_open_interest_repair_step() -> None:
         with_gaps,
         rows,
     )
+    _log_series_keys_summary("repair_gap_open_interest", results)
 
 
 def run_scheduler_loop(

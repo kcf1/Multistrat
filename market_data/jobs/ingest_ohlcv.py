@@ -352,17 +352,14 @@ def run_ingest_ohlcv(
         t0 = time.perf_counter()
         n_tasks = len(settings.symbols)
         logger.info(
-            "ingest_ohlcv run start: symbols={} intervals={} workers={} in_flight_fetch_cap={}",
-            len(settings.symbols),
-            len(settings.intervals),
+            "ingest_ohlcv run start: tasks={} workers={}",
+            n_tasks,
             ex.max_workers,
-            max(1, int(OHLCV_PROVIDER_MAX_IN_FLIGHT_FETCHES)),
         )
         out: list[IngestSeriesResult] = []
         if ex.max_workers <= 1:
             for sym in settings.symbols:
                 out.extend(_ingest_symbol(sym))
-                logger.info("ingest_ohlcv symbol completed: {}", sym)
             logger.info(
                 "ingest_ohlcv run done: submitted={} completed={} failed=0 wall_clock_s={:.3f}",
                 n_tasks,
@@ -383,7 +380,6 @@ def run_ingest_ohlcv(
             sym = future_to_symbol[fut]
             try:
                 out.extend(fut.result())
-                logger.info("ingest_ohlcv symbol completed: {}", sym)
             except Exception:
                 failed_symbols.append(sym)
                 logger.exception("ingest_ohlcv symbol failed: {}", sym)
