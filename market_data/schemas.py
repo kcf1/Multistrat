@@ -33,6 +33,8 @@ class OhlcvBar(BaseModel):
     close: Decimal
     volume: Decimal
     quote_volume: Decimal | None = None
+    taker_buy_base_volume: Decimal | None = None
+    taker_buy_quote_volume: Decimal | None = None
     trades: int | None = None
     close_time: datetime | None = None
 
@@ -58,6 +60,10 @@ class OhlcvBar(BaseModel):
             raise ValueError("volume must be >= 0")
         if self.quote_volume is not None and self.quote_volume < 0:
             raise ValueError("quote_volume must be >= 0 when set")
+        if self.taker_buy_base_volume is not None and self.taker_buy_base_volume < 0:
+            raise ValueError("taker_buy_base_volume must be >= 0 when set")
+        if self.taker_buy_quote_volume is not None and self.taker_buy_quote_volume < 0:
+            raise ValueError("taker_buy_quote_volume must be >= 0 when set")
         if self.trades is not None and self.trades < 0:
             raise ValueError("trades must be >= 0 when set")
         if self.close_time is not None and self.close_time < self.open_time:
@@ -120,6 +126,20 @@ def parse_binance_kline(
         except ValueError:
             quote_vol = None
 
+    taker_buy_base_vol: Decimal | None = None
+    if len(row) > 9 and row[9] is not None and str(row[9]).strip() != "":
+        try:
+            taker_buy_base_vol = _dec(9)
+        except ValueError:
+            taker_buy_base_vol = None
+
+    taker_buy_quote_vol: Decimal | None = None
+    if len(row) > 10 and row[10] is not None and str(row[10]).strip() != "":
+        try:
+            taker_buy_quote_vol = _dec(10)
+        except ValueError:
+            taker_buy_quote_vol = None
+
     return OhlcvBar(
         symbol=symbol,
         interval=interval,
@@ -130,6 +150,8 @@ def parse_binance_kline(
         close=_dec(4),
         volume=_dec(5),
         quote_volume=quote_vol,
+        taker_buy_base_volume=taker_buy_base_vol,
+        taker_buy_quote_volume=taker_buy_quote_vol,
         trades=trades,
         close_time=close_time,
     )

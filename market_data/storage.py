@@ -30,7 +30,7 @@ from market_data.schemas import (
 _OHLCV_UPSERT_SQL = """
 INSERT INTO ohlcv (
     symbol, interval, open_time, open, high, low, close, volume,
-    quote_volume, trades, close_time
+    quote_volume, taker_buy_base_volume, taker_buy_quote_volume, trades, close_time
 ) VALUES %s
 ON CONFLICT (symbol, interval, open_time) DO UPDATE SET
     open = EXCLUDED.open,
@@ -39,6 +39,8 @@ ON CONFLICT (symbol, interval, open_time) DO UPDATE SET
     close = EXCLUDED.close,
     volume = EXCLUDED.volume,
     quote_volume = EXCLUDED.quote_volume,
+    taker_buy_base_volume = EXCLUDED.taker_buy_base_volume,
+    taker_buy_quote_volume = EXCLUDED.taker_buy_quote_volume,
     trades = EXCLUDED.trades,
     close_time = EXCLUDED.close_time,
     ingested_at = now()
@@ -105,6 +107,8 @@ def _bar_row(b: OhlcvBar) -> tuple[Any, ...]:
         b.close,
         b.volume,
         b.quote_volume,
+        b.taker_buy_base_volume,
+        b.taker_buy_quote_volume,
         b.trades,
         b.close_time,
     )
@@ -171,7 +175,7 @@ def upsert_ohlcv_bars(conn: PsycopgConnection, bars: Sequence[OhlcvBar]) -> int:
             cur,
             _OHLCV_UPSERT_SQL,
             rows,
-            template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             page_size=min(500, len(rows)),
         )
     return len(rows)
@@ -271,9 +275,25 @@ def fetch_ohlc_by_open_times(
     symbol: str,
     interval: str,
     open_times: Sequence[datetime],
-) -> Mapping[datetime, tuple[Decimal, Decimal, Decimal, Decimal]]:
+) -> Mapping[
+    datetime,
+    tuple[
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal | None,
+        int | None,
+        datetime | None,
+        Decimal | None,
+        Decimal | None,
+    ],
+]:
     """
-    Return ``open_time -> (open, high, low, close)`` for rows that exist.
+    Return
+    ``open_time -> (open, high, low, close, volume, quote_volume, trades, close_time, taker_buy_base_volume, taker_buy_quote_volume)``
+    for rows that exist.
     Missing keys are omitted.
     """
     if not open_times:
@@ -283,15 +303,32 @@ def fetch_ohlc_by_open_times(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT open_time, open, high, low, close FROM ohlcv
+            SELECT
+                open_time, open, high, low, close, volume, quote_volume, trades, close_time,
+                taker_buy_base_volume, taker_buy_quote_volume
+            FROM ohlcv
             WHERE symbol = %s AND interval = %s AND open_time = ANY(%s)
             """,
             (sym, iv, list(open_times)),
         )
         rows = cur.fetchall()
-    out: dict[datetime, tuple[Decimal, Decimal, Decimal, Decimal]] = {}
-    for open_time, o, h, l, c in rows:
-        out[open_time] = (o, h, l, c)
+    out: dict[
+        datetime,
+        tuple[
+            Decimal,
+            Decimal,
+            Decimal,
+            Decimal,
+            Decimal,
+            Decimal | None,
+            int | None,
+            datetime | None,
+            Decimal | None,
+            Decimal | None,
+        ],
+    ] = {}
+    for open_time, o, h, l, c, v, qv, tr, ct, tbbv, tbqv in rows:
+        out[open_time] = (o, h, l, c, v, qv, tr, ct, tbbv, tbqv)
     return out
 
 

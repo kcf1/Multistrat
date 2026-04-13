@@ -476,7 +476,52 @@ def test_detect_ohlcv_time_gaps_interior() -> None:
 def test_log_drifts_counts_mismatch() -> None:
     ot = datetime(2020, 1, 1, tzinfo=timezone.utc)
     bar = _bar(int(ot.timestamp() * 1000), close=Decimal("2"))
-    existing = {ot: (Decimal("1"), Decimal("2"), Decimal("0.5"), Decimal("1"))}
+    existing = {
+        ot: (
+            Decimal("1"),
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("1"),
+            Decimal("10"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    n = _log_drifts(existing, [bar])
+    assert n == 1
+
+
+def test_log_drifts_counts_taker_volume_mismatch() -> None:
+    ot = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    bar = OhlcvBar(
+        symbol="BTCUSDT",
+        interval="1m",
+        open_time=ot,
+        open=Decimal("1"),
+        high=Decimal("2"),
+        low=Decimal("0.5"),
+        close=Decimal("1"),
+        volume=Decimal("10"),
+        taker_buy_base_volume=Decimal("11"),
+        taker_buy_quote_volume=Decimal("22"),
+    )
+    existing = {
+        ot: (
+            Decimal("1"),
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("1"),
+            Decimal("10"),
+            None,
+            None,
+            None,
+            Decimal("10"),
+            Decimal("22"),
+        )
+    }
     n = _log_drifts(existing, [bar])
     assert n == 1
 

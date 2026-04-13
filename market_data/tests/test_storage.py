@@ -68,6 +68,8 @@ def _bar(
         close=close,
         volume=Decimal("10"),
         quote_volume=Decimal("20"),
+        taker_buy_base_volume=Decimal("7"),
+        taker_buy_quote_volume=Decimal("14"),
         trades=100,
         close_time=ot,
     )
@@ -179,10 +181,14 @@ def test_upsert_uses_execute_values_with_on_conflict() -> None:
     assert "ON CONFLICT (symbol, interval, open_time)" in sql
     assert "DO UPDATE SET" in sql
     assert "ingested_at = now()" in sql
+    assert "taker_buy_base_volume = EXCLUDED.taker_buy_base_volume" in sql
+    assert "taker_buy_quote_volume = EXCLUDED.taker_buy_quote_volume" in sql
     assert len(args[2]) == 1
     row = args[2][0]
     assert row[0] == "BTCUSDT"
     assert row[1] == "1m"
+    assert row[9] == Decimal("7")
+    assert row[10] == Decimal("14")
 
 
 def test_upsert_basis_empty_no_cursor() -> None:

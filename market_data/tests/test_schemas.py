@@ -52,6 +52,8 @@ def test_parse_binance_kline_full() -> None:
     assert bar.close == Decimal("0.01577100")
     assert bar.volume == Decimal("148976.11427815")
     assert bar.quote_volume == Decimal("2434.19055334")
+    assert bar.taker_buy_base_volume == Decimal("1756.87402397")
+    assert bar.taker_buy_quote_volume == Decimal("28.46694368")
     assert bar.trades == 308
     assert bar.close_time == datetime(2017, 7, 9, 23, 59, 59, 999000, tzinfo=timezone.utc)
 
@@ -61,6 +63,8 @@ def test_parse_binance_kline_minimal_seven_elements() -> None:
     bar = parse_binance_kline(minimal, symbol="ETHUSDT", interval="5m")
     assert bar.symbol == "ETHUSDT"
     assert bar.quote_volume is None
+    assert bar.taker_buy_base_volume is None
+    assert bar.taker_buy_quote_volume is None
     assert bar.trades is None
     assert bar.close_time == datetime(2017, 7, 9, 23, 59, 59, 999000, tzinfo=timezone.utc)
 
@@ -83,6 +87,34 @@ def test_ohlcv_bar_frozen() -> None:
     bar = parse_binance_kline(list(_SAMPLE), symbol="BTCUSDT", interval="1m")
     with pytest.raises(ValidationError):
         bar.symbol = "OTHER"  # type: ignore[misc]
+
+
+def test_ohlcv_bar_rejects_negative_taker_buy_volumes() -> None:
+    with pytest.raises(ValueError, match="taker_buy_base_volume must be >= 0 when set"):
+        OhlcvBar(
+            symbol="BTCUSDT",
+            interval="1m",
+            open_time=datetime(2020, 1, 1, 0, 0, tzinfo=timezone.utc),
+            open=Decimal("1"),
+            high=Decimal("2"),
+            low=Decimal("0.5"),
+            close=Decimal("1"),
+            volume=Decimal("10"),
+            taker_buy_base_volume=Decimal("-1"),
+        )
+
+    with pytest.raises(ValueError, match="taker_buy_quote_volume must be >= 0 when set"):
+        OhlcvBar(
+            symbol="BTCUSDT",
+            interval="1m",
+            open_time=datetime(2020, 1, 1, 0, 0, tzinfo=timezone.utc),
+            open=Decimal("1"),
+            high=Decimal("2"),
+            low=Decimal("0.5"),
+            close=Decimal("1"),
+            volume=Decimal("10"),
+            taker_buy_quote_volume=Decimal("-1"),
+        )
 
 
 _BASIS_SAMPLE = {

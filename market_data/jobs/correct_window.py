@@ -2,7 +2,7 @@
 Rolling re-fetch of recent bars for vendor drift (Phase 4 §9.5 / §4.5.2).
 
 Re-downloads the last ``OHLCV_CORRECT_WINDOW_BARS`` (or override) per series, logs when
-stored OHLC differs from the API response, then upserts.
+stored OHLCV fields differ from the API response, then upserts.
 """
 
 from __future__ import annotations
@@ -41,7 +41,21 @@ class CorrectWindowResult:
 
 
 def _log_drifts(
-    existing: Mapping[datetime, tuple[Decimal, Decimal, Decimal, Decimal]],
+    existing: Mapping[
+        datetime,
+        tuple[
+            Decimal,
+            Decimal,
+            Decimal,
+            Decimal,
+            Decimal,
+            Decimal | None,
+            int | None,
+            datetime | None,
+            Decimal | None,
+            Decimal | None,
+        ],
+    ],
     bars: list[OhlcvBar],
 ) -> int:
     n = 0
@@ -49,12 +63,17 @@ def _log_drifts(
         old = existing.get(b.open_time)
         if old is None:
             continue
-        o, h, l, c = old
-        same = (
-            o == b.open
-            and h == b.high
-            and l == b.low
-            and c == b.close
+        same = old == (
+            b.open,
+            b.high,
+            b.low,
+            b.close,
+            b.volume,
+            b.quote_volume,
+            b.trades,
+            b.close_time,
+            b.taker_buy_base_volume,
+            b.taker_buy_quote_volume,
         )
         if not same:
             n += 1
