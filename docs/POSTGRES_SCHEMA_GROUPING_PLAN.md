@@ -6,37 +6,23 @@ This document updates the earlier draft: live table inventory (§1a), cursor gro
 
 ---
 
-## 1a. Current tables (checked against live DB)
+## 1a. Table layout (after phased migrations)
 
-**Environment:** `DATABASE_URL` from project `.env`, database reachable from this workspace.
+**Environment:** `DATABASE_URL` from project `.env`, database at **Alembic head**.
 
 **Query used:** `pg_tables` for all schemas other than `pg_catalog` / `information_schema`.
 
-**Tables present (all currently in `public`):**
+**Target layout (implemented):**
 
-| Schema | Table |
+| Schema | Tables |
 |--------|--------|
-| public | accounts |
-| public | alembic_version |
-| public | assets |
-| public | balance_changes |
-| public | balances |
-| public | basis_cursor |
-| public | basis_rate |
-| public | ingestion_cursor |
-| public | ohlcv |
-| public | open_interest |
-| public | open_interest_cursor |
-| public | orders |
-| public | positions |
-| public | scheduler_runs |
-| public | symbols |
-| public | taker_buy_sell_volume |
-| public | taker_buy_sell_volume_cursor |
-| public | top_trader_long_short |
-| public | top_trader_long_short_cursor |
+| **oms** | `orders`, `accounts`, `balances`, `balance_changes`, `symbols` |
+| **pms** | `assets`, `positions` |
+| **market_data** | `ohlcv`, `ingestion_cursor`, `basis_rate`, `basis_cursor`, `open_interest`, `open_interest_cursor`, `taker_buy_sell_volume`, `taker_buy_sell_volume_cursor`, `top_trader_long_short`, `top_trader_long_short_cursor` |
+| **scheduler** | `scheduler_runs` |
+| **public** | `alembic_version` (only listed app table; leave here by convention) |
 
-Re-run after migrations (from repo root, venv with deps):
+Re-run inventory after future migrations (from repo root, venv with deps):
 
 ```python
 import os
@@ -177,7 +163,7 @@ Do **not** move all tables yet. Land the connection helper + **cross-schema** SQ
 | 1–4 | Package **`pgconn/`**: `configure_for_oms`, `configure_for_pms`, `configure_for_market_data`, `configure_for_scheduler` run `SET search_path TO <home>, public` on real `psycopg2` connections only (skips mocks). Schema name constants: `SCHEMA_OMS`, `SCHEMA_PMS`, `SCHEMA_MARKET_DATA`, `SCHEMA_SCHEDULER` (for future qualified cross-schema SQL). Optional `pgconn.connect(dsn, PostgresService.…)` wrapper exists. |
 | 2–3 | Alembic revision **`a7b8c9d0e1f2`** (`create_app_schemas_postgres.py`): `CREATE SCHEMA IF NOT EXISTS` for `oms`, `pms`, `market_data`, `scheduler`; `GRANT USAGE` and `GRANT CREATE` to `CURRENT_USER`. |
 | Wiring | Every production `psycopg2.connect` path in **OMS**, **PMS**, **market_data** jobs, **scheduler** jobs, **scripts** listed in §7, integration tests in §7, and **`strategies/research/mom_research.py`** (SQLAlchemy `connect_args` for `market_data,public`) calls the matching `configure_for_*` immediately after connect. |
-| Not done yet | **Cross-schema** SQL still uses unqualified names where tables live in `public` (safe until phased `ALTER … SET SCHEMA`). Add `oms.*` / `pms.*` / `market_data.*` per §7.8 in later phases. |
+| Cross-schema SQL | Phases **1–4** migrations + app updates: PMS and scheduler use **`schema.table`** for non-home reads (e.g. `oms.orders`, `pms.positions`, `market_data.ohlcv`); home tables stay unqualified per §7.8. |
 
 ### Phase 1. OMS first
 
@@ -326,6 +312,16 @@ Do **not** move all tables yet. Land the connection helper + **cross-schema** SQ
 4. Re-run the full integration flow: OMS -> PMS -> market_data -> scheduler.
 5. Keep `public.alembic_version` unless you have a strong reason to move it.
 
+#### Phase 5 cleanup status in this repo (implemented)
+
+| Step | What was done |
+|------|----------------|
+| 1 | **[ARCHITECTURE.md](ARCHITECTURE.md) §3** rewritten for **`oms` / `pms` / `market_data` / `scheduler` / `public`**; diagram and module summaries point at qualified cross-schema reads where relevant. **This doc §1a** updated to post-migration inventory. **[scheduler/SCHEDULER_ARCHITECTURE.md](scheduler/SCHEDULER_ARCHITECTURE.md)** §7–§8 note `scheduler` schema and `oms.orders` / `pms.positions` in jobs. |
+| 2 | **No temporary cutover `search_path` shims** were left in application code; only **`pgconn`** defaults remain. |
+| 3 | **Scripts** (§7.6): each script already calls **`configure_for_*`** matching the SQL it runs on that connection; optional full qualification everywhere was **not** applied (per §7.8 Rule 4, documented `search_path` per connection is sufficient). |
+| 4 | Automated tests: **`pytest`** for `oms/tests`, `pms/tests`, `market_data/tests`, `scheduler/tests` — run in CI / locally after schema changes. |
+| 5 | **`public.alembic_version`** unchanged. |
+
 ### Recommended revision structure
 
 Use multiple small Alembic revisions instead of one giant move:
@@ -399,9 +395,9 @@ Scan method: ripgrep for `INSERT INTO` / `FROM` / `UPDATE` / `DELETE FROM` again
 | File | Tables referenced |
 |------|---------------------|
 | [scheduler/run_history.py](../scheduler/run_history.py) | `scheduler_runs` |
-| [scheduler/jobs/reports/position_snapshot_hourly.py](../scheduler/jobs/reports/position_snapshot_hourly.py) | `positions` |
-| [scheduler/jobs/reconciliation/order_recon.py](../scheduler/jobs/reconciliation/order_recon.py) | `orders` |
-| [scheduler/jobs/reconciliation/position_recon.py](../scheduler/jobs/reconciliation/position_recon.py) | `positions` |
+| [scheduler/jobs/reports/position_snapshot_hourly.py](../scheduler/jobs/reports/position_snapshot_hourly.py) | `pms.positions` (cross-schema) |
+| [scheduler/jobs/reconciliation/order_recon.py](../scheduler/jobs/reconciliation/order_recon.py) | `oms.orders` (cross-schema) |
+| [scheduler/jobs/reconciliation/position_recon.py](../scheduler/jobs/reconciliation/position_recon.py) | `pms.positions` (cross-schema) |
 
 ### 7.6 Scripts and research
 
@@ -480,4 +476,4 @@ Prefer **fully qualified** names for all application tables, **or** one `SET sea
 
 ---
 
-*Last updated: §7.8 chosen policy (`search_path` at home, qualify cross-schema); codebase scan in §7.*
+*Last updated: Phases 0–5 implemented (schemas + migrations + docs); §7.8 policy; §1a reflects final table placement.*

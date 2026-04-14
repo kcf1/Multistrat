@@ -1,8 +1,8 @@
 # Current Architecture — Modules, Data Stores, and Interfaces
 
-Single reference for the multistrategy trading system: directory layout by module, Postgres schema (all tables), Redis streams and keys, and pointers to detailed docs.
+Single reference for the multistrategy trading system: directory layout by module, Postgres layout (schemas + tables), Redis streams and keys, and pointers to detailed docs.
 
-**See also:** [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md), [PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md), [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md), [DATASET_INGESTION_STEPS.md](market_data/DATASET_INGESTION_STEPS.md), [oms/OMS_ARCHITECTURE.md](oms/OMS_ARCHITECTURE.md), [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md), [risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md), [strategies/STRATEGY_MODULE_ARCHITECTURE.md](strategies/STRATEGY_MODULE_ARCHITECTURE.md).
+**See also:** [POSTGRES_SCHEMA_GROUPING_PLAN.md](POSTGRES_SCHEMA_GROUPING_PLAN.md) (per-service `search_path`, cross-schema `schema.table`), [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md), [PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md), [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md), [DATASET_INGESTION_STEPS.md](market_data/DATASET_INGESTION_STEPS.md), [oms/OMS_ARCHITECTURE.md](oms/OMS_ARCHITECTURE.md), [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md), [risk/RISK_SERVICE_PLAN.md](risk/RISK_SERVICE_PLAN.md), [strategies/STRATEGY_MODULE_ARCHITECTURE.md](strategies/STRATEGY_MODULE_ARCHITECTURE.md).
 
 ---
 
@@ -21,23 +21,22 @@ Single reference for the multistrategy trading system: directory layout by modul
                     ┌───────────────────────────────────────┼───────────────────────────────────────┐
                     │                                       │                                       │
                     ▼                                       ▼                                       ▼
-           ┌───────────────────┐                ┌───────────────────┐                ┌───────────────────┐
-           │ Broker (Binance)  │                │ Redis             │                │ Postgres           │
-           │ REST + User stream│                │ orders:*,         │                │ orders, accounts,  │
-           └───────────────────┘                │ account:*,        │                │ balances,         │
-                                               │ oms_fills stream  │                │ balance_changes,  │
-                                               └─────────┬─────────┘                │ symbols, assets,  │
-                                                         │                          │ positions (PMS)   │
+           ┌───────────────────┐                ┌───────────────────┐                ┌────────────────────────────┐
+           │ Broker (Binance)  │                │ Redis             │                │ Postgres (schemas)         │
+           │ REST + User stream│                │ orders:*,         │                │ oms: orders, accounts, …   │
+           └───────────────────┘                │ account:*,        │                │ pms: assets, positions     │
+                                               │ oms_fills stream  │                │ market_data: ohlcv, …      │
+                                               └─────────┬─────────┘                │ scheduler: scheduler_runs  │
+                                                         │                          │ public: alembic_version    │
                                                          │
                                                          ▼
-                                                ┌───────────────────┐   Read: orders, balances,
-                                                │ PMS                │   symbols (→ legs), assets (→ usd_price)
+                                                ┌───────────────────┐   Cross-schema reads (e.g. `oms.orders`,
+                                                │ PMS                │   `oms.symbols`) — see grouping plan §7.8.
                                                 │ • Read Postgres    │ ◄───────────────────────┘
-                                                │   (orders,         │
-                                                │   balance_changes, │
-                                                │   symbols, assets) │
+                                                │   (OMS + PMS       │
+                                                │    tables)       │
                                                 │ • Derive positions │
-                                                │ • Write positions  │
+                                                │ • Write `pms` home │
                                                 └───────────────────┘
 ```
 
@@ -48,13 +47,13 @@ Single reference for the multistrategy trading system: directory layout by modul
 | Directory | Owner | Purpose |
 |-----------|--------|---------|
 | **oms/** | OMS | Order management: consume `risk_approved` / `cancel_requested`, broker adapters, Redis order/account store, sync to Postgres, produce `oms_fills`. |
-| **pms/** | PMS | Portfolio: read Postgres only (orders, balance_changes, symbols, assets) → derive positions → write `positions` table. Does not consume Redis. |
+| **pms/** | PMS | Portfolio: read Postgres (**`oms.*`** cross-schema + **`pms`** home) → derive positions → write **`pms.positions`**. Does not consume Redis. |
 | **risk/** | Risk | Pre-trade: consume `strategy_orders`, rule engine (optional), produce `risk_approved`. |
 | **market_data/** | (Phase 4) | Public market feeds → Postgres (`ohlcv`, …) + Redis hot keys (`market:{symbol}:…`). Default symbol universe: [`market_data/universe.py`](../market_data/universe.py) (`DATA_COLLECTION_SYMBOLS`, USDT spot only). See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md). |
 | **strategies/** | (Phase 6) | Dedicated strategy domain package (isolated from infra modules): strategy runner, shared strategy contracts, and per-strategy modules producing `strategy_orders`. See [strategies/STRATEGY_MODULE_ARCHITECTURE.md](strategies/STRATEGY_MODULE_ARCHITECTURE.md). |
 | **admin/** | (Phase 3) | Admin CLI/API: publish commands to streams, read-only views over Postgres/Redis. |
 | **scheduler/** | (Phase 5) | Scheduled **reports**, **reconciliation** (orders/positions vs venue), and **misc** batch jobs; not streaming OMS/PMS. See [scheduler/SCHEDULER_ARCHITECTURE.md](scheduler/SCHEDULER_ARCHITECTURE.md) and [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md). |
-| **alembic/** | Shared | Postgres migrations; schema owned by OMS (orders, accounts, balances, balance_changes) and PMS (symbols, assets, positions). |
+| **alembic/** | Shared | Postgres migrations; revisions create tables then **move** them into app schemas **`oms`**, **`pms`**, **`market_data`**, **`scheduler`** (see [POSTGRES_SCHEMA_GROUPING_PLAN.md](POSTGRES_SCHEMA_GROUPING_PLAN.md)). |
 | **scripts/** | Shared | E2E tests, deploy, reset (e.g. `e2e_with_risk.py`, `update_and_deploy.ps1`, `reset_redis_postgres.ps1`). |
 | **docs/** | Shared | Architecture and phase plans; `docs/oms/`, `docs/pms/`, `docs/risk/` for module-specific docs. |
 
@@ -62,43 +61,48 @@ Single reference for the multistrategy trading system: directory layout by modul
 
 ## 3. Postgres schema (current)
 
-All tables are managed via **Alembic** under `alembic/versions/`. OMS writes orders, accounts, balances, balance_changes; OMS or a sync job populates **symbols**; PMS (or asset feed) populates **assets** and writes **positions**.
+All application tables are created by **Alembic** then moved into **owner schemas** (`oms`, `pms`, `market_data`, `scheduler`). Each service sets `SET search_path TO <home>, public` on connect (**`pgconn`**); SQL against another module’s tables uses qualified names (e.g. `oms.orders`, `pms.positions`, `market_data.ohlcv`). **`public.alembic_version`** stays in `public` for default Alembic behavior. Full mapping: [POSTGRES_SCHEMA_GROUPING_PLAN.md](POSTGRES_SCHEMA_GROUPING_PLAN.md) §5–§7.8.
 
-### 3.1 OMS-owned tables
+### 3.1 Schema `oms` (OMS home)
 
 | Table | Purpose | Key columns / grain |
 |-------|---------|----------------------|
 | **orders** | Audit and recovery; synced from OMS Redis on terminal status + periodic | `internal_id` (UUID), `account_id` (TEXT, broker account id), `broker`, `broker_order_id`, `symbol`, `side`, `order_type`, `quantity`, `price`, `limit_price`, `time_in_force`, `status`, `executed_qty`, `book`, `comment`, `binance_*`, `payload` (JSONB). See [oms/OMS_ORDERS_DB_FIELDS.md](oms/OMS_ORDERS_DB_FIELDS.md). |
 | **accounts** | One row per broker account | `id` (PK), `account_id` (broker id), `name`, `broker`, `env`, `created_at`, `config` (JSONB). Unique `(broker, account_id)`. |
 | **balances** | Current balance per asset | `id`, `account_id` (FK → accounts.id), `asset`, `available`, `locked`, `updated_at`. Unique `(account_id, asset)`. |
-| **balance_changes** | History of deposits/withdrawals/transfers | `id`, `account_id` (FK), `asset`, `book`, `change_type`, `delta`, `balance_before`, `balance_after`, `event_type`, `broker_event_id`, `event_time`, `created_at`, `payload`. See [oms/BALANCE_CHANGES_HISTORY.md](oms/BALANCE_CHANGES_HISTORY.md). |
+| **balance_changes** | History of deposits/withdrawals/transfers | `id`, `account_id` (TEXT broker id), `asset`, `book`, `change_type`, `delta`, … See [oms/BALANCE_CHANGES_HISTORY.md](oms/BALANCE_CHANGES_HISTORY.md). |
+| **symbols** | Trading pair metadata; OMS writes; PMS reads via **`oms.symbols`** | `symbol` (PK), `base_asset`, `quote_asset`, `tick_size`, `lot_size`, `min_qty`, `product_type`, `broker`, `updated_at`. |
 
-### 3.2 Reference and valuation tables
-
-| Table | Purpose | Key columns / grain |
-|-------|---------|----------------------|
-| **symbols** | Trading pair metadata; used for order→legs (base/quote) in position derivation | `symbol` (PK), `base_asset`, `quote_asset`, `tick_size`, `lot_size`, `min_qty`, `product_type`, `broker`, `updated_at`. Populated by OMS symbol sync (e.g. from exchange info) or reference job. See §12.2.14 in Phase 2 plan. |
-| **assets** | Per-asset USD price for position valuation | `asset` (PK), `usd_symbol`, `usd_price`, `price_source`, `updated_at`. Populated by PMS asset init + asset price feed (e.g. Binance, manual, CoinGecko). See [pms/ASSET_PRICE_FEED_PLAN.md](pms/ASSET_PRICE_FEED_PLAN.md). |
-
-### 3.3 PMS-owned table
+### 3.2 Schema `pms` (PMS home)
 
 | Table | Purpose | Key columns / grain |
 |-------|---------|----------------------|
-| **positions** | Derived positions at asset level; source of truth for PnL/valuation | Grain: `(broker, account_id, book, asset)`. Columns: `id`, `broker`, `account_id`, `book`, `asset`, `open_qty`, `position_side`, `usd_price`, `usd_notional` (generated: `open_qty * usd_price`), `updated_at`. Written by PMS `granular_store.write_pms_positions`. See [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md), [pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md](pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md). |
+| **assets** | Per-asset USD price for position valuation | `asset` (PK), `usd_symbol`, `usd_price`, `price_source`, `updated_at`. Populated by PMS asset init + asset price feed. See [pms/ASSET_PRICE_FEED_PLAN.md](pms/ASSET_PRICE_FEED_PLAN.md). |
+| **positions** | Derived positions at asset level | Grain `(broker, account_id, book, asset)`; `usd_notional` generated. Written by `granular_store.write_pms_positions`. See [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md). |
 
-### 3.4 Market data (Phase 4)
+### 3.3 Schema `market_data` (ingest + cursors)
 
-| Table | Purpose | Key columns / grain |
-|-------|---------|---------------------|
-| **ohlcv** | Historical OHLCV bars per symbol and interval | PK `(symbol, interval, open_time)`; columns `open`–`close`, `volume`, optional `quote_volume`, `trades`, `close_time`, `ingested_at`. See [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md) §4. |
+| Table family | Purpose |
+|--------------|---------|
+| **ohlcv** | Historical OHLCV bars per symbol and interval (PK `(symbol, interval, open_time)`). PMS OHLCV price provider reads **`market_data.ohlcv`**. |
+| **Cursors** | `ingestion_cursor`, `basis_cursor`, `open_interest_cursor`, `taker_buy_sell_volume_cursor`, `top_trader_long_short_cursor` — ingest high-water marks. |
+| **Series** | `basis_rate`, `open_interest`, `taker_buy_sell_volume`, `top_trader_long_short`. |
 
-### 3.5 Scheduler / batch jobs (Phase 5)
+Details: [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md), [market_data/DATASET_INGESTION_STEPS.md](market_data/DATASET_INGESTION_STEPS.md).
+
+### 3.4 Schema `scheduler` (scheduler home)
 
 | Table | Purpose | Key columns / grain |
 |-------|---------|----------------------|
-| **scheduler_runs** | Audit log for each scheduled job invocation | `id` (PK), `job_id`, `started_at`, `finished_at`, `status` (`ok` / `error`), `error`, `payload` (JSONB). Written by `scheduler/run_history.py`. See [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md) §4.4. |
+| **scheduler_runs** | Audit log per job invocation | `id` (PK), `job_id`, `started_at`, `finished_at`, `status`, `error`, `payload` (JSONB). Written by `scheduler/run_history.py`. See [PHASE5_DETAILED_PLAN.md](PHASE5_DETAILED_PLAN.md) §4.4. |
 
-**Reports / reconciliation (CSV, not in Postgres):** under **`scheduler/reports_out/`** (gitignored): `position_snapshot_hourly` writes **four** position files per run; **`order_reconciliation_binance`** / **`position_reconciliation_binance`** emit summary and diff CSVs (filled **orders** vs Binance **`myTrades`**, and **positions** vs spot wallet balances). Details: [scheduler/SCHEDULER_ARCHITECTURE.md](scheduler/SCHEDULER_ARCHITECTURE.md) §8.
+### 3.5 Schema `public` (migrations only)
+
+| Table | Purpose |
+|-------|---------|
+| **alembic_version** | Alembic revision pointer (convention: leave here). |
+
+**Reports / reconciliation (CSV, not in Postgres):** under **`scheduler/reports_out/`** (gitignored): `position_snapshot_hourly` reads **`pms.positions`** and writes four CSVs; **`order_reconciliation_binance`** reads **`oms.orders`**; **`position_reconciliation_binance`** aggregates **`pms.positions`**. Details: [scheduler/SCHEDULER_ARCHITECTURE.md](scheduler/SCHEDULER_ARCHITECTURE.md) §8.
 
 ---
 
@@ -132,14 +136,14 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 ### 5.1 OMS (`oms/`)
 
 - **Inputs:** Redis streams `risk_approved`, `cancel_requested`; broker user data stream (fills, account/balance updates).
-- **Outputs:** Redis order store and account store; stream `oms_fills`; Postgres `orders`, `accounts`, `balances`, `balance_changes` (sync). Optionally syncs **symbols** from broker (e.g. `oms/symbol_sync.py`).
+- **Outputs:** Redis order store and account store; stream `oms_fills`; Postgres **`oms`** tables `orders`, `accounts`, `balances`, `balance_changes`, `symbols` (sync).
 - **Details:** [oms/OMS_ARCHITECTURE.md](oms/OMS_ARCHITECTURE.md).
 
 ### 5.2 PMS (`pms/`)
 
-- **Inputs:** Postgres only: `orders`, `balance_changes`, `symbols`, `assets`. (PMS does not consume Redis.)
-- **Outputs:** Postgres `positions` (broker, account_id, book, asset, open_qty, position_side, usd_price, usd_notional, updated_at).
-- **Logic:** Each tick: derive positions from orders + balance_changes (FIFO, symbol→base/quote via `symbols`), resolve USD price from `assets`, write via `granular_store.write_pms_positions`. Asset init and price feed: [pms/ASSET_PRICE_FEED_PLAN.md](pms/ASSET_PRICE_FEED_PLAN.md).
+- **Inputs:** Postgres: cross-schema reads **`oms.orders`**, **`oms.balance_changes`**, **`oms.symbols`**, **`oms.balances`** (optional); home **`pms.assets`**. (PMS does not consume Redis.)
+- **Outputs:** Postgres **`pms.positions`** (broker, account_id, book, asset, open_qty, position_side, usd_price, usd_notional, updated_at).
+- **Logic:** Each tick: derive positions from orders + balance_changes (FIFO, symbol→base/quote via `oms.symbols`), resolve USD price from `assets`, write via `granular_store.write_pms_positions`. Asset init and price feed: [pms/ASSET_PRICE_FEED_PLAN.md](pms/ASSET_PRICE_FEED_PLAN.md).
 - **Details:** [pms/PMS_ARCHITECTURE.md](pms/PMS_ARCHITECTURE.md).
 
 ### 5.3 Risk (`risk/`)
@@ -151,13 +155,13 @@ Constants: `risk/schemas.py` (STRATEGY_ORDERS_STREAM, RISK_APPROVED_STREAM); `om
 ### 5.4 Market data (Phase 4, `market_data/`)
 
 - **Inputs:** Binance (or other) **public** REST + WebSocket; config symbols/intervals.
-- **Outputs:** Postgres **`ohlcv`**; Redis keys under `market:{symbol}:…` (§4.3, **deferred** until PHASE4 §9.7–9.8).
+- **Outputs:** Postgres **`market_data`** tables (`ohlcv`, cursors, series — see §3.3); Redis keys under `market:{symbol}:…` (§4.3, **deferred** until PHASE4 §9.7–9.8).
 - **Details:** [PHASE4_DETAILED_PLAN.md](PHASE4_DETAILED_PLAN.md).
 
 ### 5.5 Admin (Phase 3, `admin/`)
 
 - **Commands:** Publish to `risk_approved` (manual order), `cancel_requested` (cancel). Optional: flush risk queue, refresh account.
-- **Read-only:** Postgres `orders`, `accounts`, `balances`, `positions`, **symbols**, **assets**; Redis order/account store; optional `oms_fills` tail.
+- **Read-only:** Postgres **`oms.*`** / **`pms.*`** as needed (`orders`, `accounts`, `balances`, `positions`, `symbols`, `assets`, …); Redis order/account store; optional `oms_fills` tail.
 - **Details:** [PHASE3_DETAILED_PLAN.md](PHASE3_DETAILED_PLAN.md).
 
 ---
