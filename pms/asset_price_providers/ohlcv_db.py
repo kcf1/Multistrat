@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from pgconn import configure_for_pms
+from pgconn import SCHEMA_MARKET_DATA, configure_for_pms
 from pms.log import logger
 
 from .interface import AssetPriceProvider
@@ -72,10 +72,10 @@ class OhlcvDbAssetPriceProvider(AssetPriceProvider):
             return {}
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT DISTINCT ON (symbol)
                     symbol, open_time, close, ingested_at
-                FROM ohlcv
+                FROM {SCHEMA_MARKET_DATA}.ohlcv
                 WHERE symbol = ANY(%s)
                   AND interval = %s
                 ORDER BY symbol, open_time DESC
