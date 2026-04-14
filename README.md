@@ -13,7 +13,7 @@ The system is built on a microservices architecture with event-driven communicat
   - `strategy_orders`: Order intents from strategies
   - `risk_approved`: Risk-approved orders
   - `oms_fills`: Order fills from the Order Management System
-- **Postgres**: Central database for persistent data storage (orders audit, fills, positions, balances)
+- **Postgres**: Central database for persistent data; **logical schemas** group tables by owning service (**`oms`**, **`pms`**, **`market_data`**, **`scheduler`**) with **`public`** for **`alembic_version`**. Application code sets **`search_path`** per process via **`pgconn`**; cross-schema SQL uses qualified names. See **[docs/POSTGRES_SCHEMA_GROUPING_PLAN.md](docs/POSTGRES_SCHEMA_GROUPING_PLAN.md)** and **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** §3.
 - **Redis**: OMS order staging (hashes + indexes); periodic sync of orders to Postgres for audit
 
 ## Core Services
@@ -22,7 +22,7 @@ All core services operate as infinite loop-based processes that consume and prod
 
 ### Market Data Service
 - Fetches market data feeds from external sources (e.g. Binance spot klines, perps basis & open interest)
-- Updates Postgres database with historical data (`ohlcv`, `basis_rate`, `open_interest`, …)
+- Updates Postgres (**`market_data`** schema) with historical data (`ohlcv`, `basis_rate`, `open_interest`, …)
 - Maintains Redis cache for real-time data access
 
 ### Strategies Service
@@ -38,7 +38,7 @@ All core services operate as infinite loop-based processes that consume and prod
 
 ### Order Management System (OMS)
 - Consumes approved orders from `risk_approved` stream
-- Stages orders in Redis (fast updates); periodically syncs to Postgres `orders` table for audit
+- Stages orders in Redis (fast updates); periodically syncs to Postgres **`oms.orders`** for audit
 - Executes orders via broker API (polling/websocket)
 - Publishes fills and rejections to `oms_fills` stream
 

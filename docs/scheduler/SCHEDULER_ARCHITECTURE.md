@@ -135,6 +135,8 @@ Per workspace rules (**`.cursor/rules/env-and-config.mdc`**):
 
 Migrations: **`n5o6p7q8r9s0`** creates **`scheduler_runs`** in `public`; **`f2a3b4c5d6e7`** moves it to schema **`scheduler`**. Runtime: **`scheduler/run_history.py`** uses **`configure_for_scheduler`** (`SET search_path TO scheduler, public`) so inserts/updates stay unqualified. Index: **`(job_id, started_at DESC)`** for recent history per job. See [POSTGRES_SCHEMA_GROUPING_PLAN.md](../POSTGRES_SCHEMA_GROUPING_PLAN.md) §6.1 Phase 4.
 
+**Tests:** With **`DATABASE_URL`** set and Alembic at head, **`scheduler/tests/test_postgres_integration.py`** asserts **`record_run_start` / `record_run_end`** against **`scheduler.scheduler_runs`** and a small **`pg_tables`** inventory for grouped schemas.
+
 ---
 
 ## 8. Built-in jobs (current)

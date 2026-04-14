@@ -55,16 +55,21 @@ def _bar(
     symbol: str = "BTCUSDT",
     interval: str = "1m",
     open_time: datetime | None = None,
+    open: Decimal = Decimal("1"),
     close: Decimal = Decimal("1"),
+    high: Decimal | None = None,
+    low: Decimal | None = None,
 ) -> OhlcvBar:
     ot = open_time or datetime(2020, 1, 1, 0, 0, tzinfo=timezone.utc)
+    hi = high if high is not None else max(open, close) + Decimal("1")
+    lo = low if low is not None else max(Decimal("0"), min(open, close) - Decimal("0.5"))
     return OhlcvBar(
         symbol=symbol,
         interval=interval,
         open_time=ot,
-        open=Decimal("1"),
-        high=Decimal("2"),
-        low=Decimal("0.5"),
+        open=open,
+        high=hi,
+        low=lo,
         close=close,
         volume=Decimal("10"),
         quote_volume=Decimal("20"),

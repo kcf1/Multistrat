@@ -24,9 +24,9 @@ Single reference for the Order Management System (OMS) codebase: data flow, Redi
            ┌───────────────────┐              ┌───────────────────┐              ┌───────────────────┐
            │   Broker          │              │   Redis Store     │              │   Postgres        │
            │  (Binance)        │              │                   │              │                   │
-           │                   │              │  orders:*         │              │  orders           │
-           │  REST API:         │              │  account:*        │              │  accounts         │
-           │  • place_order     │              │  (+ :balances /   │              │  balances         │
+           │                   │              │  orders:*         │              │  oms.orders       │
+           │  REST API:         │              │  account:*        │              │  oms.accounts     │
+           │  • place_order     │              │  (+ :balances /   │              │  oms.balances     │
            │  • cancel_order    │              │    :positions)   │              │                   │
            │  • account snapshot│              │                   │              │  (no positions     │
            │                    │              │                   │              │   table in P2)    │
@@ -44,7 +44,7 @@ Single reference for the Order Management System (OMS) codebase: data flow, Redi
 
 - **Inbound (orders):** `risk_approved` (orders to execute), `cancel_requested` (cancel by order_id or broker_order_id+symbol).
 - **Inbound (account):** Broker user data stream events (`outboundAccountPosition`, `balanceUpdate`) + periodic REST via adapter **`get_account_snapshot`** (same unified shape as listener snapshots; no separate `get_futures_account` in this codebase).
-- **Outbound:** `oms_fills` (fill/reject/cancelled/expired), Postgres `orders`, `accounts`, `balances` (when `sync_balances=True`), `balance_changes` (from balanceUpdate); **positions** in Redis only. PMS reads orders and balances; derives positions from orders. See **docs/pms/PMS_ARCHITECTURE.md**.
+- **Outbound:** `oms_fills` (fill/reject/cancelled/expired), Postgres **`oms.orders`**, **`oms.accounts`**, **`oms.balances`** (when `sync_balances=True`), **`oms.balance_changes`** (from balanceUpdate); **positions** in Redis only. Connections use **`pgconn.configure_for_oms`** so same-schema SQL stays unqualified in code. PMS reads OMS tables with explicit **`oms.*`** qualifiers. See **docs/pms/PMS_ARCHITECTURE.md** and **docs/POSTGRES_SCHEMA_GROUPING_PLAN.md**.
 - **Broker:** Binance REST (place/cancel, account snapshots) + user data stream (execution reports + account updates). Other brokers plug in via the same adapter interface.
 
 ---
@@ -165,12 +165,14 @@ Terminal statuses: `filled`, `rejected`, `cancelled`, `expired` (`TERMINAL_STATU
 
 ## 8. Sync to Postgres
 
+OMS-owned tables live in the **`oms`** schema. **`pgconn.configure_for_oms`** sets `search_path` to `oms, public` on each connection so application code uses unqualified names (`orders`, `accounts`, …). **`public`** holds **`alembic_version`** and extension objects. Cross-service SQL in other packages qualifies **`oms.*`** as needed. See **docs/POSTGRES_SCHEMA_GROUPING_PLAN.md** §7.8.
+
 ### 8.1 Order Sync
 
 **Module:** `oms/sync.py`.
 
 - **Trigger:** On terminal status from fill callback (`on_terminal_sync`) or from process_one reject path; plus **periodic** `sync_terminal_orders` every `sync_interval_seconds` (e.g. 60s).
-- **Logic:** For each terminal order: read from Redis store, map to Postgres row (`_order_to_row`), UPSERT by `internal_id`, then set TTL on `orders:{order_id}`.
+- **Logic:** For each terminal order: read from Redis store, map to Postgres row (`_order_to_row`), UPSERT by `internal_id` into **`oms.orders`** (unqualified in code), then set TTL on `orders:{order_id}`.
 - **DB columns / sources:** See `docs/oms/OMS_ORDERS_DB_FIELDS.md` (risk_approved, place_order response, fills → columns).
 
 **Order repairs (post-sync):** `oms/repair.py` — `run_all_repairs(pg_connect)` runs periodically after sync. Fixes flawed Postgres order fields (price, time_in_force, binance_cumulative_quote_qty, status) by recovering values from the `payload` JSONB when they are NULL/0/empty. Status is set from payload (payload.binance.status or .X) whenever payload has it; no null check on current DB status. Applies only to `broker = 'binance'` orders.

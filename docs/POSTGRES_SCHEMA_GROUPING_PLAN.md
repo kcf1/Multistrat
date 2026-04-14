@@ -469,9 +469,9 @@ Prefer **fully qualified** names for all application tables, **or** one `SET sea
 
 | What | How |
 |------|-----|
-| Inventory | Re-run §1a query after any migration. |
+| Inventory | Re-run §1a query after any migration. **Automated (optional):** `scheduler/tests/test_postgres_integration.py::test_key_application_tables_in_expected_schemas` (skipped without `DATABASE_URL`). |
 | FK integrity | `pg_constraint` where `contype = 'f'` before/after move. |
-| Unit / integration | All tests under `oms/tests/`, `pms/tests/`, `market_data/tests/` that hit Postgres; substring assertions listed in §7. |
+| Unit / integration | All tests under `oms/tests/`, `pms/tests/`, `market_data/tests/`, **`scheduler/tests/`** that hit Postgres; substring assertions listed in §7. |
 | Apps | OMS sync, PMS loop, market_data ingest, scheduler `run_history` + one reconciliation job smoke run. |
 
 ---

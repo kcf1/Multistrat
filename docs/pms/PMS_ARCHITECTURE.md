@@ -1,6 +1,6 @@
 # PMS Architecture: Data Flow, Interfaces & Design
 
-Single reference for the **Portfolio Management System (PMS)**: data flow, Postgres interfaces, and alignment with OMS. PMS maintains a **granular `positions` table** in Postgres at **asset grain** (per broker, account, book, and asset). It **does not** read OMS Redis positions. **PnL, margin, and Redis publishing are not implemented** in the current process loop; valuation today is **USD numeraire** via `usd_price` on each row and a **generated** `usd_notional`. See **docs/pms/POSITION_VALUATION_SCHEMA_PLAN.md** and **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md** for the valuation refactor; **docs/PHASE2_DETAILED_PLAN.md** §8 for historical Phase 2 context.
+Single reference for the **Portfolio Management System (PMS)**: data flow, Postgres interfaces, and alignment with OMS. PMS maintains a **granular `positions` table** in Postgres at **asset grain** (per broker, account, book, and asset). It **does not** read OMS Redis positions. **PnL, margin, and Redis publishing are not implemented** in the current process loop; valuation today is **USD numeraire** via `usd_price` on each row and a **generated** `usd_notional`. See **docs/pms/POSITION_VALUATION_SCHEMA_PLAN.md** and **docs/pms/REFACTORING_PLAN_POSITIONS_AS_ASSETS.md** for the valuation refactor; **docs/PHASE2_DETAILED_PLAN.md** §8 for historical Phase 2 context. **Postgres layout** (schemas, `search_path`, cross-schema reads): **docs/POSTGRES_SCHEMA_GROUPING_PLAN.md**.
 
 ---
 
@@ -8,35 +8,35 @@ Single reference for the **Portfolio Management System (PMS)**: data flow, Postg
 
 ```
 ┌──────────────┐
-│     OMS      │  • Order sync → Postgres orders
-└──────┬───────┘  • Account sync → Postgres accounts, balances (when sync_balances=True)
-       │          • balance_changes (from balanceUpdate; deposits/withdrawals/transfers)
-       │          • symbols (from exchangeInfo at startup)
+│     OMS      │  • Order sync → Postgres **oms.orders**
+└──────┬───────┘  • Account sync → **oms.accounts**, **oms.balances** (when sync_balances=True)
+       │          • **oms.balance_changes** (from balanceUpdate; deposits/withdrawals/transfers)
+       │          • **oms.symbols** (from exchangeInfo at startup)
        │          • Produces oms_fills (Redis stream) — PMS does not consume it
        ▼
 ┌───────────────┐
 │ Postgres      │     (PMS does not use a fills table)
-│ orders        │     ← executed fills → split into base/quote legs (needs symbols)
-│ balance_changes│    ← net deltas merged into asset positions (core path)
-│ symbols       │     ← required to map order symbol → (base_asset, quote_asset)
-│ assets        │     ← usd_price / usd_symbol for USD valuation (PMS reads)
-│ accounts      │     (optional; PMS loop does not require it today)
-│ balances      │     (OMS sync; query_balances() exists — not used in main tick)
+│ oms.orders    │     ← executed fills → split into base/quote legs (needs symbols)
+│ oms.balance_changes│ ← net deltas merged into asset positions (core path)
+│ oms.symbols   │     ← required to map order symbol → (base_asset, quote_asset)
+│ pms.assets    │     ← usd_price / usd_symbol for USD valuation (PMS reads)
+│ oms.accounts  │     (optional; PMS loop does not require it today)
+│ oms.balances  │     (OMS sync; query_balances() exists — not used in main tick)
 └───────┬───────┘
         │
         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                        PMS                                   │
-│  - Read: orders, symbols, balance_changes, assets           │
+│  - Read: oms.orders, oms.symbols, oms.balance_changes, pms.assets │
 │  - Derive: open_qty per (broker, account_id, book, asset)    │
 │  - Enrich: usd_price (stables from assets; optional feed)    │
-│  - Write: positions (open_qty, position_side, usd_price)    │
+│  - Write: pms.positions (open_qty, position_side, usd_price) │
 │  - Skips: Redis, balances in loop, mark provider on tick    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- **Upstream:** OMS syncs **orders**, **accounts**, optional **balances**, **balance_changes**, and **symbols**. PMS does **not** read OMS Redis positions.
-- **PMS:** Each tick **recomputes** positions from **orders** (as two asset legs) **plus** **balance_changes** nets, then enriches **USD** using the **assets** table (and optional asset price feed). Writes **positions** only. **No** `pnl:*` / `margin:*` Redis keys and **no** realized/unrealized PnL or margin computation in code today.
+- **Upstream:** OMS syncs **`oms.orders`**, **`oms.accounts`**, optional **`oms.balances`**, **`oms.balance_changes`**, and **`oms.symbols`**. PMS does **not** read OMS Redis positions.
+- **PMS:** Each tick **recomputes** positions from **`oms.orders`** (as two asset legs) **plus** **`oms.balance_changes`** nets, then enriches **USD** using **`pms.assets`** (and optional asset price feed). Writes **`pms.positions`** only; **`pgconn.configure_for_pms`** sets home schema for unqualified PMS-writes. **No** `pnl:*` / `margin:*` Redis keys and **no** realized/unrealized PnL or margin computation in code today.
 
 ---
 
@@ -148,9 +148,11 @@ Implemented in **`pms/granular_store.py`** (`write_pms_positions`). **UPSERT** c
 
 ## 8. Postgres schema (reads and writes)
 
+PMS **home** schema is **`pms`** (`configure_for_pms`: unqualified **`assets`**, **`positions`** in writes). **Reads** from OMS and market data use **qualified** names in SQL (**`oms.orders`**, **`oms.symbols`**, **`market_data.ohlcv`**, …). See **docs/POSTGRES_SCHEMA_GROUPING_PLAN.md** §7–§8.
+
 ### 8.1 Reads
 
-#### `orders`
+#### `oms.orders`
 
 Primary source for **executed** exposure (after leg split). Implemented in **`pms/reads.py`** — `query_orders_for_positions`.
 
@@ -167,25 +169,25 @@ Primary source for **executed** exposure (after leg split). Implemented in **`pm
 
 Full OMS column list: **docs/oms/OMS_ORDERS_DB_FIELDS.md**.
 
-#### `balance_changes`
+#### `oms.balance_changes`
 
-Aggregated by **`pms/reads.py`** — `query_balance_changes_net_by_account_book_asset`. **`account_id`** is **TEXT** (broker id), aligned with **`orders.account_id`**.
+Aggregated by **`pms/reads.py`** — `query_balance_changes_net_by_account_book_asset`. **`account_id`** is **TEXT** (broker id), aligned with **`oms.orders.account_id`**.
 
-#### `symbols`
+#### `oms.symbols`
 
 **symbol → (base_asset, quote_asset)** via `query_symbol_map`.
 
-#### `assets`
+#### `pms.assets`
 
 **asset → usd_price, usd_symbol** via `query_assets_usd_config`.
 
-#### `accounts` / `balances`
+#### `oms.accounts` / `oms.balances`
 
-**accounts:** exists for OMS; PMS can use **`account_id`** (TEXT) consistently with orders. **balances:** `query_balances(pg, account_ids)` takes **`accounts.id` (bigint)**; **not** invoked from **`run_one_tick`**.
+**accounts:** exists for OMS; PMS can use **`account_id`** (TEXT) consistently with orders. **balances:** `query_balances(pg, account_ids)` takes **`oms.accounts.id` (bigint)**; **not** invoked from **`run_one_tick`**.
 
 ### 8.2 Writes
 
-- **`positions`** — see **§6.1**.
+- **`pms.positions`** — see **§6.1**.
 - **Redis / snapshot tables** — not implemented.
 
 ---
