@@ -32,6 +32,8 @@ from oms.account_sync import write_balance_change
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from pgconn import configure_for_oms
+
 
 def main():
     database_url = os.environ.get("DATABASE_URL")
@@ -61,6 +63,7 @@ def main():
     print("Insert done. Checking downstream balance_changes table...")
 
     conn = psycopg2.connect(database_url)
+    configure_for_oms(conn)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(

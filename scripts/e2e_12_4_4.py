@@ -32,6 +32,8 @@ try:
 except ImportError:
     pass
 
+from pgconn import configure_for_oms, configure_for_pms
+
 if not os.getenv("LOG_OMS"):
     import logging
     logging.disable(logging.CRITICAL)
@@ -171,6 +173,7 @@ def run_e2e(
         try:
             import psycopg2
             conn = psycopg2.connect(database_url)
+            configure_for_oms(conn)
             try:
                 cur = conn.cursor()
                 cur.execute(
@@ -198,6 +201,7 @@ def run_e2e(
         import json
         import psycopg2
         conn = psycopg2.connect(database_url)
+        configure_for_oms(conn)
         try:
             cur = conn.cursor()
             cur.execute(
@@ -229,6 +233,7 @@ def run_e2e(
         try:
             import psycopg2
             conn = psycopg2.connect(database_url)
+            configure_for_oms(conn)
             try:
                 cur = conn.cursor()
                 for sym in E2E_SYMBOLS:
@@ -323,6 +328,7 @@ def run_e2e(
             try:
                 import psycopg2
                 conn = psycopg2.connect(database_url)
+                configure_for_pms(conn)
                 try:
                     cur = conn.cursor()
                     try:

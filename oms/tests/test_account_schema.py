@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from pgconn import configure_for_oms
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
@@ -23,6 +25,7 @@ def _pg_available() -> bool:
     try:
         import psycopg2
         conn = psycopg2.connect(url)
+        configure_for_oms(conn)
         conn.close()
         return True
     except Exception:
@@ -36,6 +39,7 @@ def db_conn():
         pytest.skip("DATABASE_URL not set or Postgres not reachable")
     import psycopg2
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    configure_for_oms(conn)
     try:
         yield conn
     finally:

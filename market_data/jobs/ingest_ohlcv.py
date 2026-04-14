@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     OHLCV_INITIAL_BACKFILL_DAYS,
     OHLCV_KLINES_CHUNK_LIMIT,
@@ -331,6 +332,7 @@ def run_ingest_ohlcv(
 
     def _ingest_symbol(symbol: str) -> list[IngestSeriesResult]:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             out_symbol: list[IngestSeriesResult] = []
             for iv in settings.intervals:

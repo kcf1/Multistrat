@@ -7,6 +7,7 @@ UPSERT into positions table at grain (broker, account_id, book, asset).
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Union
 
+from pgconn import configure_for_pms
 from pms.schemas_pydantic import DerivedPosition
 
 
@@ -27,6 +28,7 @@ def write_pms_positions(
     else:
         import psycopg2
         conn = psycopg2.connect(pg_connect)
+    configure_for_pms(conn)
 
     try:
         cur = conn.cursor()

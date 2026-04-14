@@ -42,6 +42,8 @@ if str(_root) not in sys.path:
 import pandas as pd
 import psycopg2
 from loguru import logger
+
+from pgconn import configure_for_market_data
 from tqdm import tqdm
 
 from market_data.config import OHLCV_INITIAL_BACKFILL_DAYS, load_settings
@@ -182,6 +184,7 @@ def main() -> int:
     )
     prov = build_binance_spot_provider(settings)
     conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
     results = []
     try:
         for sym in settings.symbols:

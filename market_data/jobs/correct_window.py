@@ -17,6 +17,8 @@ from typing import Mapping
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
+
 from market_data.config import (
     OHLCV_CORRECT_WINDOW_BARS,
     OHLCV_KLINES_CHUNK_LIMIT,
@@ -134,6 +136,7 @@ def run_correct_window(
 
     def _run_task(sym: str, iv: str) -> CorrectWindowResult:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             return run_correct_window_series(
                 conn,

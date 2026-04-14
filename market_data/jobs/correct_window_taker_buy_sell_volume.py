@@ -14,6 +14,7 @@ from typing import Mapping
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     FUTURES_CORRECT_WINDOW_MAX_WORKERS,
     TAKER_BUYSELL_VOLUME_CORRECT_WINDOW_POINTS,
@@ -123,6 +124,7 @@ def run_correct_window_taker_buy_sell_volume(
 
     def _run_task(symbol: str, period: str) -> CorrectTakerBuySellVolumeWindowResult:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             return run_correct_window_taker_buy_sell_volume_series(
                 conn,

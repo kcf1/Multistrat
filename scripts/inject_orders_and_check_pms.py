@@ -27,6 +27,8 @@ except ImportError:
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from pgconn import configure_for_oms, configure_for_pms
+
 
 def main():
     database_url = os.environ.get("DATABASE_URL")
@@ -39,6 +41,7 @@ def main():
     symbol = "BTCUSDT"
 
     conn = psycopg2.connect(database_url)
+    configure_for_oms(conn)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Insert 2 buys at $1, 1 sell at $2, then 2 sells at $0.5 (status=filled so PMS picks them up)
@@ -137,6 +140,7 @@ def main():
     time.sleep(10)
 
     conn = psycopg2.connect(database_url)
+    configure_for_pms(conn)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(

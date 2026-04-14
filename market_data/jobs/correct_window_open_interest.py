@@ -12,6 +12,7 @@ from typing import Mapping
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     FUTURES_CORRECT_WINDOW_MAX_WORKERS,
     OPEN_INTEREST_CONTRACT_TYPES,
@@ -119,6 +120,7 @@ def run_correct_window_open_interest(
 
     def _run_task(symbol: str, contract_type: str, period: str) -> CorrectOpenInterestWindowResult:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             return run_correct_window_open_interest_series(
                 conn,

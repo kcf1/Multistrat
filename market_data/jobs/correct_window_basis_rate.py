@@ -12,6 +12,7 @@ from typing import Mapping
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     BASIS_CONTRACT_TYPES,
     BASIS_CORRECT_WINDOW_POINTS,
@@ -118,6 +119,7 @@ def run_correct_window_basis_rate(
 
     def _run_task(pair: str, contract_type: str, period: str) -> CorrectBasisWindowResult:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             return run_correct_window_basis_series(
                 conn,

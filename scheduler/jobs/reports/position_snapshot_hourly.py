@@ -14,6 +14,7 @@ from pathlib import Path
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_scheduler
 from scheduler.config import load_scheduler_settings, scheduler_reports_csv_dir
 from scheduler.types import JobContext
 
@@ -187,6 +188,7 @@ def run_position_snapshot_hourly(
     snap_iso = snap.isoformat()
 
     conn = psycopg2.connect(database_url)
+    configure_for_scheduler(conn)
     try:
         with conn.cursor() as cur:
             cur.execute(SELECT_BY_ASSET_SQL)

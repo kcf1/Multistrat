@@ -28,6 +28,8 @@ import psycopg2
 import psycopg2.extras
 from loguru import logger
 
+from pgconn import configure_for_scheduler
+
 from oms.brokers.binance.api_client import BinanceAPIClient, BinanceAPIError
 
 from scheduler.config import (
@@ -452,6 +454,7 @@ def run_order_reconciliation_binance(
     window_end_iso = end_dt.isoformat()
 
     conn = psycopg2.connect(database_url)
+    configure_for_scheduler(conn)
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             db_rows = _load_internal_filled_in_window(cur, broker, acct, start_dt, n, st)

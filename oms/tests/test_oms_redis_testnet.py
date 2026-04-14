@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from pgconn import configure_for_oms
+
 # Load .env from repo root
 try:
     from dotenv import load_dotenv
@@ -64,6 +66,7 @@ def _pg_available() -> bool:
     try:
         import psycopg2
         c = psycopg2.connect(DATABASE_URL)
+        configure_for_oms(c)
         c.close()
         return True
     except Exception:
@@ -502,6 +505,7 @@ class TestOmsRedisTestnet:
 
         import psycopg2
         conn = psycopg2.connect(DATABASE_URL)
+        configure_for_oms(conn)
         try:
             cur = conn.cursor()
             cur.execute(
@@ -616,6 +620,7 @@ class TestOmsRedisTestnet:
 
         import psycopg2
         conn = psycopg2.connect(DATABASE_URL)
+        configure_for_oms(conn)
         try:
             cur = conn.cursor()
             cur.execute(
@@ -701,6 +706,7 @@ class TestOmsRedisTestnet:
 
         import psycopg2
         conn = psycopg2.connect(DATABASE_URL)
+        configure_for_oms(conn)
         try:
             cur = conn.cursor()
             cur.execute(

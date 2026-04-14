@@ -109,6 +109,7 @@ def assert_postgres_order(database_url: str, order_id: str, timeout_sec: float) 
     """Poll Postgres orders table for internal_id = order_id. Returns True if found."""
     try:
         import psycopg2
+        from pgconn import configure_for_oms
     except ImportError:
         print("[assert-postgres] psycopg2 not installed; skip Postgres check", file=sys.stderr)
         return False
@@ -116,6 +117,7 @@ def assert_postgres_order(database_url: str, order_id: str, timeout_sec: float) 
     while time.monotonic() < deadline:
         try:
             conn = psycopg2.connect(database_url)
+            configure_for_oms(conn)
             try:
                 cur = conn.cursor()
                 cur.execute("SELECT id, status FROM orders WHERE internal_id = %s", (order_id,))

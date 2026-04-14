@@ -15,6 +15,7 @@ import time
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     FUTURES_REPAIR_GAP_MAX_WORKERS,
     OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
@@ -193,6 +194,7 @@ def run_repair_taker_buy_sell_volume_gaps_policy_window_all_series(
 
     def _run_task(symbol: str, period: str) -> PolicyTakerBuySellVolumeRepairSeriesResult:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             start_ms = end_ms - days * 86_400_000
             start_ms = floor_align_ms_to_interval(start_ms, period)

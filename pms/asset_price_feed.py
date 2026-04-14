@@ -8,6 +8,7 @@ See docs/pms/ASSET_PRICE_FEED_PLAN.md §3.3.
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Union
 
+from pgconn import configure_for_pms
 from pms.asset_price_providers.interface import AssetPriceProvider
 
 
@@ -25,6 +26,7 @@ def query_assets_for_price_source(
     else:
         import psycopg2
         conn = psycopg2.connect(pg_connect)
+    configure_for_pms(conn)
 
     try:
         cur = conn.cursor()
@@ -56,6 +58,7 @@ def update_asset_prices(
     else:
         import psycopg2
         conn = psycopg2.connect(pg_connect)
+    configure_for_pms(conn)
 
     try:
         cur = conn.cursor()

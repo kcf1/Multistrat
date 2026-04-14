@@ -904,6 +904,8 @@ def test_postgres_upsert_idempotent_and_cursor() -> None:
 
     import psycopg2
 
+    from pgconn import configure_for_market_data
+
     sym = "ZZTESTMD94_OHLCV"
     iv = "1m"
     ot = datetime(2019, 7, 1, 0, 0, tzinfo=timezone.utc)
@@ -912,6 +914,7 @@ def test_postgres_upsert_idempotent_and_cursor() -> None:
     bar_b = _bar(symbol=sym, interval=iv, open_time=ot, close=Decimal("200"))
 
     conn = psycopg2.connect(url)
+    configure_for_market_data(conn)
     conn.autocommit = False
     try:
         upsert_ohlcv_bars(conn, [bar_a])

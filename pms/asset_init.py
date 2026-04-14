@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Optional, Sequence, Union
 
+from pgconn import configure_for_pms
 from pms.log import logger
 
 # Major quoting/stable assets: fixed usd_price = 1 for stables-first valuation
@@ -28,9 +29,13 @@ STABLE_ASSETS_WITH_USD_PRICE_ONE = (
 def _pg_conn(pg_connect: Union[str, Callable[[], Any]]):
     """Return (conn, we_opened). Caller must close conn if we_opened."""
     if callable(pg_connect):
-        return pg_connect(), False
+        conn = pg_connect()
+        configure_for_pms(conn)
+        return conn, False
     import psycopg2
-    return psycopg2.connect(pg_connect), True
+    conn = psycopg2.connect(pg_connect)
+    configure_for_pms(conn)
+    return conn, True
 
 
 # Price source for fixed stables (1:1 USD); feed uses e.g. 'binance'
