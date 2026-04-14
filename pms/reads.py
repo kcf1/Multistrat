@@ -9,7 +9,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from pgconn import configure_for_pms
+from pgconn import SCHEMA_OMS, configure_for_pms
 from pms.schemas_pydantic import DerivedPosition, OrderRow
 
 try:
@@ -44,9 +44,9 @@ def query_symbol_map(
     try:
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT symbol, base_asset, quote_asset
-            FROM symbols
+            FROM {SCHEMA_OMS}.symbols
             """
         )
         out: Dict[str, Tuple[str, str]] = {}
@@ -73,10 +73,10 @@ def query_orders_for_positions(
     try:
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT internal_id, account_id, book, broker, symbol, side, executed_qty, price, created_at,
                    binance_cumulative_quote_qty
-            FROM orders
+            FROM {SCHEMA_OMS}.orders
             WHERE LOWER(TRIM(status)) IN ('partially_filled', 'filled') AND COALESCE(executed_qty, 0) > 0
             ORDER BY created_at ASC NULLS LAST
             """,
@@ -296,9 +296,9 @@ def query_balance_changes_net_by_account_book_asset(
         cur = conn.cursor()
         if account_ids:
             cur.execute(
-                """
+                f"""
                 SELECT broker, account_id, book, asset, SUM(delta) AS net_delta
-                FROM balance_changes
+                FROM {SCHEMA_OMS}.balance_changes
                 WHERE change_type IN ('deposit', 'withdrawal', 'adjustment', 'transfer')
                   AND account_id = ANY(%s)
                 GROUP BY broker, account_id, book, asset
@@ -307,9 +307,9 @@ def query_balance_changes_net_by_account_book_asset(
             )
         else:
             cur.execute(
-                """
+                f"""
                 SELECT broker, account_id, book, asset, SUM(delta) AS net_delta
-                FROM balance_changes
+                FROM {SCHEMA_OMS}.balance_changes
                 WHERE change_type IN ('deposit', 'withdrawal', 'adjustment', 'transfer')
                 GROUP BY broker, account_id, book, asset
                 """
@@ -432,18 +432,18 @@ def query_balances(
         cur = conn.cursor()
         if account_ids:
             cur.execute(
-                """
+                f"""
                 SELECT b.account_id, b.asset, b.available, b.locked, b.updated_at
-                FROM balances b
+                FROM {SCHEMA_OMS}.balances b
                 WHERE b.account_id = ANY(%s)
                 """,
                 (account_ids,),
             )
         else:
             cur.execute(
-                """
+                f"""
                 SELECT account_id, asset, available, locked, updated_at
-                FROM balances
+                FROM {SCHEMA_OMS}.balances
                 """
             )
         columns = [d[0] for d in cur.description]

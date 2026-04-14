@@ -75,7 +75,7 @@ def _tables_exist(conn, names):
         cur.execute(
             """
             SELECT tablename FROM pg_tables
-            WHERE schemaname = 'public' AND tablename = ANY(%s)
+            WHERE schemaname IN ('public', 'oms') AND tablename = ANY(%s)
             """,
             (list(names),),
         )
@@ -88,7 +88,7 @@ def _indexes_exist(conn, expected_index_names):
         cur.execute(
             """
             SELECT indexname FROM pg_indexes
-            WHERE schemaname = 'public' AND indexname = ANY(%s)
+            WHERE schemaname IN ('public', 'oms') AND indexname = ANY(%s)
             """,
             (list(expected_index_names),),
         )
@@ -102,7 +102,7 @@ def _table_has_columns(conn, table_name, column_names):
         cur.execute(
             """
             SELECT column_name FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s
+            WHERE table_schema IN ('public', 'oms') AND table_name = %s
             """,
             (table_name,),
         )

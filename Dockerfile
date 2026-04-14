@@ -8,7 +8,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Application code
+# Application code (shared Postgres helpers used by oms, pms, market_data, scheduler)
+COPY pgconn/ pgconn/
 COPY oms/ oms/
 COPY pms/ pms/
 COPY risk/ risk/

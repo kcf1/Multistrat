@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Optional, Sequence, Union
 
-from pgconn import configure_for_pms
+from pgconn import SCHEMA_OMS, configure_for_pms
 from pms.log import logger
 
 # Major quoting/stable assets: fixed usd_price = 1 for stables-first valuation
@@ -171,9 +171,9 @@ def sync_assets_from_symbols(
     try:
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT DISTINCT base_asset
-            FROM symbols
+            FROM {SCHEMA_OMS}.symbols
             WHERE TRIM(UPPER(quote_asset)) = %s AND TRIM(base_asset) != ''
             """,
             (quote,),

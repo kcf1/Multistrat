@@ -28,7 +28,7 @@ import psycopg2
 import psycopg2.extras
 from loguru import logger
 
-from pgconn import configure_for_scheduler
+from pgconn import SCHEMA_OMS, configure_for_scheduler
 
 from oms.brokers.binance.api_client import BinanceAPIClient, BinanceAPIError
 
@@ -375,11 +375,11 @@ def _load_internal_filled_in_window(
     statuses: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     cur.execute(
-        """
+        f"""
         SELECT internal_id, broker_order_id, account_id, symbol, side, order_type,
                quantity, limit_price, price, time_in_force, status, executed_qty,
                created_at, updated_at, binance_transact_time
-        FROM orders
+        FROM {SCHEMA_OMS}.orders
         WHERE broker = %s
           AND status IN %s
           AND COALESCE(updated_at, created_at) >= %s
