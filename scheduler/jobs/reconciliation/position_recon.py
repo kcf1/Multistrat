@@ -41,6 +41,7 @@ import psycopg2
 import psycopg2.extras
 from loguru import logger
 
+from pgconn import SCHEMA_PMS, configure_for_scheduler
 from oms.brokers.binance.api_client import BinanceAPIClient, BinanceAPIError
 
 from scheduler.config import (
@@ -204,9 +205,9 @@ def _load_internal_net_by_asset(
     account_id: str | None,
 ) -> dict[str, Decimal]:
     cur.execute(
-        """
+        f"""
         SELECT UPPER(TRIM(asset)) AS asset, COALESCE(SUM(open_qty), 0) AS net_qty
-        FROM positions
+        FROM {SCHEMA_PMS}.positions
         WHERE broker = %s
           AND (%s IS NULL OR account_id = %s)
         GROUP BY UPPER(TRIM(asset))
@@ -284,6 +285,7 @@ def run_position_reconciliation_binance(
     eps = POSITION_RECON_QTY_EPSILON
 
     conn = psycopg2.connect(database_url)
+    configure_for_scheduler(conn)
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             internal = _load_internal_net_by_asset(cur, broker, acct)

@@ -37,7 +37,10 @@ def main() -> None:
     if not database_url:
         raise ValueError("DATABASE_URL is not set. Add it to .env or environment variables.")
 
-    engine = create_engine(database_url)
+    engine = create_engine(
+        database_url,
+        connect_args={"options": "-csearch_path=market_data,public"},
+    )
     df = pd.read_sql_query(
         """
         SELECT 

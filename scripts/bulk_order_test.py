@@ -43,6 +43,8 @@ try:
 except ImportError:
     pass
 
+from pgconn import configure_for_oms
+
 # Quiet loguru when running as script
 if not os.getenv("LOG_OMS"):
     import logging
@@ -213,6 +215,7 @@ def _check_account_downstreams(account_store, database_url: str, market: bool, v
         try:
             import psycopg2
             conn = psycopg2.connect(database_url)
+            configure_for_oms(conn)
             try:
                 cur = conn.cursor()
                 cur.execute(

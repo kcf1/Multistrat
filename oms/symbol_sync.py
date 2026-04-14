@@ -12,15 +12,20 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import requests
 
+from pgconn import configure_for_oms
 from oms.log import logger
 
 
 def _pg_conn(pg_connect: Union[str, Callable[[], Any]]):
     """Return (conn, we_opened). Caller must close conn if we_opened."""
     if callable(pg_connect):
-        return pg_connect(), False
+        conn = pg_connect()
+        configure_for_oms(conn)
+        return conn, False
     import psycopg2
-    return psycopg2.connect(pg_connect), True
+    conn = psycopg2.connect(pg_connect)
+    configure_for_oms(conn)
+    return conn, True
 
 
 def _find_filter(filters: List[Dict], filter_type: str) -> Optional[Dict]:

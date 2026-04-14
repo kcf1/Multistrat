@@ -44,6 +44,8 @@ try:
 except ImportError:
     pass
 
+from pgconn import configure_for_oms
+
 # Quiet loguru when running as script (optional: set LOG_OMS=1 to keep logs)
 if not os.getenv("LOG_OMS"):
     import logging
@@ -316,6 +318,7 @@ def run_single_test(
             try:
                 import psycopg2
                 conn = psycopg2.connect(database_url)
+                configure_for_oms(conn)
                 try:
                     cur = conn.cursor()
                     cur.execute(

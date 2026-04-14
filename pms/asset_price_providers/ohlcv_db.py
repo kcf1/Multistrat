@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from pgconn import SCHEMA_MARKET_DATA, configure_for_pms
 from pms.log import logger
 
 from .interface import AssetPriceProvider
@@ -32,10 +33,13 @@ class OhlcvDbAssetPriceProvider(AssetPriceProvider):
 
     def _connect(self):
         if callable(self.pg_connect):
-            return self.pg_connect()
-        import psycopg2
+            conn = self.pg_connect()
+        else:
+            import psycopg2
 
-        return psycopg2.connect(self.pg_connect)
+            conn = psycopg2.connect(self.pg_connect)
+        configure_for_pms(conn)
+        return conn
 
     def _query_asset_to_symbol(self, conn, assets: List[str]) -> Dict[str, str]:
         if not assets:
@@ -68,10 +72,10 @@ class OhlcvDbAssetPriceProvider(AssetPriceProvider):
             return {}
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT DISTINCT ON (symbol)
                     symbol, open_time, close, ingested_at
-                FROM ohlcv
+                FROM {SCHEMA_MARKET_DATA}.ohlcv
                 WHERE symbol = ANY(%s)
                   AND interval = %s
                 ORDER BY symbol, open_time DESC

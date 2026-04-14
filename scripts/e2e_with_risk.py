@@ -30,6 +30,8 @@ try:
 except ImportError:
     pass
 
+from pgconn import configure_for_oms
+
 if not os.getenv("LOG_OMS"):
     import logging
     logging.disable(logging.CRITICAL)
@@ -176,6 +178,7 @@ def run_e2e_with_risk(
             try:
                 import psycopg2
                 conn = psycopg2.connect(database_url)
+                configure_for_oms(conn)
                 try:
                     cur = conn.cursor()
                     cur.execute(

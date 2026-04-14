@@ -28,6 +28,8 @@ import psycopg2
 import psycopg2.extras
 from loguru import logger
 
+from pgconn import SCHEMA_OMS, configure_for_scheduler
+
 from oms.brokers.binance.api_client import BinanceAPIClient, BinanceAPIError
 
 from scheduler.config import (
@@ -373,11 +375,11 @@ def _load_internal_filled_in_window(
     statuses: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     cur.execute(
-        """
+        f"""
         SELECT internal_id, broker_order_id, account_id, symbol, side, order_type,
                quantity, limit_price, price, time_in_force, status, executed_qty,
                created_at, updated_at, binance_transact_time
-        FROM orders
+        FROM {SCHEMA_OMS}.orders
         WHERE broker = %s
           AND status IN %s
           AND COALESCE(updated_at, created_at) >= %s
@@ -452,6 +454,7 @@ def run_order_reconciliation_binance(
     window_end_iso = end_dt.isoformat()
 
     conn = psycopg2.connect(database_url)
+    configure_for_scheduler(conn)
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             db_rows = _load_internal_filled_in_window(cur, broker, acct, start_dt, n, st)

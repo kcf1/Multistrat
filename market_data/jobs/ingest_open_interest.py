@@ -11,6 +11,7 @@ import time
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     GLOBAL_PROVIDER_MAX_WORKERS,
     OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
@@ -279,6 +280,7 @@ def run_ingest_open_interest(
         period: str,
     ) -> IngestOpenInterestSeriesResult:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             return ingest_open_interest_series(
                 conn,

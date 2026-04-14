@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from redis import Redis
 
+from pgconn import configure_for_oms
 from oms.log import logger
 
 from oms.cleanup import set_order_key_ttl
@@ -82,6 +83,7 @@ def sync_one_order(
         import psycopg2
         conn = psycopg2.connect(pg_connect)
         we_opened = True
+    configure_for_oms(conn)
 
     try:
         cur = conn.cursor()

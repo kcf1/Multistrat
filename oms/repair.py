@@ -8,6 +8,7 @@ Scheduled periodically alongside sync in the OMS main loop.
 import json
 from typing import Any, Callable, Dict, Optional, Union
 
+from pgconn import configure_for_oms
 from oms.log import logger
 
 # Binance order status (place_order / executionReport) -> OMS Postgres status
@@ -25,9 +26,12 @@ _BINANCE_TO_OMS_STATUS: Dict[str, str] = {
 def _get_conn(pg_connect: Union[str, Callable[[], Any]]) -> Any:
     """Open connection from pg_connect (string or callable)."""
     if callable(pg_connect):
-        return pg_connect()
-    import psycopg2
-    return psycopg2.connect(pg_connect)
+        conn = pg_connect()
+    else:
+        import psycopg2
+        conn = psycopg2.connect(pg_connect)
+    configure_for_oms(conn)
+    return conn
 
 
 def _binance_status_to_oms(binance_status: str) -> Optional[str]:

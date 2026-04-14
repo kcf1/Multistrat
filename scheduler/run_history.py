@@ -11,6 +11,8 @@ from typing import Any, Literal, cast
 import psycopg2
 from psycopg2.extras import Json
 
+from pgconn import configure_for_scheduler
+
 RunStatus = Literal["ok", "error"]
 
 
@@ -21,6 +23,7 @@ def record_run_start(database_url: str, job_id: str) -> int:
     Returns the new ``scheduler_runs.id``.
     """
     conn = psycopg2.connect(database_url)
+    configure_for_scheduler(conn)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -46,6 +49,7 @@ def record_run_end(
 ) -> None:
     """Set ``finished_at``, ``status``, and optional ``error`` / ``payload``."""
     conn = psycopg2.connect(database_url)
+    configure_for_scheduler(conn)
     try:
         with conn.cursor() as cur:
             cur.execute(

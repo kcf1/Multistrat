@@ -42,6 +42,7 @@ import psycopg2
 import requests
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     MARKET_DATA_MIN_REQUEST_INTERVAL_SEC,
     OHLCV_INITIAL_BACKFILL_DAYS,
@@ -403,6 +404,7 @@ def run_time_ohlcv_ingest_once(
 ) -> IngestStats:
     settings = load_settings()
     conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
     try:
         end_ms = override_end_ms if override_end_ms is not None else (now_ms if now_ms is not None else utc_now_ms())
         start_ms, horizon_ms, cursor_s, max_open_s = _resolve_ingest_start_ms(

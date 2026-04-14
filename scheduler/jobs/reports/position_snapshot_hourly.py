@@ -14,6 +14,7 @@ from pathlib import Path
 import psycopg2
 from loguru import logger
 
+from pgconn import SCHEMA_PMS, configure_for_scheduler
 from scheduler.config import load_scheduler_settings, scheduler_reports_csv_dir
 from scheduler.types import JobContext
 
@@ -21,12 +22,13 @@ FILENAME_TS_FMT = "%Y%m%dT%H%MZ"
 
 # Shared roll-up metrics (per group key). ``positions`` has no ``realized_pnl`` (dropped in schema);
 # fourth column kept as ``0`` for stable CSV shape (legacy header total_realized_pnl).
-_SQL_SUFFIX = """
+# Qualified: scheduler ``search_path`` is scheduler, public — PMS home is ``pms``.
+_SQL_SUFFIX = f"""
   COALESCE(SUM(usd_notional), 0),
   COALESCE(SUM(ABS(usd_notional)), 0),
   COALESCE(COUNT(*) FILTER (WHERE open_qty <> 0), 0)::integer,
   0::numeric
-FROM positions
+FROM {SCHEMA_PMS}.positions
 """
 
 SELECT_BY_ASSET_SQL = (
@@ -41,7 +43,7 @@ SELECT_BY_BOOK_SQL = (
     "SELECT broker, book, " + _SQL_SUFFIX + "GROUP BY broker, book ORDER BY broker, book;"
 )
 
-SELECT_GRANULAR_SQL = """
+SELECT_GRANULAR_SQL = f"""
 SELECT
   id,
   broker,
@@ -53,7 +55,7 @@ SELECT
   usd_price,
   usd_notional,
   updated_at
-FROM positions
+FROM {SCHEMA_PMS}.positions
 ORDER BY broker, account_id, book, asset;
 """
 
@@ -187,6 +189,7 @@ def run_position_snapshot_hourly(
     snap_iso = snap.isoformat()
 
     conn = psycopg2.connect(database_url)
+    configure_for_scheduler(conn)
     try:
         with conn.cursor() as cur:
             cur.execute(SELECT_BY_ASSET_SQL)

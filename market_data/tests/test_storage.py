@@ -55,16 +55,21 @@ def _bar(
     symbol: str = "BTCUSDT",
     interval: str = "1m",
     open_time: datetime | None = None,
+    open: Decimal = Decimal("1"),
     close: Decimal = Decimal("1"),
+    high: Decimal | None = None,
+    low: Decimal | None = None,
 ) -> OhlcvBar:
     ot = open_time or datetime(2020, 1, 1, 0, 0, tzinfo=timezone.utc)
+    hi = high if high is not None else max(open, close) + Decimal("1")
+    lo = low if low is not None else max(Decimal("0"), min(open, close) - Decimal("0.5"))
     return OhlcvBar(
         symbol=symbol,
         interval=interval,
         open_time=ot,
-        open=Decimal("1"),
-        high=Decimal("2"),
-        low=Decimal("0.5"),
+        open=open,
+        high=hi,
+        low=lo,
         close=close,
         volume=Decimal("10"),
         quote_volume=Decimal("20"),
@@ -904,6 +909,8 @@ def test_postgres_upsert_idempotent_and_cursor() -> None:
 
     import psycopg2
 
+    from pgconn import configure_for_market_data
+
     sym = "ZZTESTMD94_OHLCV"
     iv = "1m"
     ot = datetime(2019, 7, 1, 0, 0, tzinfo=timezone.utc)
@@ -912,6 +919,7 @@ def test_postgres_upsert_idempotent_and_cursor() -> None:
     bar_b = _bar(symbol=sym, interval=iv, open_time=ot, close=Decimal("200"))
 
     conn = psycopg2.connect(url)
+    configure_for_market_data(conn)
     conn.autocommit = False
     try:
         upsert_ohlcv_bars(conn, [bar_a])

@@ -21,6 +21,8 @@ import psycopg2
 from loguru import logger
 from tqdm import tqdm
 
+from pgconn import configure_for_market_data
+
 _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
@@ -143,6 +145,7 @@ def main() -> int:
 
     prov = build_binance_perps_provider(settings)
     conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
     results = []
     try:
         for symbol in TOP_TRADER_LONG_SHORT_SYMBOLS:

@@ -128,7 +128,10 @@ def apply_snapshot_to_redis(account_store, snapshot: dict, non_zero_only: bool =
 def get_pg_balance_assets(pg_connect, broker: str = "binance", account_id: str = "default") -> list:
     """Return list of asset strings for the account from Postgres balances (join accounts)."""
     import psycopg2
+    from pgconn import configure_for_oms
+
     conn = psycopg2.connect(pg_connect)
+    configure_for_oms(conn)
     try:
         cur = conn.cursor()
         cur.execute(

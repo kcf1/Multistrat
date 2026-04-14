@@ -102,7 +102,7 @@ Order: **skeleton → config → runner/observability → persistence (optional)
 
 ### 4.10 Tests (see also §6)
 
-- [ ] **5.10.1** **Integration:** test DB (or container): runner executes **one report** and **one recon** job; verify `scheduler_runs` row(s) if migration exists.
+- [x] **5.10.1** **Integration:** with **`DATABASE_URL`** and migrations at head, **`scheduler/tests/test_postgres_integration.py`** exercises **`record_run_start` / `record_run_end`** against **`scheduler.scheduler_runs`** and asserts key tables live in expected schemas (inventory). Full runner smoke (report + recon) remains optional / manual (**5.10.2**).
 - [ ] **5.10.2** **Smoke:** `docker compose up scheduler` — process stays up; scheduled tick completes once in dev (or documented manual one-shot).
 
 ---

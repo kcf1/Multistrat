@@ -133,7 +133,9 @@ Per workspace rules (**`.cursor/rules/env-and-config.mdc`**):
 | `error` | Optional text (failures, timeouts). |
 | `payload` | Optional JSONB (API not heavily used in current jobs; available for summaries). |
 
-Migration: `alembic/versions/n5o6p7q8r9s0_add_scheduler_runs.py`. Index: **`(job_id, started_at DESC)`** for recent history per job.
+Migrations: **`n5o6p7q8r9s0`** creates **`scheduler_runs`** in `public`; **`f2a3b4c5d6e7`** moves it to schema **`scheduler`**. Runtime: **`scheduler/run_history.py`** uses **`configure_for_scheduler`** (`SET search_path TO scheduler, public`) so inserts/updates stay unqualified. Index: **`(job_id, started_at DESC)`** for recent history per job. See [POSTGRES_SCHEMA_GROUPING_PLAN.md](../POSTGRES_SCHEMA_GROUPING_PLAN.md) §6.1 Phase 4.
+
+**Tests:** With **`DATABASE_URL`** set and Alembic at head, **`scheduler/tests/test_postgres_integration.py`** asserts **`record_run_start` / `record_run_end`** against **`scheduler.scheduler_runs`** and a small **`pg_tables`** inventory for grouped schemas.
 
 ---
 
@@ -141,9 +143,9 @@ Migration: `alembic/versions/n5o6p7q8r9s0_add_scheduler_runs.py`. Index: **`(job
 
 | `job_id` | Package | Reads | Writes / side effects |
 |----------|---------|-------|------------------------|
-| `order_reconciliation_binance` | `jobs/reconciliation/order_recon.py` | Postgres **`orders`**; Binance **`myTrades`** in a lookback window | Summary + diff **CSV** under `scheduler/reports_out/` |
-| `position_reconciliation_binance` | `jobs/reconciliation/position_recon.py` | Postgres **`positions`**; Binance spot **account balances** | Summary + diff **CSV** |
-| `position_snapshot_hourly` | `jobs/reports/position_snapshot_hourly.py` | Postgres **`positions`** | Four **CSV** roll-ups (by asset, broker, book, granular) |
+| `order_reconciliation_binance` | `jobs/reconciliation/order_recon.py` | Postgres **`oms.orders`** (qualified SQL); Binance **`myTrades`** in a lookback window | Summary + diff **CSV** under `scheduler/reports_out/` |
+| `position_reconciliation_binance` | `jobs/reconciliation/position_recon.py` | Postgres **`pms.positions`**; Binance spot **account balances** | Summary + diff **CSV** |
+| `position_snapshot_hourly` | `jobs/reports/position_snapshot_hourly.py` | Postgres **`pms.positions`** | Four **CSV** roll-ups (by asset, broker, book, granular) |
 | `noop_heartbeat` | `jobs/misc/noop_heartbeat.py` | — | **Info** log line per run (operations sanity check) |
 
 Report/recon jobs use **`scheduler_reports_csv_dir()`** (package-relative **`reports_out/`**, root **`.gitignore`**). Filenames include a UTC timestamp (e.g. `*_20260325T1900Z.csv`).

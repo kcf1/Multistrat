@@ -10,6 +10,7 @@ import time
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     FUTURES_REPAIR_GAP_MAX_WORKERS,
     BASIS_CONTRACT_TYPES,
@@ -186,6 +187,7 @@ def run_repair_basis_gaps_policy_window_all_series(
 
     def _run_task(pair: str, contract_type: str, period: str) -> PolicyBasisRepairSeriesResult:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             gaps = detect_basis_time_gaps(
                 conn,

@@ -19,6 +19,8 @@ from pathlib import Path
 import pandas as pd
 import psycopg2
 from loguru import logger
+
+from pgconn import configure_for_market_data
 from tqdm import tqdm
 
 _root = Path(__file__).resolve().parents[1]
@@ -143,6 +145,7 @@ def main() -> int:
     )
     prov = build_binance_perps_provider(settings)
     conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
     results = []
     try:
         for pair in BASIS_PAIRS:

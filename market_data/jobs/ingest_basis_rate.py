@@ -16,6 +16,7 @@ import time
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     BASIS_CONTRACT_TYPES,
     BASIS_FETCH_CHUNK_LIMIT,
@@ -277,6 +278,7 @@ def run_ingest_basis_rate(
 
     def _ingest_task(pair: str, contract_type: str, period: str) -> IngestBasisSeriesResult:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             return ingest_basis_series(
                 conn,

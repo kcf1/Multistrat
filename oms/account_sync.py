@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from redis import Redis
 
+from pgconn import configure_for_oms
 from oms.log import logger
 from oms.storage.redis_account_store import RedisAccountStore
 
@@ -62,9 +63,13 @@ def _balance_to_row(balance: Dict[str, Any], account_pk: int, updated_at: Option
 def _pg_conn(pg_connect: Union[str, Callable[[], Any]]):
     """Return an open connection; caller must close if we_opened."""
     if callable(pg_connect):
-        return pg_connect(), False
+        conn = pg_connect()
+        configure_for_oms(conn)
+        return conn, False
     import psycopg2
-    return psycopg2.connect(pg_connect), True
+    conn = psycopg2.connect(pg_connect)
+    configure_for_oms(conn)
+    return conn, True
 
 
 def _pg_params(row: Dict[str, Any]) -> Dict[str, Any]:

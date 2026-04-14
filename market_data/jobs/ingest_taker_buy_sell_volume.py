@@ -16,6 +16,7 @@ import time
 import psycopg2
 from loguru import logger
 
+from pgconn import configure_for_market_data
 from market_data.config import (
     GLOBAL_PROVIDER_MAX_WORKERS,
     OHLCV_SKIP_EXISTING_GAP_MULTIPLE,
@@ -285,6 +286,7 @@ def run_ingest_taker_buy_sell_volume(
 
     def _ingest_task(symbol: str, period: str) -> IngestTakerBuySellVolumeSeriesResult:
         conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
         try:
             return ingest_taker_buy_sell_volume_series(
                 conn,
