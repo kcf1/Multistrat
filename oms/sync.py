@@ -2,7 +2,7 @@
 OMS → Postgres order sync (task 12.1.10).
 
 Sync orders from Redis to Postgres `orders` table (UPSERT by internal_id).
-On trigger (terminal status) or every 60s; expire Redis key after sync.
+On trigger (terminal status) or every 300s; expire Redis key after sync.
 
 DB columns and injection: see docs/OMS_ORDERS_DB_FIELDS.md for which fields
 are set from risk_approved, place_order response (including payload), and fills.
@@ -22,7 +22,7 @@ from oms.storage.redis_order_store import RedisOrderStore
 
 # Defaults (override via env in caller if needed)
 DEFAULT_SYNC_TTL_AFTER_SECONDS = 300  # 5 minutes after sync
-DEFAULT_SYNC_INTERVAL_SECONDS = 60
+DEFAULT_SYNC_INTERVAL_SECONDS = 300
 
 
 def _order_to_row(order: Dict[str, Any], order_id: str) -> Dict[str, Any]:
@@ -167,7 +167,7 @@ def sync_terminal_orders(
 ) -> int:
     """
     Sync all terminal orders (filled, rejected, cancelled, expired) from Redis to Postgres,
-    then set TTL on each synced key. Call every 60s (or on interval) for periodic sync.
+    then set TTL on each synced key. Call every 300s (or on interval) for periodic sync.
     Returns number of orders synced.
     """
     order_ids = get_terminal_order_ids(store)

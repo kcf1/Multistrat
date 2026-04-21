@@ -36,8 +36,8 @@ DEFAULT_BLOCK_MS = 100  # block up to 100ms waiting for messages (event-driven, 
 DEFAULT_POLL_SLEEP_SECONDS = 0.0  # not used when blocking; kept for backward compatibility
 DEFAULT_TRIM_EVERY_N = 200  # trim streams every N loop iterations (adjusted for faster wake-ups)
 DEFAULT_BATCH_SIZE = 50  # process up to N orders per batch (bulk processing, higher throughput)
-DEFAULT_ACCOUNT_REFRESH_INTERVAL_SECONDS = 60  # periodic REST get_account_snapshot
-DEFAULT_ACCOUNT_SYNC_INTERVAL_SECONDS = 60  # periodic sync_accounts_to_postgres (when pg_connect set)
+DEFAULT_ACCOUNT_REFRESH_INTERVAL_SECONDS = 300  # periodic REST get_account_snapshot
+DEFAULT_ACCOUNT_SYNC_INTERVAL_SECONDS = 300  # periodic sync_accounts_to_postgres (when pg_connect set)
 CONSUMER_GROUP = "oms"
 CONSUMER_NAME = "oms-1"
 
