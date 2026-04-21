@@ -21,8 +21,9 @@ from scheduler.types import JobSpec
 # Default cap for a single job invocation when spec omits timeout (runner may use this).
 DEFAULT_JOB_TIMEOUT_SECONDS: float = 300.0
 
-# Sleep slice when waiting for the next tick so shutdown is responsive (seconds).
-SCHEDULER_LOOP_POLL_SECONDS: float = 1.0
+# Max sleep slice when waiting for the next job deadline (seconds). Larger values reduce wakeups;
+# SIGINT/SIGTERM may not be observed until up to this long while sleeping toward a distant deadline.
+SCHEDULER_LOOP_POLL_SECONDS: float = 300.0
 
 # CSV report outputs live under ``scheduler/reports_out/`` (listed in root ``.gitignore``).
 SCHEDULER_REPORTS_CSV_DIRNAME: str = "reports_out"

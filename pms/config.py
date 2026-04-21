@@ -8,6 +8,9 @@ from typing import Optional
 
 from market_data.universe import DATA_COLLECTION_BASE_ASSETS
 
+# PMS loop cadence is a micro tuning parameter and intentionally not env-configurable.
+PMS_TICK_INTERVAL_SECONDS: float = 300.0
+
 # Asset price feed runs every tick; interval reserved for future use (seconds).
 ASSET_PRICE_FEED_INTERVAL_SECONDS: float = 60.0
 
@@ -29,8 +32,8 @@ class PmsSettings(BaseSettings):
     """
     PMS configuration from environment.
 
-    Variables: REDIS_URL, DATABASE_URL, PMS_TICK_INTERVAL_SECONDS,
-    PMS_MARK_PRICE_SOURCE, PMS_REBUILD_FROM_ORDERS_INTERVAL_SECONDS.
+    Variables: REDIS_URL, DATABASE_URL, PMS_MARK_PRICE_SOURCE,
+    PMS_REBUILD_FROM_ORDERS_INTERVAL_SECONDS.
     """
 
     model_config = SettingsConfigDict(
@@ -41,11 +44,6 @@ class PmsSettings(BaseSettings):
 
     redis_url: str = Field(default="redis://localhost:6379/0", description="Redis connection URL")
     database_url: Optional[str] = Field(default=None, description="Postgres connection URL")
-    pms_tick_interval_seconds: float = Field(
-        default=10.0,
-        ge=0.1,
-        description="How often to run read → derive → calculate → write (seconds)",
-    )
     pms_mark_price_source: str = Field(
         default="binance",
         description="Mark price provider: 'binance' (Phase 2), 'redis'/'market_data' (Phase 4)",

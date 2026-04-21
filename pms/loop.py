@@ -7,6 +7,7 @@ Uses asset-grain derivation (orders + balance_changes) and stables-first USD fro
 
 from typing import Any, Callable, List, Optional, Union
 
+from pms.config import PMS_TICK_INTERVAL_SECONDS
 from pms.granular_store import write_pms_positions
 from pms.log import logger
 from pms.mark_price import MarkPriceProvider
@@ -90,7 +91,7 @@ def run_one_tick(
 def run_pms_loop(
     pg_connect: Union[str, Callable[[], Any]],
     mark_provider: MarkPriceProvider,
-    tick_interval_seconds: float = 10.0,
+    tick_interval_seconds: float = PMS_TICK_INTERVAL_SECONDS,
     *,
     stop_event: Optional[Any] = None,
     pre_tick_callback: Optional[Callable[[], None]] = None,

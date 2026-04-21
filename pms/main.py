@@ -2,7 +2,7 @@
 PMS entrypoint (12.3.8): run the periodic read → derive → calculate → write loop.
 
 Usage:
-  python -m pms.main           # loop: refresh every PMS_TICK_INTERVAL_SECONDS (default 10s)
+  python -m pms.main           # loop: refresh every pms.config.PMS_TICK_INTERVAL_SECONDS (default 300s)
   python -m pms.main --once   # on-request refresh: run one tick and exit
 Skips Redis; writes granular positions table only.
 When ASSET_PRICE_FEED_SOURCE is set (e.g. binance), runs asset price feed before each tick.
@@ -18,6 +18,7 @@ from pms.config import (
     ASSET_PRICE_FEED_OHLCV_INTERVAL,
     ASSET_PRICE_FEED_OHLCV_MAX_STALENESS_SECONDS,
     ASSET_PRICE_FEED_SOURCE,
+    PMS_TICK_INTERVAL_SECONDS,
 )
 from pms.asset_price_providers import get_asset_price_provider
 from pms.config import PmsSettings
@@ -98,13 +99,13 @@ def main() -> None:
 
     logger.info(
         "Starting PMS loop (tick every {} s, mark source={}); Redis skipped",
-        settings.pms_tick_interval_seconds,
+        PMS_TICK_INTERVAL_SECONDS,
         settings.pms_mark_price_source,
     )
     run_pms_loop(
         settings.database_url,
         mark_provider,
-        tick_interval_seconds=settings.pms_tick_interval_seconds,
+        tick_interval_seconds=PMS_TICK_INTERVAL_SECONDS,
         pre_tick_callback=run_feed_step if feed_provider is not None and feed_assets else None,
     )
 
