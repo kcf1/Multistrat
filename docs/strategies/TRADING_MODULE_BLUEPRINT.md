@@ -85,6 +85,10 @@ flowchart LR
 - Phase 3: portfolio construction plus execution-policy and order-intent publishing.
 - Phase 4: scheduler jobs plus monitoring dashboards and drift alerts.
 
+Detailed phase docs:
+
+- Phase 1: `docs/strategies/PHASE1_DETAILED_PLAN.md`
+
 ## Section planning queue
 
 Use this order for detailed section plans:
