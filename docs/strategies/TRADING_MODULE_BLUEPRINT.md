@@ -30,7 +30,7 @@ All strategy “daily” feature tables are keyed by a **UTC trading-day key**:
 - `signals_precombined_daily`: `bar_ts`, `symbol`, per-family **raw** columns *inside* each `get_*_score` **before** `combine_features` (no scalar `*_score` here; no duplication of L1; optional deep-audit table).
 - `signals_combined_daily`: `bar_ts`, `symbol`, the **11** scalar `*_score` values after `combine_features` (the inputs cross-sectionally ranked into `x_cols`).
 - `signals_xsection_daily`: `bar_ts`, `symbol`, the **11** `*_rank` features in `x_cols` from `double_sort.ipynb` lines 1-5 (regime bins like `mom_bin` are research-only/optional; see Phase 1 plan).
-- `labels_daily`: `bar_ts`, `symbol`, forward returns by configured horizons (horizons are defined on the same bar grid) and the notebook’s supervised `y_cols` fields (for example `vol_weight` / `vol_weighted_return` for `horizon=1`, per Phase 1 plan).
+- `labels_daily`: `bar_ts`, `symbol`, one row per day/symbol, **wide** columns: `fwd_log_return_<h>` (and optional `fwd_simple_return_<h>`) per configured step `h`, plus notebook `y_cols` as suffixed fields (e.g. `vol_weight_1`, `vol_weighted_return_1`); **no** `horizon` column (Phase 1 plan).
 - `model_runs`: train window, hyperparameters, artifact reference, and metrics.
 - `predictions_daily`: per `(symbol, bar_ts)` predicted return and score ranks.
 - `target_weights_daily`: `bar_ts`, per-symbol target gross/net/risk-scaled weights and policy version.

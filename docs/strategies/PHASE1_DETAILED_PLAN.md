@@ -10,7 +10,7 @@ Phase 1 must deliver:
 - `signals_precombined_daily` (per-family **raw precombined series** produced *inside* each `get_*_score` **before** `combine_features` — the internal horizon stacks / intermediate columns that the score functions use; do **not** duplicate L1 or post-L1 “helper frame” fields here; L1 is finalized and not re-expanded via this table)
 - `signals_combined_daily` (the **11** final `*_score` series after each `get_*_score` applies `combine_features` — the inputs to cross-sectional ranking for `x_cols`)
 - `signals_xsection_daily` (11 percentile ranks that materialize the notebook’s `x_cols` selection, ranked from `signals_combined_daily`)
-- `labels_daily` (supervised **targets** and notebook `y_cols` fields, including 1D forward targets — **not** stored in `signals_precombined_daily`)
+- `labels_daily` (one row per day/symbol, **wide** supervised targets: forward returns and notebook `y_cols` **as suffixed columns** e.g. `_1`, `_5` — **no** `horizon` column; **not** stored in `signals_precombined_daily`)
 
 No model training, inference, portfolio optimization, or order publishing in this phase.
 
@@ -223,29 +223,34 @@ The notebook also constructs `mom_bin` / `vol_bin` / `volume_bin` for analysis /
 
 ### 5) `labels_daily`
 
-**Grain / primary key:** one row per `(bar_ts, symbol, horizon)`.
+**Grain / primary key:** one row per `(bar_ts, symbol)`.
 
-Horizons are **integer bar counts** on the same bar grid (not mixed frequencies).
+**Design:** do **not** use a `horizon` column or multiple rows per symbol-day. Use **suffix columns** for each return step \(h\) (integer bar count on the daily grid). Example suffix `h=1` → column names end in `_1`.
 
-#### 5.1) Base forward returns (recommend at minimum)
+Which suffixes to materialize (for example `1`, `5`, `10`) is **config** in `config.py` (same set drives `fwd_log_return_*` and any supervised fields that depend on the forward return at that step).
+
+#### 5.1) Forward returns (per configured suffix `h`)
+
+For each configured `h`, persist:
+
+| Column pattern | Type | Notes |
+| --- | --- | --- |
+| `fwd_log_return_<h>` | `double precision` null | per-symbol `log_return.shift(-h)` evaluated at `bar_ts` (log space) |
+| `fwd_simple_return_<h>` | `double precision` null | optional: `exp(fwd_log_return_<h>) - 1` |
+
+#### 5.2) Supervised learning targets (matches current notebook `y_cols`, suffixed to match §5.1)
+
+In `double_sort.ipynb` lines 1-5, the supervised frame is `['ts','symbol','vol_weight','fwd_return','vol_weighted_return']`. Map to **`_1`-suffixed** wide columns (notebook is 1-bar forward; replace `ts` with `bar_ts`):
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `horizon` | `int` not null | e.g. `1`, `5`, `10` (bars forward) |
-| `fwd_log_return` | `double precision` null | per-symbol `log_return.shift(-horizon)` evaluated at `bar_ts` (for `horizon=1` this is the 1-bar forward return in log space) |
-| `fwd_simple_return` | `double precision` null | optional: `exp(fwd_log_return) - 1` |
+| `vol_weight_1` | `double precision` null | same construction as notebook `vol_weight` (scaling uses L1 / joined fields; as-of at `bar_ts`) |
+| `vol_weighted_return_1` | `double precision` null | notebook: typically `fwd_log_return_1 * vol_weight_1` (same as notebook `vol_weighted_return` for 1D); `fwd_log_return_1` is the **`fwd_log_return_1` column from §5.1** (one column — notebook `fwd_return` in log space) |
+| `vol_weighted_return_rank_1` | `double precision` null | optional: `groupby(bar_ts) rank(pct=True)` of `vol_weighted_return_1` (diagnostic) |
 
-#### 5.2) Supervised learning targets (matches current notebook `y_cols`)
+If you add targets for other steps \(h>1\), add parallel columns (`vol_weight_<h>`, `vol_weighted_return_<h>`, etc.) only when the notebook’s **definitions** for those steps are agreed (default Phase 1: persist **`_1` supervised columns** and forward-return columns for any extra `h` you configure).
 
-In `double_sort.ipynb` lines 1-5, the supervised frame is `['ts','symbol','vol_weight','fwd_return','vol_weighted_return']` (in this plan: replace notebook `ts` with `bar_ts`, and treat `fwd_return` as the 1-bar forward in log space).
-
-Store these for **at least** `horizon=1` (and optionally for other horizons if you generalize the notebook’s definitions consistently):
-
-- `vol_weight` (as used by the notebook’s supervised return scaling)
-- `vol_weighted_return` (as used by the notebook; typically `fwd_log_return * vol_weight` at the same `horizon`)
-- optional: `vol_weighted_return_rank` (cross-sectional `rank(pct=True)` of `vol_weighted_return` on `bar_ts`, if you want parity with notebook diagnostics)
-
-For Phase 1, treat **`labels_daily` as the canonical place** to reproduce the notebook’s `y_cols` (with `bar_ts` replacing `ts`). **Do not** put `y_cols` in `signals_precombined_daily`.
+For Phase 1, treat **`labels_daily` as the canonical place** to reproduce the notebook’s `y_cols` in wide form. **Do not** put `y_cols` in `signals_precombined_daily`.
 
 #### 5.3) Provenance (recommended)
 
@@ -258,7 +263,7 @@ Retention recommendation:
 
 - Keep `features_l1_daily`, `signals_combined_daily`, and `signals_xsection_daily` long-term (these are the minimal training/inference “wide path” for the 11-rank `x_cols` model).
 - Keep `signals_precombined_daily` long-term if you want the deepest audit trail of pre-score internals; otherwise it can be a shorter retention tier.
-- Keep `labels_daily` long-term if you store multi-horizon forward returns and/or persist notebook `y_cols` for supervised learning.
+- Keep `labels_daily` long-term: it stores **wide** suffixed return and supervised columns (add columns when you add configured steps `h` — migrate schema or use a JSON column only if you intentionally defer; Phase 1 assumes fixed known suffixes in code + migration).
 
 ---
 
@@ -292,7 +297,7 @@ Execution semantics:
 ## Detailed task breakdown
 
 - [ ] **Task 1: Define config and contracts**
-  - Create `config.py` constants for horizons, minimum symbol coverage, and clipping/ranking defaults.
+  - Create `config.py` constants for **label return suffixes** (e.g. `1, 5, 10`), minimum symbol coverage, and clipping/ranking defaults.
   - Define column contracts for each output table in one place (`validators.py` or `persistence.py`).
 
 - [ ] **Task 2: Implement market data loader**
@@ -315,8 +320,8 @@ Execution semantics:
   - Enforce per-`bar_ts` cross-sectional invariants (for example, ranks in `[0,1]` for `rank(pct=True)` outputs where applicable) and no NaN when scores are valid.
 
 - [ ] **Task 7: Implement `labels_daily` (returns + notebook `y_cols`)**
-  - Build forward return labels in `labels.py` for configured horizons.
-  - Persist the notebook’s `y_cols` fields (section 5.2) for `horizon=1` (and optionally more horizons) with strict no-lookahead rules.
+  - Build a **wide** label frame in `labels.py`: one row per `(bar_ts, symbol)` with `fwd_log_return_<h>` / optional `fwd_simple_return_<h>` for each configured suffix `h`.
+  - Persist notebook `y_cols` as **`_1` suffixed** columns in section 5.2; strict no-lookahead rules.
 
 - [ ] **Task 8: Implement persistence layer**
   - Add `persistence.py` with table writers and upsert behavior.
@@ -343,7 +348,7 @@ Unit tests:
 - Feature determinism: same input DataFrame yields identical outputs.
 - Shape invariants: `signals_precombined_daily` contains **no** L1 re-duplication columns and **no** scalar `*_score` fields; `signals_combined_daily` includes **11** `*_score` columns (section 3); `signals_xsection_daily` includes **11** `*_rank` columns matching the `x_cols` list in `double_sort.ipynb` lines 1-5; `labels_daily` can reproduce the notebook `y_cols` for supervised learning (section 5.2).
 - Cross-sectional invariants: normalization/rank constraints per `bar_ts`.
-- Label integrity: horizon shifts and null edges are correct.
+- Label integrity: each `fwd_log_return_<h>` uses the correct forward shift; nulls at series ends and warmup are correct.
 - Leakage guard: labels never use the same bar or past-only mishandled offsets.
 
 Persistence tests:
@@ -383,4 +388,4 @@ Integration tests:
 
 ## Handoff to Phase 2
 
-Phase 2 consumes `signals_xsection_daily` for `X`, `labels_daily` for `y` (including the notebook’s `y_cols` fields at `horizon=1` unless you change the target definition), and optionally `signals_precombined_daily` for debugging/explainability of the internal per-family pre-score state. `signals_combined_daily` remains the canonical place to fetch scalar `*_score` values for monitoring and for recomputing ranks offline.
+Phase 2 consumes `signals_xsection_daily` for `X`, `labels_daily` for `y` (including the notebook’s `y_cols` mapped to **wide** `*_1` columns in section 5.2, unless you change the target definition), and optionally `signals_precombined_daily` for debugging/explainability of the internal per-family pre-score state. `signals_combined_daily` remains the canonical place to fetch scalar `*_score` values for monitoring and for recomputing ranks offline.
