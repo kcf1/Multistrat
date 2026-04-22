@@ -2,14 +2,14 @@
 
 ## Recommendation Decisions
 
-- Persist level-1 variables, pre-combined signals, final factors, model predictions, and target weights/order intents.
+- Persist level-1 variables, optional raw per-family pre-score internals, combined scalar scores, cross-sectional rank factors, model predictions, and target weights/order intents.
 - Use weekly retraining with daily inference as default, plus an optional emergency retrain trigger.
 - Keep execution buffers and turnover controls in a separate execution-policy layer (not inside factor/model code).
 
 ## Why this persistence scope
 
 - Level-1 variables (returns/volatility) are reusable across many models and reduce repeated compute.
-- Pre-combined signals and final factors improve auditability/debugging and explainability of portfolio changes.
+- Raw per-family pre-score columns (optional) plus combined scores and cross-sectional factors improve auditability/debugging and explainability of portfolio changes.
 - Predictions and weights/intents are required for post-trade attribution and model drift monitoring.
 - If storage grows too fast, apply retention tiers instead of removing observability.
 
@@ -21,25 +21,31 @@
 - Position baseline and reconciliation: reuse `pms`.
 - Scheduling: register jobs in `scheduler`.
 
-## Data model to add (strategy schema)
+## Data model to add (`strategies_daily` schema)
 
-- `features_l1_daily`: symbol, date, returns/volatility and core risk fields.
-- `signals_precombined_daily`: 36 raw signal variants (12x3) plus metadata.
-- `signals_final_daily`: 12 final cross-sectional normalized factors.
-- `labels_daily`: forward returns by configured horizons.
+All strategy “daily” feature tables are keyed by a **UTC trading-day key**:
+
+- Use `bar_ts timestamptz` as **`<trading_date> 00:00:00+00:00` (GMT/UTC)**. This is the stable per-day join key across strategy tables (it is **not** necessarily equal to the last intraday `open_time`).
+- `features_l1_daily`: `bar_ts` (UTC midnight day key), `symbol`, daily-aggregated inputs (`close` last, volumes/taker base summed), `log_return`, `ewvol_20` (EWM 20), `norm_close` (scaled `log_return` then per-symbol cumulative sum, per notebook), `vwap_250` (250-day ratio, must be computed per symbol), `log_volume`, `log_quote_volume` (no `taker_buy_quote_volume`).
+- `signals_precombined_daily`: `bar_ts`, `symbol`, per-family **raw** columns *inside* each `get_*_score` **before** `combine_features` (no scalar `*_score` here; no duplication of L1; optional deep-audit table).
+- `signals_combined_daily`: `bar_ts`, `symbol`, the **11** scalar `*_score` values after `combine_features` (the inputs cross-sectionally ranked into `x_cols`).
+- `signals_xsection_daily`: `bar_ts`, `symbol`, the **11** `*_rank` features in `x_cols` from `double_sort.ipynb` lines 1-5 (regime bins like `mom_bin` are research-only/optional; see Phase 1 plan).
+- `labels_daily`: `bar_ts`, `symbol`, forward returns by configured horizons (horizons are defined on the same bar grid) and the notebook’s supervised `y_cols` fields (for example `vol_weight` / `vol_weighted_return` for `horizon=1`, per Phase 1 plan).
 - `model_runs`: train window, hyperparameters, artifact reference, and metrics.
-- `predictions_daily`: per symbol/date predicted return and score ranks.
-- `target_weights_daily`: target gross/net/risk-scaled weights and policy version.
-- `order_intents_daily`: desired delta vs current holdings before risk checks.
+- `predictions_daily`: per `(symbol, bar_ts)` predicted return and score ranks.
+- `target_weights_daily`: `bar_ts`, per-symbol target gross/net/risk-scaled weights and policy version.
+- `order_intents_daily`: `bar_ts`, desired per-symbol delta vs current holdings before risk checks.
 
 ## Daily/weekly pipeline
 
 ```mermaid
 flowchart LR
   rawIngest[RawOHLCVInMarketData] --> l1Build[L1FeatureBuild]
-  l1Build --> preSignals[PreCombinedSignals36]
-  preSignals --> finalFactors[FinalFactors12CrossSection]
-  finalFactors --> dailyInfer[DailyInference]
+  l1Build --> preSignals[SignalsPrecombinedRaw]
+  preSignals --> combSignals[SignalsCombinedScores]
+  l1Build --> combSignals
+  combSignals --> xsectionFactors[ModelInputsRanksXCols]
+  xsectionFactors --> dailyInfer[DailyInference]
   weeklyTrain[WeeklyTrainOnRollingWindow] --> modelStore[ModelRegistryAndMetrics]
   modelStore --> dailyInfer
   dailyInfer --> targetWeights[PortfolioConstruction]
