@@ -29,7 +29,7 @@ In scope:
 Out of scope:
 
 - `model_runs`, `predictions_daily`, `target_weights_daily`, `order_intents_daily`.
-- Retraining cadence and scheduler orchestration details beyond a callable phase entrypoint.
+- Which job runner invokes the 01:00 run (cron, Airflow, etc.); the **cadence and batch window** (including that bounds apply to `ohlcv.open_time`) are specified under *Pipeline schedule and lookback* in the Time alignment section.
 - Risk/OMS integration.
 
 ---
@@ -79,10 +79,19 @@ Use Alembic to add strategy-owned tables. Use schema: `strategies_daily`.
 - Store as PostgreSQL `timestamptz` (this should be the canonical **UTC** instant for `00:00:00`, not a “floating” local-midnight without a zone).
 - This is the primary join key for cross-sectional operations: group by `bar_ts` across the universe, not by calendar date.
 
+### Pipeline schedule and lookback
+
+- **When:** all Phase 1 data processing runs **once per day at 01:00** (in the same timezone the pipeline config uses for the trading-day cut; if unspecified, use **UTC** to stay aligned with the stored `bar_ts` convention above).
+- **What:** each run loads the **most recent 24 daily bars** per symbol — the 24 full bars in the **wall-clock** window **from yesterday 01:00 through today 00:00** (i.e. the 24 complete daily bars that are finished once the day closes at 00:00, with the job executing at 01:00 after that close). For rolling feature windows (e.g. 250-day VWAP), the implementation still orders by this daily series; the **batch** is always this 24-bar tail unless a backfill mode overrides the range.
+- **Timestamp column for that window (explicit):** any **time-range filter, predicate, or “from … to …”** condition tied to the pipeline schedule (including the 01:00 / yesterday–today window above) is evaluated on **`market_data.ohlcv.open_time`** — the kline / bar open timestamp — not on a different column (e.g. not `close_time` alone). L1 `close = last(close)` and sorting after ingest still use the same `open_time` ordering described under daily L1 bars; persisted **`bar_ts`** remains the UTC-midnight day key, separate from the raw `open_time` filter.
+- **Primary key in tables:** each row in that batch is still keyed by the normalized per-day `bar_ts` (UTC midnight for that bar’s day key), not by the 01:00 run timestamp.
+
 **Daily L1 bars (per current `double_sort.ipynb` math, with a storage-time tweak for `bar_ts`):** the research pipeline is **not** one row per raw intraday OHLCV print. It first collapses intraday `market_data.ohlcv` to **one row per (UTC calendar `date`, `symbol`)**, with:
 
 - `close = last(close)` for that day (after sorting intraday rows by `open_time`)
 - `volume`, `quote_volume`, `taker_buy_base_volume` = **sum** over intraday rows for that day (the notebook also used to sum `taker_buy_quote_volume`, but the Phase 1 L1 table intentionally omits quote-taker in storage per product decision)
+
+**VWAP (`vwap_250`) and the same L1 inputs:** The 250-day rolling VWAP is `quote_volume.rolling(250).sum() / volume.rolling(250).sum()` (per `symbol`, ordered by `bar_ts`, with the usual `min_periods` policy you choose) — i.e. sum of the last 250 `quote_volume` over sum of the last 250 `volume` — using **the same** per-day `quote_volume` and `volume` that come from that intraday **summation** (not a different OHLCV pass). The intended implementation is to compute it **from the L1 row only**: apply the rolling ratio to the **already-aggregated** `quote_volume` and `volume` (equivalent to re-deriving from raw only if you need a parity check). **Do not** build VWAP from `log_quote_volume` / `log_volume` or other transforms—use the level series. For any feature that relates price to VWAP (e.g. vwapreversion), use the **L1** `close` (last close from the same day bucket) together with L1 `vwap_250` so `close`, `quote_volume`, and `volume` stay consistent. Per day, `quote_volume / volume` is the session VWAP implied by those sums.
 
 **Storage convention:** the notebook’s working frame often uses a `ts` that looks like the **last intraday `open_time`**, but the production tables intentionally **do not** store that timestamp as a column. The persisted key is the UTC-midnight `bar_ts` only.
 
@@ -117,7 +126,7 @@ These columns are recommended on every Phase 1 table:
 | `norm_close` | `double precision` null | notebook: `x = log_return / ewvol_20` then `groupby(symbol) cumsum(x)` (guard divide-by-zero on `ewvol_20`) |
 | `log_volume` | `double precision` null | `log(volume)` (daily `volume` is a sum) |
 | `log_quote_volume` | `double precision` null | `log(quote_volume)` (daily `quote_volume` is a sum) |
-| `vwap_250` | `double precision` null | rolling 250 **daily** bars: \(\sum_{250} quote\_volume / \sum_{250} volume\) with rolling windows **per `symbol`**, ordered by `bar_ts` (the notebook’s expression is written without a `groupby`, but production must not mix symbols in the rolling window) |
+| `vwap_250` | `double precision` null | rolling 250 **daily** bars: `quote_volume.rolling(250).sum() / volume.rolling(250).sum()` **per `symbol`**, ordered by `bar_ts`, using the **L1** `quote_volume` and `volume` from the same summation as the rest of the row (see **VWAP (`vwap_250`) and the same L1 inputs** above; the notebook’s expression is written without a `groupby`, but production must not mix symbols in the rolling window) |
 
 Recommended indexes (in addition to the primary key):
 
@@ -130,7 +139,7 @@ Recommended indexes (in addition to the primary key):
 
 `signals_precombined_daily` stores the **per-family raw “variation” series** *inside* each `get_*_score` implementation **up to, but not including,** the final `combine_features(...)` call that collapses internal horizons into the scalar `*_score` for that family.
 
-Concretely: for each selected score family, materialize the **wide internal frame** the function builds (multi-horizon columns / pre-aggregation features), with **namespaced column names** so different families do not collide (mirror the notebook’s internal naming where stable; otherwise define an explicit rename map in `validators.py`).
+Concretely: for each selected score family, materialize the **wide internal frame** the function builds (multi-horizon columns / pre-aggregation features), with **namespaced column names** so different families do not collide. **Persisted column names** are **`{family}_{n}`** — a family base (`mom`, `trend`, `breakout`, `vwaprev`, `takerratio`, `skew`, `vol`, `relvol`, **`vlm`**, **`quotevlm`**, **`retvlmcor`**, …) and a numeric suffix **`n`** (the only horizon you vary within that family; **three** values of `n` per family, **33** columns total). The notebook’s compound labels (e.g. `10m5`) map to a single `n` (e.g. `10` for the leading span); implement that mapping in `validators.py` if names differ. Notebook helpers `get_volume_score` / `get_quotevol_score` / `get_retvolcor_score` still feed **`vlm_*`**, **`quotevlm_*`**, and **`retvlmcor_*`** columns in persistence.
 
 **What does *not* belong here (by design):**
 
@@ -154,23 +163,23 @@ Do **not** materialize other families for Phase 1 unless you have a non-model co
 
 #### 2.2) Precombined column schema (per `get_*_score`, before `combine_features`)
 
-The following names match the **intermediate `Series` variables** in `strategies/research/double_sort.ipynb` immediately before each `combine_features([...], rescale=True)` call. Persist each as **`double precision` null** on the same `(bar_ts, symbol)` row (same semantics as the notebook: warmup/null edges follow the underlying rolling / EWM windows).
+For each family, materialize **three** `double precision` columns `family_n` (see **`n` values** column), one **general formula** in terms of `n` (and helpers like `d` where noted). All series: **per `symbol`**, ordered by `bar_ts`. `log_return`, `log_volume`, `log_quote_volume` are from L1; **`vwap` in these formulas** is L1 **`vwap_250`**. Warmup / null edges follow the underlying windows. Match `strategies/research/double_sort.ipynb` where the intent is the same; breakout here uses `n ∈ {10, 20, 40}` (not 20/40/80 from the notebook).
 
-**Naming in Postgres:** you may use these names as-is (they are unique across the 11 families) or add a single prefix (for example `pre_mom10m5`) in `validators.py`; the contract is the **set** of series below, not a second parallel naming scheme in application code.
+**Naming in Postgres:** columns are **`{family}_{n}`** (e.g. `mom_10`, `vlm_10`, `quotevlm_20`, `retvlmcor_40`). Optional table-wide prefix in `validators.py` (e.g. `pre_mom_10`, `pre_vlm_10`).
 
-| Family (feeds `*_score` in `signals_combined_daily`) | Notebook helper | Precombined columns to persist (3 × `double precision` each) | Inputs (see L1 / daily frame; not stored again here) |
-| --- | --- | --- | --- |
-| Momentum | `get_mom_score` | `mom10m5`, `mom20m10`, `mom40m20` | `log_return` from L1 (joined working frame) |
-| Trend | `get_trend_score` | `trend5m20`, `trend10m40`, `trend20m80` | `close`, `close.diff().ewm(span=20).std()` |
-| Breakout | `get_breakout_score` | `breakout20`, `breakout40`, `breakout80` | `close`, rolling 20/40/80 min/max |
-| VWAP reversion | `get_vwaprev_score` | `vwaprev5`, `vwaprev10`, `vwaprev20` | `close`, `close.diff().ewm(span=20).std()`, and notebook `vwap` → **`vwap_250`** on the joined L1/signal frame |
-| Taker ratio | `get_takerratio_score` | `takerratio10`, `takerratio20`, `takerratio40` | `taker_buy_base_volume` / `volume` (from L1 daily bar) |
-| Return skew | `get_skew_score` | `skew10`, `skew20`, `skew40` | `log_return` |
-| Volatility level | `get_vol_score` | `vol10`, `vol20`, `vol40` | `log_return.ewm(span=…).std()` |
-| Relative vol | `get_relvol_score` | `relvol10`, `relvol20`, `relvol40` | differences of `log_return.ewm(span=…).std()` across span pairs (see notebook) |
-| Volume level | `get_volume_score` | `volume10`, `volume20`, `volume40` | `log_volume` from L1 |
-| Quote volume level | `get_quotevol_score` | `quotevol10`, `quotevol20`, `quotevol40` | `log_quote_volume` from L1 |
-| Return–volume correlation | `get_retvolcor_score` | `retvolcor10`, `retvolcor20`, `retvolcor40` | `log_return.rolling(…).corr(log_volume)` |
+| Family (feeds `*_score` in `signals_combined_daily`) | `n` values (suffix) | General formula (pandas-style; integer spans) |
+| --- | --- | --- |
+| Momentum | 10, 20, 40 | `mom_n = (log_return.ewm(span=n).sum() - log_return.ewm(span=n // 2).sum()) / (n - n // 2)` — use `ewm(..., adjust=False)` if matching the notebook. |
+| Trend | 5, 10, 20 | `d = close.diff().ewm(span=20).std()` (guard divide-by-zero). `trend_n = (close.ewm(span=n).mean() - close.ewm(span=4 * n).mean()) / d` |
+| Breakout | 10, 20, 40 | `roll_max = close.rolling(n).max()`, `roll_min = close.rolling(n).min()`; `breakout_n = ((close - (roll_max - roll_min) / 2) / (roll_max - roll_min)).ewm(span=5).mean()` (rolling `n` **daily** bars) |
+| VWAP reversion | 5, 10, 20 | `d = close.diff().ewm(span=20).std()` (guarded). `vwaprev_n = (close - vwap.ewm(span=n).mean()) / d` |
+| Taker ratio | 10, 20, 40 | `takerratio_n = (taker_buy_base_volume / volume).ewm(span=n).mean()` |
+| Return skew | 10, 20, 40 | `skew_n = log_return.rolling(n).skew()` |
+| Volatility level | 10, 20, 40 | `vol_n = log_return.ewm(span=n).std()` |
+| Relative vol | 10, 20, 40 | `relvol_n = log_return.ewm(span=n).std() - log_return.ewm(span=2 * n).std()` |
+| Volume level | 10, 20, 40 | `vlm_n = log_volume.ewm(span=n).mean()` |
+| Quote volume level | 10, 20, 40 | `quotevlm_n = log_quote_volume.ewm(span=n).mean()` |
+| Return–volume correlation | 10, 20, 40 | `retvlmcor_n = log_return.rolling(n).corr(log_volume)` |
 
 **Column count:** 11 families × 3 series = **33** precombined numeric columns, plus `bar_ts` / `symbol` / common metadata / optional `n_nonfinite`.
 
@@ -184,7 +193,7 @@ The following names match the **intermediate `Series` variables** in `strategies
 
 Required `*_score` columns (11):
 
-- `mom_score`, `trend_score`, `breakout_score`, `vwaprev_score`, `takerratio_score`, `skew_score`, `vol_score`, `relvol_score`, `volume_score`, `quotevol_score`, `retvolcor_score`
+- `mom_score`, `trend_score`, `breakout_score`, `vwaprev_score`, `takerratio_score`, `skew_score`, `vol_score`, `relvol_score`, `vlm_score`, `quotevlm_score`, `retvlmcor_score`
 
 #### 3.1) Optional debugging / QA columns
 
@@ -210,9 +219,9 @@ Required `*_score` columns (11):
 | `skew_rank` | `double precision` null | `groupby(bar_ts)` | `skew_score` |
 | `vol_rank` | `double precision` null | `groupby(bar_ts)` | `vol_score` |
 | `relvol_rank` | `double precision` null | `groupby(bar_ts)` | `relvol_score` |
-| `volume_rank` | `double precision` null | `groupby(bar_ts)` | `volume_score` |
-| `quotevol_rank` | `double precision` null | `groupby(bar_ts)` | `quotevol_score` |
-| `retvolcor_rank` | `double precision` null | `groupby(bar_ts)` | `retvolcor_score` |
+| `vlm_rank` | `double precision` null | `groupby(bar_ts)` | `vlm_score` |
+| `quotevlm_rank` | `double precision` null | `groupby(bar_ts)` | `quotevlm_score` |
+| `retvlmcor_rank` | `double precision` null | `groupby(bar_ts)` | `retvlmcor_score` |
 | `n_symbols_xs` | `int` null | n/a | optional: `count(*)` within `bar_ts` for diagnostics |
 
 #### 4.1) Optional: research-only regime bins (not in `x_cols`)
@@ -286,7 +295,7 @@ flowchart LR
 
 Execution semantics:
 
-- Run per `bar_ts` batch (or bounded backfill over a time range).
+- **Production default:** one scheduled run per calendar day at **01:00**, processing the **24-bar** lookback (yesterday 01:00 → today 00:00) described under *Pipeline schedule and lookback*. Otherwise: run per `bar_ts` batch or bounded backfill over a time range.
 - Deterministic transforms only; no random components.
 - Idempotent persistence via upsert keyed on table PKs.
 - Fail-fast if data coverage is below configured threshold.
@@ -297,19 +306,20 @@ Execution semantics:
 ## Detailed task breakdown
 
 - [ ] **Task 1: Define config and contracts**
-  - Create `config.py` constants for **label return suffixes** (e.g. `1, 5, 10`), minimum symbol coverage, and clipping/ranking defaults.
+  - Create `config.py` constants for **label return suffixes** (e.g. `1, 5, 10`), the **24-bar** production lookback and **01:00** run assumption (aligned with *Pipeline schedule and lookback*), minimum symbol coverage, and clipping/ranking defaults.
   - Define column contracts for each output table in one place (`validators.py` or `persistence.py`).
 
 - [ ] **Task 2: Implement market data loader**
-  - Add `data_loader.py` to read intraday `market_data.ohlcv` and **build the daily L1 bar** using the same aggregations as the notebook: per **UTC** `(date, symbol)` bucket, `close=last` after sorting, volumes/taker base `sum` (use `max(open_time)` only as an implementation detail to pick `last`, not as a stored column).
+  - Add `data_loader.py` to read intraday `market_data.ohlcv` and **build the daily L1 bar** using the same aggregations as the notebook: per **UTC** `(date, symbol)` bucket, `close=last` after sorting, volumes/taker base `sum` (use `max(open_time)` only as an implementation detail to pick `last`, not as a stored column). For the production time window, **filter and partition by `ohlcv.open_time`** as in *Pipeline schedule and lookback* (not `close_time` for the schedule bounds).
   - Set `bar_ts` to **UTC midnight** for that bucket (`<date> 00:00:00+00:00`). All downstream daily tables use this normalized `bar_ts` as the join key.
 
 - [ ] **Task 3: Implement L1 feature builder**
   - Port notebook return/volatility and first-level financial variables into `features_l1.py`.
+  - Compute `vwap_250` from L1 `quote_volume` and `volume` (same row / same intraday summation; see *VWAP (`vwap_250`) and the same L1 inputs* under Data schema design); wire vwapreversion to L1 `close` + L1 `vwap_250`.
   - Add deterministic null handling and per-symbol warmup trimming logic.
 
 - [ ] **Task 4: Implement `signals_precombined_daily` (raw per-family pre-`combine_features` bundles)**
-  - Port the **11** `get_*_score` families listed in section 2 into `signals_precombined.py`, persisting the **internal multi-column bundles** *before* `combine_features` (no scalar `*_score` columns in this table).
+  - Port the **11** `get_*_score` families listed in section 2 into `signals_precombined.py`, persisting the **internal multi-column bundles** *before* `combine_features` (no scalar `*_score` columns in this table), with persisted column names **`{family}_{n}`** and the **general formula per family** in *Precombined column schema* (section 2.2) (rename in `validators.py` if the notebook’s intermediate names are not already `family_n`).
   - Do **not** re-materialize L1 fields here; read joins to `features_l1_daily` when a score function needs inputs like `vwap_250`.
 
 - [ ] **Task 5: Implement `signals_combined_daily` (final `*_score` before cross-sectional ranking)**
@@ -329,7 +339,7 @@ Execution semantics:
 
 - [ ] **Task 9: Implement phase entrypoint**
   - Add `pipeline.py` orchestrating extract -> transform -> validate -> persist.
-  - Support run modes: single-`bar_ts` run and time-range backfill.
+  - Support run modes: **default production window** (24 bars, after the 00:00 close, as run at 01:00), single-`bar_ts` run, and time-range backfill.
 
 - [ ] **Task 10: Add migration and indexes**
   - Add Alembic migration creating all Phase 1 tables and key indexes.
@@ -346,6 +356,7 @@ Execution semantics:
 Unit tests:
 
 - Feature determinism: same input DataFrame yields identical outputs.
+- `vwap_250` on L1 matches `quote_volume.rolling(250).sum() / volume.rolling(250).sum()` on the **same** daily `quote_volume` and `volume` columns (not from `log_*` or a second raw read).
 - Shape invariants: `signals_precombined_daily` contains **no** L1 re-duplication columns and **no** scalar `*_score` fields; `signals_combined_daily` includes **11** `*_score` columns (section 3); `signals_xsection_daily` includes **11** `*_rank` columns matching the `x_cols` list in `double_sort.ipynb` lines 1-5; `labels_daily` can reproduce the notebook `y_cols` for supervised learning (section 5.2).
 - Cross-sectional invariants: normalization/rank constraints per `bar_ts`.
 - Label integrity: each `fwd_log_return_<h>` uses the correct forward shift; nulls at series ends and warmup are correct.
@@ -359,6 +370,7 @@ Persistence tests:
 Integration tests:
 
 - E2E smoke over a small historical window (for example 30-60 days).
+- With the **24-bar** / **01:00** default, validate that a production-mode run only touches the expected `bar_ts` range (ends at the day that closed at 00:00 before the run) and that the **extract** is bounded with predicates on **`ohlcv.open_time`**, not `close_time`, per *Pipeline schedule and lookback*.
 - Validate non-empty outputs and minimum symbol coverage.
 - Validate joins across `features_l1_daily`, `signals_combined_daily`, and `signals_xsection_daily` by `(bar_ts, symbol)` without orphan rows.
 - If `signals_precombined_daily` is enabled, validate it joins 1:1 to `(bar_ts, symbol)` and that its internal bundles can reproduce `signals_combined_daily` (spot-check a small window, if you add a consistency check).
