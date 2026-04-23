@@ -7,8 +7,8 @@ Build a production-grade daily pipeline that transforms market data into determi
 Phase 1 must deliver:
 
 - `features_l1_daily`
-- `signals_precombined_daily` (per-family **raw precombined series** produced *inside* each `get_*_score` **before** `combine_features` — the internal horizon stacks / intermediate columns that the score functions use; do **not** duplicate L1 or post-L1 “helper frame” fields here; L1 is finalized and not re-expanded via this table)
-- `signals_combined_daily` (the **11** final `*_score` series after each `get_*_score` applies `combine_features` — the inputs to cross-sectional ranking for `x_cols`)
+- `signals_precombined_daily` (per-family **raw precombined series** produced *inside* each `get_*_score` **before** the family-level final reduction step (often `combine_features`) — the internal horizon stacks / intermediate columns that the score functions use; do **not** duplicate L1 or post-L1 “helper frame” fields here; L1 is finalized and not re-expanded via this table)
+- `signals_combined_daily` (the **11** final `*_score` series after each family applies its final reduction step; `combine_features` is one implementation option, not a requirement — the inputs to cross-sectional ranking for `x_cols`)
 - `signals_xsection_daily` (11 percentile ranks that materialize the notebook’s `x_cols` selection, ranked from `signals_combined_daily`)
 - `labels_daily` (one row per day/symbol, **wide** supervised targets: forward returns and notebook `y_cols` **as suffixed columns** e.g. `_1`, `_5` — **no** `horizon` column; **not** stored in `signals_precombined_daily`)
 
@@ -137,7 +137,7 @@ Recommended indexes (in addition to the primary key):
 
 **Grain / primary key:** one row per `(bar_ts, symbol)`.
 
-`signals_precombined_daily` stores the **per-family raw “variation” series** *inside* each `get_*_score` implementation **up to, but not including,** the final `combine_features(...)` call that collapses internal horizons into the scalar `*_score` for that family.
+`signals_precombined_daily` stores the **per-family raw “variation” series** *inside* each `get_*_score` implementation **up to, but not including,** the family-level final reduction step (commonly `combine_features(...)`) that collapses internal horizons into the scalar `*_score` for that family.
 
 Concretely: for each selected score family, materialize the **wide internal frame** the function builds (multi-horizon columns / pre-aggregation features), with **namespaced column names** so different families do not collide. **Persisted column names** are **`{family}_{n}`** — a family base (`mom`, `trend`, `breakout`, `vwaprev`, `takerratio`, `skew`, `vol`, `relvol`, **`vlm`**, **`quotevlm`**, **`retvlmcor`**, …) and a numeric suffix **`n`** (the only horizon you vary within that family; **three** values of `n` per family, **33** columns total). The notebook’s compound labels (e.g. `10m5`) map to a single `n` (e.g. `10` for the leading span); implement that mapping in `validators.py` if names differ. Notebook helpers `get_volume_score` / `get_quotevol_score` / `get_retvolcor_score` still feed **`vlm_*`**, **`quotevlm_*`**, and **`retvlmcor_*`** columns in persistence.
 
@@ -161,7 +161,7 @@ Do **not** materialize other families for Phase 1 unless you have a non-model co
 | --- | --- | --- |
 | `n_nonfinite` | `int` | count of non-finite values in the precombined feature bundle (after computing, before any optional trimming) |
 
-#### 2.2) Precombined column schema (per `get_*_score`, before `combine_features`)
+#### 2.2) Precombined column schema (per `get_*_score`, before family-level final reduction)
 
 For each family, materialize **three** `double precision` columns `family_n` (see **`n` values** column), one **general formula** in terms of `n` (and helpers like `d` where noted). All series: **per `symbol`**, ordered by `bar_ts`. `log_return`, `log_volume`, `log_quote_volume` are from L1; **`vwap` in these formulas** is L1 **`vwap_250`**. Warmup / null edges follow the underlying windows. Match `strategies/research/double_sort.ipynb` where the intent is the same; breakout here uses `n ∈ {10, 20, 40}` (not 20/40/80 from the notebook).
 
@@ -189,7 +189,7 @@ For each family, materialize **three** `double precision` columns `family_n` (se
 
 **Grain / primary key:** one row per `(bar_ts, symbol)`.
 
-`signals_combined_daily` stores the **11** scalar `*_score` values produced *after* each `get_*_score` runs `combine_features(...)` (or equivalent final reduction). These are the values cross-sectionally ranked into `signals_xsection_daily`.
+`signals_combined_daily` stores the **11** scalar `*_score` values produced *after* each `get_*_score` runs its final reduction step. `combine_features(...)` is one valid implementation pattern, but this table is not coupled to that specific function, so model-specific reductions are also valid if they produce the same per-`(bar_ts, symbol)` scalar `*_score` contract. These are the values cross-sectionally ranked into `signals_xsection_daily`.
 
 Required `*_score` columns (11):
 
@@ -318,8 +318,8 @@ Execution semantics:
   - Compute `vwap_250` from L1 `quote_volume` and `volume` (same row / same intraday summation; see *VWAP (`vwap_250`) and the same L1 inputs* under Data schema design); wire vwapreversion to L1 `close` + L1 `vwap_250`.
   - Add deterministic null handling and per-symbol warmup trimming logic.
 
-- [ ] **Task 4: Implement `signals_precombined_daily` (raw per-family pre-`combine_features` bundles)**
-  - Port the **11** `get_*_score` families listed in section 2 into `signals_precombined.py`, persisting the **internal multi-column bundles** *before* `combine_features` (no scalar `*_score` columns in this table), with persisted column names **`{family}_{n}`** and the **general formula per family** in *Precombined column schema* (section 2.2) (rename in `validators.py` if the notebook’s intermediate names are not already `family_n`).
+- [ ] **Task 4: Implement `signals_precombined_daily` (raw per-family pre-final-reduction bundles)**
+  - Port the **11** `get_*_score` families listed in section 2 into `signals_precombined.py`, persisting the **internal multi-column bundles** *before* the family-level final reduction (often `combine_features`; no scalar `*_score` columns in this table), with persisted column names **`{family}_{n}`** and the **general formula per family** in *Precombined column schema* (section 2.2) (rename in `validators.py` if the notebook’s intermediate names are not already `family_n`).
   - Do **not** re-materialize L1 fields here; read joins to `features_l1_daily` when a score function needs inputs like `vwap_250`.
 
 - [ ] **Task 5: Implement `signals_combined_daily` (final `*_score` before cross-sectional ranking)**
