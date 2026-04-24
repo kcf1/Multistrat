@@ -204,7 +204,7 @@ Required `*_score` columns (10):
 
 **Grain / primary key:** one row per `(bar_ts, symbol)`.
 
-`signals_xsection_daily` materializes the notebook’s `x_cols` (lines 1-5) as **percentile ranks** of the selected `*_score` fields in **`signals_combined_daily`**:
+`signals_xsection_daily` materializes the notebook’s `x_cols` (lines 1-5) from the selected `*_score` fields in **`signals_combined_daily`**. **Percentile ranking is the default implementation for Phase 1 parity with the notebook, not a hard requirement**; other cross-sectional transforms are valid if they preserve the same per-`(bar_ts, symbol)` feature contract for `x_cols`.
 
 - ranks: `df.groupby([bar_ts]).rank(pct=True)` (same as the notebook; in SQL/Python, `bar_ts` is the day key and replaces notebook `ts`)
 
@@ -234,7 +234,7 @@ The notebook also constructs `mom_bin` / `vol_bin` / `volume_bin` for analysis /
 
 **Design:** do **not** use a `horizon` column or multiple rows per symbol-day. Use **suffix columns** for each return step \(h\) (integer bar count on the daily grid). Example suffix `h=1` → column names end in `_1`.
 
-Which suffixes to materialize (for example `1`, `5`, `10`) is **config** in `config.py` (same set drives `fwd_log_return_*` and any supervised fields that depend on the forward return at that step).
+Which suffixes to materialize (for example `1`, `5`, `10`) is **config** in `config.py` (same set drives `logret_fwd_*` / `simpret_fwd_*` and any supervised fields that depend on the forward return at that step).
 
 #### 5.1) Forward returns (per configured suffix `h`)
 
@@ -242,20 +242,18 @@ For each configured `h`, persist:
 
 | Column pattern | Type | Notes |
 | --- | --- | --- |
-| `fwd_log_return_<h>` | `double precision` null | per-symbol `log_return.shift(-h)` evaluated at `bar_ts` (log space) |
-| `fwd_simple_return_<h>` | `double precision` null | optional: `exp(fwd_log_return_<h>) - 1` |
+| `logret_fwd_<h>` | `double precision` null | computed from raw L1 `close` as `log(close).diff(h).shift(-h)` (forward-looking by `h` bars, aligned at `bar_ts`) |
+| `simpret_fwd_<h>` | `double precision` null | computed from raw L1 `close` as `close.pct_change(h).shift(-h)` (forward simple return, aligned at `bar_ts`) |
 
 #### 5.2) Supervised learning targets (matches current notebook `y_cols`, suffixed to match §5.1)
 
-In `double_sort.ipynb` lines 1-5, the supervised frame is `['ts','symbol','vol_weight','fwd_return','vol_weighted_return']`. Map to **`_1`-suffixed** wide columns (notebook is 1-bar forward; replace `ts` with `bar_ts`):
+In `double_sort.ipynb` lines 1-5, the supervised frame is `['ts','symbol','vol_weight','fwd_return','vol_weighted_return']`. For Phase 1, persist only the required output columns in wide form (notebook is 1-bar forward; replace `ts` with `bar_ts`):
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `vol_weight_1` | `double precision` null | same construction as notebook `vol_weight` (scaling uses L1 / joined fields; as-of at `bar_ts`) |
-| `vol_weighted_return_1` | `double precision` null | notebook: typically `fwd_log_return_1 * vol_weight_1` (same as notebook `vol_weighted_return` for 1D); `fwd_log_return_1` is the **`fwd_log_return_1` column from §5.1** (one column — notebook `fwd_return` in log space) |
-| `vol_weighted_return_rank_1` | `double precision` null | optional: `groupby(bar_ts) rank(pct=True)` of `vol_weighted_return_1` (diagnostic) |
+| `normret_fwd_<h>` | `double precision` null | computed from raw L1 `close` as `log(close).diff(h).shift(-h) / ewvol_20` (equivalently `logret_fwd_<h> / ewvol_20`); denominator volatility field is configurable later (for example a different `ewvol_*`). |
 
-If you add targets for other steps \(h>1\), add parallel columns (`vol_weight_<h>`, `vol_weighted_return_<h>`, etc.) only when the notebook’s **definitions** for those steps are agreed (default Phase 1: persist **`_1` supervised columns** and forward-return columns for any extra `h` you configure).
+If you add targets for other steps \(h>1\), add parallel columns for the persisted supervised outputs (for example `normret_fwd_<h> = log(close).diff(h).shift(-h) / <configured_vol_field>`) only when the notebook’s **definitions** for those steps are agreed (default Phase 1: persist **`_1` supervised columns** and forward-return columns for any extra `h` you configure).
 
 For Phase 1, treat **`labels_daily` as the canonical place** to reproduce the notebook’s `y_cols` in wide form. **Do not** put `y_cols` in `signals_precombined_daily`.
 
@@ -324,11 +322,12 @@ Execution semantics:
   - Implement `signals_combined.py` to produce the **10** scalar `*_score` values (section 3), using the same `get_*_score` definitions as the notebook and deterministically reading inputs from `features_l1_daily` (and any internal temporaries not persisted).
 
 - [ ] **Task 6: Implement `signals_xsection_daily` (`x_cols` from notebook lines 1-5)**
-  - Add rank assembly in `signals_xsection.py` to reproduce the **10** `*_rank` columns in `x_cols` using **only** the selected `*_score` fields from `signals_combined_daily` (notebook pattern: `groupby(bar_ts)`; verify when porting).
-  - Enforce per-`bar_ts` cross-sectional invariants (for example, ranks in `[0,1]` for `rank(pct=True)` outputs where applicable) and no NaN when scores are valid.
+  - Add cross-sectional feature assembly in `signals_xsection.py` to reproduce the **10** `x_cols` features using **only** the selected `*_score` fields from `signals_combined_daily`.
+  - For Phase 1 parity, use notebook-style percentile ranking (`groupby(bar_ts)` + `rank(pct=True)`), but keep the implementation boundary explicit so alternative cross-sectional transforms can be swapped in later.
+  - Enforce per-`bar_ts` invariants for the chosen transform (for ranking, ranks in `[0,1]` where applicable) and no NaN when scores are valid.
 
 - [ ] **Task 7: Implement `labels_daily` (returns + notebook `y_cols`)**
-  - Build a **wide** label frame in `labels.py`: one row per `(bar_ts, symbol)` with `fwd_log_return_<h>` / optional `fwd_simple_return_<h>` for each configured suffix `h`.
+  - Build a **wide** label frame in `labels.py`: one row per `(bar_ts, symbol)` with `logret_fwd_<h>` / optional `simpret_fwd_<h>` for each configured suffix `h`.
   - Persist notebook `y_cols` as **`_1` suffixed** columns in section 5.2; strict no-lookahead rules.
 
 - [ ] **Task 8: Implement persistence layer**
@@ -357,7 +356,7 @@ Unit tests:
 - `vwap_250` on L1 matches `quote_volume.rolling(250).sum() / volume.rolling(250).sum()` on the **same** daily `quote_volume` and `volume` columns (not from `log_*` or a second raw read).
 - Shape invariants: `signals_precombined_daily` contains **no** L1 re-duplication columns and **no** scalar `*_score` fields; `signals_combined_daily` includes **10** `*_score` columns (section 3); `signals_xsection_daily` includes **10** `*_rank` columns matching the `x_cols` list in `double_sort.ipynb` lines 1-5; `labels_daily` can reproduce the notebook `y_cols` for supervised learning (section 5.2).
 - Cross-sectional invariants: normalization/rank constraints per `bar_ts`.
-- Label integrity: each `fwd_log_return_<h>` uses the correct forward shift; nulls at series ends and warmup are correct.
+- Label integrity: each `logret_fwd_<h>` uses the correct forward shift; nulls at series ends and warmup are correct.
 - Leakage guard: labels never use the same bar or past-only mishandled offsets.
 
 Persistence tests:
