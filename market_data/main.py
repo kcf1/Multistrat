@@ -39,6 +39,7 @@ from typing import Any
 from loguru import logger
 
 from market_data.config import (
+    MarketDataSettings,
     BASIS_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
     BASIS_SCHEDULER_INGEST_INTERVAL_SECONDS,
     BASIS_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
@@ -54,7 +55,6 @@ from market_data.config import (
     TAKER_BUYSELL_VOLUME_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
     TAKER_BUYSELL_VOLUME_SCHEDULER_INGEST_INTERVAL_SECONDS,
     TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
-    UNIVERSE_BACKFILL_CHECK_INTERVAL_SECONDS,
     UNIVERSE_REFRESH_INTERVAL_SECONDS,
     load_settings,
 )
@@ -64,7 +64,10 @@ from market_data.jobs.correct_window import run_correct_window
 from market_data.jobs.correct_window_taker_buy_sell_volume import (
     run_correct_window_taker_buy_sell_volume,
 )
-from market_data.jobs.ingest_basis_rate import run_ingest_basis_rate
+from market_data.jobs.ingest_basis_rate import (
+    run_backfill_new_symbols_basis_rate,
+    run_ingest_basis_rate,
+)
 from market_data.jobs.ingest_open_interest import run_ingest_open_interest
 from market_data.jobs.ingest_top_trader_long_short import run_ingest_top_trader_long_short
 from market_data.jobs.ingest_taker_buy_sell_volume import run_ingest_taker_buy_sell_volume
@@ -83,9 +86,33 @@ from market_data.jobs.correct_window_top_trader_long_short import (
 from market_data.jobs.repair_gap_top_trader_long_short import (
     run_repair_top_trader_long_short_gaps_policy_window_all_series,
 )
-from market_data.jobs.universe_backfill_new_symbols import run_universe_backfill_new_symbols
+from market_data.jobs.ingest_ohlcv import run_backfill_new_symbols_ohlcv
+from market_data.jobs.ingest_open_interest import run_backfill_new_symbols_open_interest
+from market_data.jobs.ingest_taker_buy_sell_volume import (
+    run_backfill_new_symbols_taker_buy_sell_volume,
+)
+from market_data.jobs.ingest_top_trader_long_short import (
+    run_backfill_new_symbols_top_trader_long_short,
+)
 from market_data.jobs.universe_refresh_top100 import run_universe_refresh_top100
 from market_data.universe_runtime import resolve_runtime_symbols
+
+
+def _run_per_dataset_initial_backfills(settings: MarketDataSettings) -> None:
+    """Each dataset tracks its own ``initial_backfill_done`` on its cursor table."""
+    for name, fn in (
+        ("ohlcv", run_backfill_new_symbols_ohlcv),
+        ("basis_rate", run_backfill_new_symbols_basis_rate),
+        ("open_interest", run_backfill_new_symbols_open_interest),
+        ("taker_buy_sell_volume", run_backfill_new_symbols_taker_buy_sell_volume),
+        ("top_trader_long_short", run_backfill_new_symbols_top_trader_long_short),
+    ):
+        try:
+            n = fn(settings)
+            if n:
+                logger.info("{} initial backfill: {} symbol(s)/pair(s) committed", name, n)
+        except Exception:
+            logger.exception("{} initial backfill step failed", name)
 
 
 def _next_periodic_deadline_after(completed_at: float, period_seconds: int) -> float:
@@ -364,7 +391,6 @@ def run_scheduler_loop(
     taker_correct_interval_seconds: int,
     taker_repair_interval_seconds: int,
     universe_refresh_interval_seconds: int,
-    universe_backfill_check_interval_seconds: int,
     stop_event: threading.Event,
 ) -> None:
     next_ingest: float | None = None
@@ -390,7 +416,6 @@ def run_scheduler_loop(
     )
 
     next_universe_refresh: float | None = None
-    next_universe_backfill: float | None = None
 
     repair_cadence = (
         f"every {repair_interval_seconds}s"
@@ -412,7 +437,7 @@ def run_scheduler_loop(
         "ingest_top_trader_long_short every {}s, correct_window_top_trader_long_short every {}s, "
         "repair_gap_top_trader_long_short {} ({}), "
         "ingest_taker_buy_sell_volume every {}s, correct_window_taker_buy_sell_volume every {}s, "
-        "universe_refresh every {}s, universe_backfill_check every {}s",
+        "universe_refresh every {}s (per-dataset initial backfills on same tick)",
         ingest_interval_seconds,
         correct_interval_seconds,
         repair_cadence,
@@ -438,7 +463,6 @@ def run_scheduler_loop(
         taker_ingest_interval_seconds,
         taker_correct_interval_seconds,
         universe_refresh_interval_seconds,
-        universe_backfill_check_interval_seconds,
     )
 
     while not stop_event.is_set():
@@ -495,26 +519,14 @@ def run_scheduler_loop(
 
         now = time.time()
         if _due(now, next_universe_refresh):
+            settings = load_settings()
             try:
-                settings = load_settings()
                 run_universe_refresh_top100(settings, n=100)
             except Exception:
                 logger.exception("universe_refresh_top100 step failed")
+            _run_per_dataset_initial_backfills(settings)
             next_universe_refresh = _next_periodic_deadline_after(
                 time.time(), universe_refresh_interval_seconds
-            )
-
-        now = time.time()
-        if _due(now, next_universe_backfill):
-            try:
-                settings = load_settings()
-                n = run_universe_backfill_new_symbols(settings)
-                if n:
-                    logger.info("universe_backfill_new_symbols: backfilled {} new symbol(s)", n)
-            except Exception:
-                logger.exception("universe_backfill_new_symbols step failed")
-            next_universe_backfill = _next_periodic_deadline_after(
-                time.time(), universe_backfill_check_interval_seconds
             )
 
         now = time.time()
@@ -630,7 +642,6 @@ def run_scheduler_loop(
             _sleep_deadline(next_taker_correct),
             _sleep_deadline(next_taker_repair),
             _sleep_deadline(next_universe_refresh),
-            _sleep_deadline(next_universe_backfill),
         )
         sleep_for = max(0.0, min(1.0, deadline - time.time()))
         if sleep_for > 0:
@@ -670,6 +681,13 @@ def main() -> None:
             _run_open_interest_ingest_step()
             _run_top_trader_ingest_step()
             _run_taker_ingest_step()
+
+            settings_once = load_settings()
+            try:
+                run_universe_refresh_top100(settings_once, n=100)
+            except Exception:
+                logger.exception("universe_refresh_top100 (--once) failed")
+            _run_per_dataset_initial_backfills(settings_once)
 
             _run_correct_step()
             if args.with_repair:
@@ -722,7 +740,6 @@ def main() -> None:
         taker_correct_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
         taker_repair_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
         universe_refresh_interval_seconds=UNIVERSE_REFRESH_INTERVAL_SECONDS,
-        universe_backfill_check_interval_seconds=UNIVERSE_BACKFILL_CHECK_INTERVAL_SECONDS,
         stop_event=stop,
     )
 

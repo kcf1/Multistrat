@@ -40,10 +40,13 @@ from market_data.providers.executor import ProviderExecutor, ProviderExecutorCon
 from market_data.schemas import BasisPoint
 from market_data.storage import (
     get_basis_cursor,
+    mark_basis_initial_backfill_done,
     max_sample_time_basis,
+    query_basis_pairs_initial_backfill_complete,
     upsert_basis_cursor,
     upsert_basis_points,
 )
+from market_data.universe_runtime import resolve_runtime_symbols
 
 
 @dataclass(frozen=True)
@@ -353,3 +356,54 @@ def run_ingest_basis_rate(
     finally:
         if own_executor and ex is not None:
             ex.shutdown(wait=True)
+
+
+def run_backfill_new_symbols_basis_rate(settings: MarketDataSettings) -> int:
+    """Initial backfill per pair for all (contract_type, period) keys; idempotent via ``basis_cursor``."""
+    resolved = list(resolve_runtime_symbols(settings))
+    if not resolved:
+        return 0
+    conn0 = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn0)
+    try:
+        already = query_basis_pairs_initial_backfill_complete(
+            conn0, contract_types=BASIS_CONTRACT_TYPES, periods=BASIS_PERIODS
+        )
+    finally:
+        conn0.close()
+    new_pairs = [p for p in resolved if p not in already]
+    if not new_pairs:
+        return 0
+    prov = build_binance_perps_provider(settings)
+    committed = 0
+    logger.info(
+        "basis_rate initial backfill: {} pair(s) need completion (contract_types={}, periods={})",
+        len(new_pairs),
+        list(BASIS_CONTRACT_TYPES),
+        list(BASIS_PERIODS),
+    )
+    for pair in sorted(new_pairs):
+        conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
+        try:
+            for contract_type in BASIS_CONTRACT_TYPES:
+                for period in BASIS_PERIODS:
+                    ingest_basis_series(
+                        conn,
+                        prov,
+                        pair,
+                        contract_type,
+                        period,
+                        use_watermark=False,
+                        skip_existing_when_no_watermark=True,
+                    )
+                    mark_basis_initial_backfill_done(conn, pair, contract_type, period)
+            conn.commit()
+            committed += 1
+            logger.info("basis_rate initial backfill committed: pair={}", pair)
+        except Exception:
+            conn.rollback()
+            logger.exception("basis_rate initial backfill failed: pair={}", pair)
+        finally:
+            conn.close()
+    return committed

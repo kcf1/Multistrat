@@ -129,13 +129,21 @@ run docker compose "${COMPOSE_ARGS[@]}" run --rm oms python -m alembic upgrade h
 echo "Starting OMS only (symbol sync before backfill; pms/risk/scheduler after market_data)..."
 run docker compose "${COMPOSE_ARGS[@]}" up -d oms
 
-BACKFILL_ARGS=(python scripts/backfill_all_no_watermarks.py)
-if [[ "${SKIP_EXISTING}" -eq 1 ]]; then
-  BACKFILL_ARGS+=(--skip-existing)
-fi
-
 echo "Running backfill (no watermarks) before starting market_data..."
-run docker compose "${COMPOSE_ARGS[@]}" run --rm oms "${BACKFILL_ARGS[@]}"
+BACKFILL_SCRIPTS=(
+  scripts/backfill_ohlcv.py
+  scripts/backfill_basis_rate.py
+  scripts/backfill_open_interest.py
+  scripts/backfill_taker_buy_sell_volume.py
+  scripts/backfill_top_trader_long_short.py
+)
+for bf in "${BACKFILL_SCRIPTS[@]}"; do
+  BF_CMD=(python "$bf" --no-watermark)
+  if [[ "${SKIP_EXISTING}" -eq 1 ]]; then
+    BF_CMD+=(--skip-existing)
+  fi
+  run docker compose "${COMPOSE_ARGS[@]}" run --rm oms "${BF_CMD[@]}"
+done
 
 echo "Starting market_data..."
 run docker compose "${COMPOSE_ARGS[@]}" up -d market_data

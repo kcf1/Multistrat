@@ -123,11 +123,6 @@ def main() -> int:
     )
     parser.add_argument("--no-watermark", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
-    parser.add_argument(
-        "--symbols",
-        default=None,
-        help="Optional comma-separated symbols to run (overrides default TAKER_BUYSELL_VOLUME_SYMBOLS).",
-    )
     args = parser.parse_args()
     if args.skip_existing and not args.no_watermark:
         parser.error("--skip-existing requires --no-watermark")
@@ -151,8 +146,6 @@ def main() -> int:
     conn = psycopg2.connect(settings.database_url)
     configure_for_market_data(conn)
     symbols = TAKER_BUYSELL_VOLUME_SYMBOLS
-    if args.symbols:
-        symbols = tuple(s.strip().upper() for s in args.symbols.split(",") if s.strip())
     results = []
     try:
         for symbol in symbols:

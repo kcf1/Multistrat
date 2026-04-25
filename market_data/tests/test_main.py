@@ -76,6 +76,14 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
         "market_data.main.run_correct_window_taker_buy_sell_volume",
         lambda _s: calls.append("taker_correct") or [],
     )
+    monkeypatch.setattr(
+        "market_data.main.run_universe_refresh_top100",
+        lambda *_a, **_k: calls.append("universe_refresh"),
+    )
+    monkeypatch.setattr(
+        "market_data.main._run_per_dataset_initial_backfills",
+        lambda *_a, **_k: calls.append("universe_backfills"),
+    )
     monkeypatch.setattr(sys, "argv", ["market_data.main", "--once"])
     main()
     assert calls == [
@@ -84,6 +92,8 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
         "oi_ingest",
         "top_ingest",
         "taker_ingest",
+        "universe_refresh",
+        "universe_backfills",
         "correct",
         "basis_correct",
         "oi_correct",
@@ -155,6 +165,14 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
         "market_data.main.run_repair_taker_buy_sell_volume_gaps_policy_window_all_series",
         lambda _s: calls.append("taker_repair") or [],
     )
+    monkeypatch.setattr(
+        "market_data.main.run_universe_refresh_top100",
+        lambda *_a, **_k: calls.append("universe_refresh"),
+    )
+    monkeypatch.setattr(
+        "market_data.main._run_per_dataset_initial_backfills",
+        lambda *_a, **_k: calls.append("universe_backfills"),
+    )
     monkeypatch.setattr(sys, "argv", ["market_data.main", "--once", "--with-repair"])
     main()
     assert calls == [
@@ -163,6 +181,8 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
         "oi_ingest",
         "top_ingest",
         "taker_ingest",
+        "universe_refresh",
+        "universe_backfills",
         "correct",
         "repair",
         "basis_correct",
@@ -212,7 +232,6 @@ def test_scheduler_loop_respects_immediate_stop(monkeypatch: pytest.MonkeyPatch)
         taker_correct_interval_seconds=3600,
         taker_repair_interval_seconds=0,
         universe_refresh_interval_seconds=86_400,
-        universe_backfill_check_interval_seconds=300,
         stop_event=stop,
     )
     assert called == []
@@ -258,10 +277,40 @@ def test_scheduler_loop_runs_ingest_once(monkeypatch: pytest.MonkeyPatch) -> Non
         taker_correct_interval_seconds=3600,
         taker_repair_interval_seconds=0,
         universe_refresh_interval_seconds=86_400,
-        universe_backfill_check_interval_seconds=300,
         stop_event=stop,
     )
     assert stop.is_set()
+
+
+def test_run_per_dataset_initial_backfills_invokes_all(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+
+    def _track(name: str):
+        def _inner(_s: SimpleNamespace) -> int:
+            order.append(name)
+            return 0
+
+        return _inner
+
+    monkeypatch.setattr(
+        "market_data.main.run_backfill_new_symbols_ohlcv", _track("ohlcv")
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_backfill_new_symbols_basis_rate", _track("basis")
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_backfill_new_symbols_open_interest", _track("oi")
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_backfill_new_symbols_taker_buy_sell_volume", _track("taker")
+    )
+    monkeypatch.setattr(
+        "market_data.main.run_backfill_new_symbols_top_trader_long_short", _track("top")
+    )
+    from market_data.main import _run_per_dataset_initial_backfills
+
+    _run_per_dataset_initial_backfills(mock_settings)  # type: ignore[arg-type]
+    assert order == ["ohlcv", "basis", "oi", "taker", "top"]
 
 
 def test_next_periodic_deadline_after() -> None:

@@ -106,13 +106,21 @@ Write-Host "Starting OMS only (symbol sync before backfill; pms/risk/scheduler a
   RunCmd $cmd
 }
 
-$backfillCmd = @("docker", "compose") + $composeArgs + @("run", "--rm", "oms", "python", "scripts/backfill_all_no_watermarks.py")
-if ($SkipExisting) {
-  $backfillCmd += "--skip-existing"
-}
-
 Write-Host "Running backfill (no watermarks) before starting market_data..."
-RunCmd $backfillCmd
+$backfillScripts = @(
+  "scripts/backfill_ohlcv.py",
+  "scripts/backfill_basis_rate.py",
+  "scripts/backfill_open_interest.py",
+  "scripts/backfill_taker_buy_sell_volume.py",
+  "scripts/backfill_top_trader_long_short.py"
+)
+foreach ($script in $backfillScripts) {
+  $bf = @("docker", "compose") + $composeArgs + @("run", "--rm", "oms", "python", $script, "--no-watermark")
+  if ($SkipExisting) {
+    $bf += "--skip-existing"
+  }
+  RunCmd $bf
+}
 
 Write-Host "Starting market_data..."
 {

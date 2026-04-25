@@ -95,7 +95,7 @@ python scripts/seed_universe_from_static.py
 python scripts/bootstrap_universe_from_cmc.py
 ```
 
-Then run the service normally (`python -m market_data.main` or via Docker). The scheduler will periodically refresh the universe from CMC and run one-time all-dataset backfills for newly eligible symbols.
+Then run the service normally (`python -m market_data.main` or via Docker). On each **universe refresh** tick, the scheduler runs **per-dataset** initial backfills: each ingest job resolves symbols from the universe, finds series missing ``initial_backfill_done`` on its own cursor table, runs a no-watermark gap-skip ingest for that dataset only, then marks those cursor rows done (no shared orchestrator or ``universe_symbol_backfills`` table).
 
 See [docs/PHASE4_DETAILED_PLAN.md](../docs/PHASE4_DETAILED_PLAN.md) §9, [docs/market_data/STANDARD_DATA_PIPELINE.md](../docs/market_data/STANDARD_DATA_PIPELINE.md), [docs/market_data/OPEN_INTEREST_IMPLEMENTATION_PLAN.md](../docs/market_data/OPEN_INTEREST_IMPLEMENTATION_PLAN.md), and [docs/oms/BINANCE_API_RULES.md](../docs/oms/BINANCE_API_RULES.md).
 

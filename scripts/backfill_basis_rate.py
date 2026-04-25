@@ -126,11 +126,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Basis backfill / catch-up into Postgres.")
     parser.add_argument("--no-watermark", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
-    parser.add_argument(
-        "--pairs",
-        default=None,
-        help="Optional comma-separated pairs to run (overrides default BASIS_PAIRS).",
-    )
     args = parser.parse_args()
     if args.skip_existing and not args.no_watermark:
         parser.error("--skip-existing requires --no-watermark")
@@ -152,8 +147,6 @@ def main() -> int:
     conn = psycopg2.connect(settings.database_url)
     configure_for_market_data(conn)
     pairs = BASIS_PAIRS
-    if args.pairs:
-        pairs = tuple(s.strip().upper() for s in args.pairs.split(",") if s.strip())
     results = []
     try:
         for pair in pairs:

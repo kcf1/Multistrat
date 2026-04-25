@@ -29,9 +29,8 @@ DEFAULT_BINANCE_PERPS_REST_URL: str = "https://fapi.binance.com"
 DEFAULT_CMC_BASE_URL: str = "https://pro-api.coinmarketcap.com"
 
 # Universe refresh / bootstrap cadence (micro, not env).
+# Per-dataset initial backfills run on the same scheduler tick after a successful refresh attempt.
 UNIVERSE_REFRESH_INTERVAL_SECONDS: int = 86_400
-# Check for newly eligible symbols to backfill (micro).
-UNIVERSE_BACKFILL_CHECK_INTERVAL_SECONDS: int = 300
 
 # Min seconds between REST calls **per provider instance** (shared by all jobs on that instance).
 # ``None`` = **unlimited** (default) until venue weight/QPS is documented.

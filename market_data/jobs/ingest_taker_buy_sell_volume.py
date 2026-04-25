@@ -42,10 +42,13 @@ from market_data.providers.executor import ProviderExecutor, ProviderExecutorCon
 from market_data.schemas import TakerBuySellVolumePoint
 from market_data.storage import (
     get_taker_buy_sell_volume_cursor,
+    mark_taker_buy_sell_volume_initial_backfill_done,
     max_sample_time_taker_buy_sell_volume,
+    query_taker_buy_sell_volume_symbols_initial_backfill_complete,
     upsert_taker_buy_sell_volume_cursor,
     upsert_taker_buy_sell_volume_points,
 )
+from market_data.universe_runtime import resolve_runtime_symbols
 
 
 @dataclass(frozen=True)
@@ -359,4 +362,52 @@ def run_ingest_taker_buy_sell_volume(
     finally:
         if own_executor and ex is not None:
             ex.shutdown(wait=True)
+
+
+def run_backfill_new_symbols_taker_buy_sell_volume(settings: MarketDataSettings) -> int:
+    """Initial backfill per symbol for all configured periods; idempotent via cursor flags."""
+    resolved = list(resolve_runtime_symbols(settings))
+    if not resolved:
+        return 0
+    conn0 = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn0)
+    try:
+        already = query_taker_buy_sell_volume_symbols_initial_backfill_complete(
+            conn0, periods=TAKER_BUYSELL_VOLUME_PERIODS
+        )
+    finally:
+        conn0.close()
+    new_syms = [s for s in resolved if s not in already]
+    if not new_syms:
+        return 0
+    prov = build_binance_perps_provider(settings)
+    committed = 0
+    logger.info(
+        "taker_buy_sell_volume initial backfill: {} symbol(s) need completion (periods={})",
+        len(new_syms),
+        list(TAKER_BUYSELL_VOLUME_PERIODS),
+    )
+    for sym in sorted(new_syms):
+        conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
+        try:
+            for period in TAKER_BUYSELL_VOLUME_PERIODS:
+                ingest_taker_buy_sell_volume_series(
+                    conn,
+                    prov,
+                    sym,
+                    period,
+                    use_watermark=False,
+                    skip_existing_when_no_watermark=True,
+                )
+                mark_taker_buy_sell_volume_initial_backfill_done(conn, sym, period)
+            conn.commit()
+            committed += 1
+            logger.info("taker_buy_sell_volume initial backfill committed: symbol={}", sym)
+        except Exception:
+            conn.rollback()
+            logger.exception("taker_buy_sell_volume initial backfill failed: symbol={}", sym)
+        finally:
+            conn.close()
+    return committed
 

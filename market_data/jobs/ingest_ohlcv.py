@@ -41,10 +41,13 @@ from market_data.providers.binance_spot import build_binance_spot_provider
 from market_data.providers.executor import ProviderExecutor, ProviderExecutorConfig
 from market_data.storage import (
     get_ingestion_cursor,
+    mark_ohlcv_initial_backfill_done,
     max_open_time_ohlcv,
+    query_ohlcv_symbols_initial_backfill_complete,
     upsert_ingestion_cursor,
     upsert_ohlcv_bars,
 )
+from market_data.universe_runtime import resolve_runtime_symbols
 
 
 @dataclass(frozen=True)
@@ -403,3 +406,57 @@ def run_ingest_ohlcv(
     finally:
         if own_executor and ex is not None:
             ex.shutdown(wait=True)
+
+
+def run_backfill_new_symbols_ohlcv(settings: MarketDataSettings) -> int:
+    """
+    One-time initial backfill per symbol (all configured intervals), tracked in
+    ``ingestion_cursor.initial_backfill_done``. Runs gap-skip ingest without watermark.
+    """
+    resolved = list(resolve_runtime_symbols(settings))
+    if not resolved:
+        return 0
+    conn0 = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn0)
+    try:
+        already = query_ohlcv_symbols_initial_backfill_complete(
+            conn0, intervals=settings.intervals
+        )
+    finally:
+        conn0.close()
+    new_syms = [s for s in resolved if s not in already]
+    if not new_syms:
+        return 0
+    fetch_semaphore = threading.BoundedSemaphore(max(1, int(OHLCV_PROVIDER_MAX_IN_FLIGHT_FETCHES)))
+    prov: KlinesProvider = _KlinesProviderFetchGate(
+        build_binance_spot_provider(settings), fetch_semaphore
+    )
+    committed = 0
+    logger.info(
+        "ohlcv initial backfill: {} symbol(s) need completion (intervals={})",
+        len(new_syms),
+        list(settings.intervals),
+    )
+    for sym in sorted(new_syms):
+        conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
+        try:
+            for iv in settings.intervals:
+                ingest_ohlcv_series(
+                    conn,
+                    prov,
+                    sym,
+                    iv,
+                    use_watermark=False,
+                    skip_existing_when_no_watermark=True,
+                )
+                mark_ohlcv_initial_backfill_done(conn, sym, iv)
+            conn.commit()
+            committed += 1
+            logger.info("ohlcv initial backfill committed: symbol={}", sym)
+        except Exception:
+            conn.rollback()
+            logger.exception("ohlcv initial backfill failed: symbol={}", sym)
+        finally:
+            conn.close()
+    return committed

@@ -78,8 +78,7 @@ Rules:
    - `is_current_top100=false`
    - `current_rank=NULL`
    - keep all other historical fields
-5. Trigger initial backfill for newly added base assets across enabled datasets (OHLCV, basis, open interest, top-trader, taker buy/sell), using runtime symbol resolution and per-symbol retry/give-up logging.
-   - This trigger must be scheduler-managed: once a new eligible symbol is detected, enqueue/run all dataset backfills once for that symbol.
+5. After each **universe refresh** scheduler tick, each **dataset** independently runs its own initial-backfill pass: resolve tradable symbols from the universe + `oms.symbols`, find series keys missing ``initial_backfill_done`` on **that dataset's cursor table**, run ``ingest_*_series(use_watermark=False, skip_existing_when_no_watermark=True)`` over that dataset's configured horizon, then mark ``initial_backfill_done`` on those cursor rows. No cross-dataset orchestrator; disabling a dataset is a code/config change in that job only.
 6. Emit summary logs: requested=100, active_current_count, dropped_today_count, newly_added_count, backfill_started_count, cumulative_ever_count.
 
 Failure policy:
@@ -119,7 +118,7 @@ Given requirement "do not remove delisted coins, just expand table along time", 
 - Add dedicated symbol-resolution helper(s) for data jobs (separate from universe storage contract).
 - Add daily updater job in `market_data/jobs/` (or scheduler if preferred).
 - Wire daily updater cadence in `market_data/main.py` scheduler loop.
-- Add scheduler-managed "new-symbol backfill" job that runs after successful daily refresh and executes all dataset backfills once per newly eligible symbol.
+- Wire **per-dataset** initial backfill functions (in each ``ingest_*.py``) on the same cadence as universe refresh in ``market_data/main.py`` (each dataset owns idempotency via ``initial_backfill_done`` on its cursor table; ``market_data.universe_symbol_backfills`` removed).
 - Update market-data ingest/correct/repair jobs to read runtime-resolved symbols (from base assets + separate tradability resolution), not only import-time constants.
 - PMS wiring (phase-split):
   - keep current startup initialization flow (`init_assets_stables` + `sync_assets_from_symbols`) for safe cutover.
@@ -151,21 +150,22 @@ Micro constants (`market_data/config.py`):
 2. Implement storage helpers and updater job. ✅ (A2 core pieces)
 3. Run one-time seed from `market_data/universe.py` into DB universe table. ✅ (script added)
 4. Run one-time CMC upsert to reconcile seeded universe with latest top-100 before read switch. ✅ (script added)
-5. Implement/verify immediate backfill trigger for newly added base assets.
-6. Run updater manually to validate initial daily refresh behavior.
-7. Verify scheduler executes one-time all-dataset backfills for each newly detected eligible symbol.
+5. Add Alembic migrations: ``initial_backfill_done`` / ``initial_backfill_at`` on each dataset cursor table; drop ``universe_symbol_backfills``. ✅
+6. Implement per-dataset ``run_backfill_new_symbols_*`` in each ingest module + storage query/mark helpers. ✅
+7. Run updater manually to validate initial daily refresh behavior.
+8. Verify per-dataset backfills complete cursor flags for newly resolved symbols without duplicate work on subsequent ticks.
 
 ### Phase B - read switch
 
-8. Add runtime universe resolver.
-9. Switch market-data ingest/correct/repair jobs to runtime resolver (wiring-only rollout; behavior remains consistent).
-10. No static fallback: market-data symbol set is DB-driven (fail loudly if universe/symbols mapping is unavailable).
+- Add runtime universe resolver.
+- Switch market-data ingest/correct/repair jobs to runtime resolver (wiring-only rollout; behavior remains consistent).
+- No static fallback: market-data symbol set is DB-driven (fail loudly if universe/symbols mapping is unavailable).
 
 ### Phase C - PMS staged adoption
 
-11. Keep PMS startup initialization wiring as-is for initial rollout.
-12. Add gated periodic PMS universe pull to upsert missing `assets` rows / `usd_symbol` mappings after startup.
-13. Apply PMS admission filter so only tradable + pricing-resolvable symbols are retained/active in PMS asset feed scope.
+- Keep PMS startup initialization wiring as-is for initial rollout.
+- Add gated periodic PMS universe pull to upsert missing `assets` rows / `usd_symbol` mappings after startup.
+- Apply PMS admission filter so only tradable + pricing-resolvable symbols are retained/active in PMS asset feed scope.
 
 ---
 
@@ -193,7 +193,7 @@ Micro constants (`market_data/config.py`):
 - newly added base-asset path triggers backfill once,
 - repeated daily run does not re-trigger duplicate initial backfill for already-known symbols.
 - tradability resolution tests (asset exists in universe but has no tradable symbol => handled gracefully by data jobs).
-- scheduler orchestration test: when a new symbol is detected, all dataset backfills are invoked once for that symbol.
+- per-dataset backfill tests: each ``run_backfill_new_symbols_*`` skips symbols already marked ``initial_backfill_done`` on that dataset's cursor table; scheduler runs all five on the universe-refresh tick.
 - idempotency test: already-backfilled symbol is not re-enqueued/re-run on subsequent daily cycles unless policy explicitly allows.
 - PMS compatibility tests: startup-only initialization path still works before periodic universe pull is enabled.
 - PMS filter tests:
@@ -218,10 +218,11 @@ Micro constants (`market_data/config.py`):
 - [x] [A2] Implement daily universe updater job.
 - [x] [A3] Implement one-time seed job from `market_data/universe.py` into DB universe table.
 - [x] [A4] Implement one-time CMC bootstrap upsert before runtime read switch.
-- [x] [A5] Add scheduler-managed new-symbol detector + one-time all-dataset backfill job.
-- [x] [A6] Wire updater into `market_data/main.py` scheduler loop.
+- [x] [A5] Add cursor-table ``initial_backfill_done`` / ``initial_backfill_at`` migrations + drop ``universe_symbol_backfills``.
+- [x] [A5b] Per-dataset ``run_backfill_new_symbols_*`` in each ingest module + storage query/mark helpers.
+- [x] [A6] Wire universe refresh + per-dataset backfills into `market_data/main.py` scheduler loop.
 - [ ] [A6] Run updater manually to validate initial daily refresh behavior.
-- [x] [A7] Verify scheduler executes one-time all-dataset backfills for each newly detected eligible symbol.
+- [x] [A7] Verify per-dataset initial backfills complete without duplicate work for already-flagged symbols.
 - [x] [B8] Implement runtime universe resolver (DB-only; no static fallback).
 - [x] [B9] Unwire market_data runtime from import-time static symbol constants.
 - [x] [B9] Switch ingest/correct/repair jobs to runtime universe resolver.

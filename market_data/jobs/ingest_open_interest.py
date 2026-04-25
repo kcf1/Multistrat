@@ -36,10 +36,13 @@ from market_data.providers.executor import ProviderExecutor, ProviderExecutorCon
 from market_data.schemas import OpenInterestPoint
 from market_data.storage import (
     get_open_interest_cursor,
+    mark_open_interest_initial_backfill_done,
     max_sample_time_open_interest,
+    query_open_interest_symbols_initial_backfill_complete,
     upsert_open_interest_cursor,
     upsert_open_interest_points,
 )
+from market_data.universe_runtime import resolve_runtime_symbols
 
 
 @dataclass(frozen=True)
@@ -357,3 +360,54 @@ def run_ingest_open_interest(
     finally:
         if own_executor and ex is not None:
             ex.shutdown(wait=True)
+
+
+def run_backfill_new_symbols_open_interest(settings: MarketDataSettings) -> int:
+    """Initial backfill per symbol for all (contract_type, period) keys; idempotent via ``open_interest_cursor``."""
+    resolved = list(resolve_runtime_symbols(settings))
+    if not resolved:
+        return 0
+    conn0 = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn0)
+    try:
+        already = query_open_interest_symbols_initial_backfill_complete(
+            conn0, contract_types=OPEN_INTEREST_CONTRACT_TYPES, periods=OPEN_INTEREST_PERIODS
+        )
+    finally:
+        conn0.close()
+    new_syms = [s for s in resolved if s not in already]
+    if not new_syms:
+        return 0
+    prov = build_binance_perps_provider(settings)
+    committed = 0
+    logger.info(
+        "open_interest initial backfill: {} symbol(s) need completion (contract_types={}, periods={})",
+        len(new_syms),
+        list(OPEN_INTEREST_CONTRACT_TYPES),
+        list(OPEN_INTEREST_PERIODS),
+    )
+    for sym in sorted(new_syms):
+        conn = psycopg2.connect(settings.database_url)
+        configure_for_market_data(conn)
+        try:
+            for contract_type in OPEN_INTEREST_CONTRACT_TYPES:
+                for period in OPEN_INTEREST_PERIODS:
+                    ingest_open_interest_series(
+                        conn,
+                        prov,
+                        sym,
+                        contract_type,
+                        period,
+                        use_watermark=False,
+                        skip_existing_when_no_watermark=True,
+                    )
+                    mark_open_interest_initial_backfill_done(conn, sym, contract_type, period)
+            conn.commit()
+            committed += 1
+            logger.info("open_interest initial backfill committed: symbol={}", sym)
+        except Exception:
+            conn.rollback()
+            logger.exception("open_interest initial backfill failed: symbol={}", sym)
+        finally:
+            conn.close()
+    return committed

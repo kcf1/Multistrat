@@ -168,7 +168,7 @@ Optional flags:
 - **`--skip-existing`** — only for backfill: attempt to skip contiguous existing history when possible.
 - **`--dry-run`** — print commands without running.
 
-The script: builds app images → **`docker compose up -d`** for `postgres` + `redis` → **`docker compose run --rm oms python -m alembic upgrade head`** → starts **`oms`** only → runs **`scripts/backfill_all_no_watermarks.py`** → starts **`market_data`** → starts **`pms`**, **`risk`**, and **`scheduler`**. **Asset rows** (stables + `usd_symbol` from `symbols`) are initialized when **PMS** starts; use **`§8.4`** scripts manually if you need a full **`assets`** reset or a one-off without bringing up PMS.
+The script: builds app images → **`docker compose up -d`** for `postgres` + `redis` → **`docker compose run --rm oms python -m alembic upgrade head`** → starts **`oms`** only → runs **`scripts/backfill_*.py`** (each with **`--no-watermark`**, optional **`--skip-existing`**) → starts **`market_data`** → starts **`pms`**, **`risk`**, and **`scheduler`**. **Asset rows** (stables + `usd_symbol` from `symbols`) are initialized when **PMS** starts; use **`§8.4`** scripts manually if you need a full **`assets`** reset or a one-off without bringing up PMS.
 
 On Windows PowerShell, use **`.\scripts\deploy_stack.ps1`** with the same flags (**`-NoBuild`**, **`-WithTools`**, **`-SkipExisting`**, **`-DryRun`**).
 

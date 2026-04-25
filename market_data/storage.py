@@ -1180,30 +1180,292 @@ def query_universe_base_assets(
         return [str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]]
 
 
-def universe_backfill_is_done(conn: PsycopgConnection, *, symbol: str) -> bool:
-    sym = (symbol or "").strip().upper()
-    if not sym:
-        return False
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def query_ohlcv_symbols_initial_backfill_complete(
+    conn: PsycopgConnection, *, intervals: Sequence[str]
+) -> set[str]:
+    """
+    Symbols for which every configured ``interval`` has an ``ingestion_cursor`` row with
+    ``initial_backfill_done = true``.
+    """
+    ivs = sorted({(i or "").strip() for i in intervals if (i or "").strip()})
+    if not ivs:
+        return set()
+    n = len(ivs)
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT 1 FROM universe_symbol_backfills WHERE symbol = %s
+            SELECT symbol FROM ingestion_cursor
+            WHERE interval = ANY(%s) AND initial_backfill_done = true
+            GROUP BY symbol
+            HAVING COUNT(DISTINCT interval) = %s
             """,
-            (sym,),
+            (ivs, n),
         )
-        return cur.fetchone() is not None
+        return {str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]}
 
 
-def mark_universe_backfill_done(conn: PsycopgConnection, *, symbol: str) -> None:
-    sym = (symbol or "").strip().upper()
-    if not sym:
-        return
+def mark_ohlcv_initial_backfill_done(
+    conn: PsycopgConnection, symbol: str, interval: str
+) -> None:
+    """Set ``initial_backfill_done`` for one OHLCV series; upsert cursor row if missing."""
+    sym = symbol.strip().upper()
+    iv = interval.strip()
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO universe_symbol_backfills (symbol, backfilled_at, updated_at)
-            VALUES (%s, now(), now())
-            ON CONFLICT (symbol) DO UPDATE SET updated_at = now()
+            UPDATE ingestion_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE symbol = %s AND interval = %s
             """,
-            (sym,),
+            (sym, iv),
+        )
+        if cur.rowcount:
+            return
+    last = max_open_time_ohlcv(conn, sym, iv) or _EPOCH_UTC
+    upsert_ingestion_cursor(conn, sym, iv, last)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ingestion_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE symbol = %s AND interval = %s
+            """,
+            (sym, iv),
+        )
+
+
+def query_basis_pairs_initial_backfill_complete(
+    conn: PsycopgConnection,
+    *,
+    contract_types: Sequence[str],
+    periods: Sequence[str],
+) -> set[str]:
+    cts = sorted({(c or "").strip().upper() for c in contract_types if (c or "").strip()})
+    pds = sorted({(p or "").strip() for p in periods if (p or "").strip()})
+    keys = [(ct, pd) for ct in cts for pd in pds]
+    if not keys:
+        return set()
+    expected = len(keys)
+    flat: list[str] = [x for ct, pd in keys for x in (ct, pd)]
+    placeholders = ", ".join(["(%s,%s)"] * len(keys))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT pair FROM basis_cursor
+            WHERE initial_backfill_done = true
+              AND (contract_type, period) IN ({placeholders})
+            GROUP BY pair
+            HAVING COUNT(DISTINCT (contract_type, period)) = %s
+            """,
+            (*flat, expected),
+        )
+        return {str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]}
+
+
+def mark_basis_initial_backfill_done(
+    conn: PsycopgConnection, pair: str, contract_type: str, period: str
+) -> None:
+    p = pair.strip().upper()
+    ct = contract_type.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE basis_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE pair = %s AND contract_type = %s AND period = %s
+            """,
+            (p, ct, pd),
+        )
+        if cur.rowcount:
+            return
+    last = max_sample_time_basis(conn, p, ct, pd) or _EPOCH_UTC
+    upsert_basis_cursor(conn, p, ct, pd, last)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE basis_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE pair = %s AND contract_type = %s AND period = %s
+            """,
+            (p, ct, pd),
+        )
+
+
+def query_open_interest_symbols_initial_backfill_complete(
+    conn: PsycopgConnection,
+    *,
+    contract_types: Sequence[str],
+    periods: Sequence[str],
+) -> set[str]:
+    cts = sorted({(c or "").strip().upper() for c in contract_types if (c or "").strip()})
+    pds = sorted({(p or "").strip() for p in periods if (p or "").strip()})
+    keys = [(ct, pd) for ct in cts for pd in pds]
+    if not keys:
+        return set()
+    expected = len(keys)
+    flat: list[str] = [x for ct, pd in keys for x in (ct, pd)]
+    placeholders = ", ".join(["(%s,%s)"] * len(keys))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT symbol FROM open_interest_cursor
+            WHERE initial_backfill_done = true
+              AND (contract_type, period) IN ({placeholders})
+            GROUP BY symbol
+            HAVING COUNT(DISTINCT (contract_type, period)) = %s
+            """,
+            (*flat, expected),
+        )
+        return {str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]}
+
+
+def mark_open_interest_initial_backfill_done(
+    conn: PsycopgConnection, symbol: str, contract_type: str, period: str
+) -> None:
+    sym = symbol.strip().upper()
+    ct = contract_type.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE open_interest_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE symbol = %s AND contract_type = %s AND period = %s
+            """,
+            (sym, ct, pd),
+        )
+        if cur.rowcount:
+            return
+    last = max_sample_time_open_interest(conn, sym, ct, pd) or _EPOCH_UTC
+    upsert_open_interest_cursor(conn, sym, ct, pd, last)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE open_interest_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE symbol = %s AND contract_type = %s AND period = %s
+            """,
+            (sym, ct, pd),
+        )
+
+
+def query_taker_buy_sell_volume_symbols_initial_backfill_complete(
+    conn: PsycopgConnection, *, periods: Sequence[str]
+) -> set[str]:
+    pds = sorted({(p or "").strip() for p in periods if (p or "").strip()})
+    if not pds:
+        return set()
+    n = len(pds)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT symbol FROM taker_buy_sell_volume_cursor
+            WHERE period = ANY(%s) AND initial_backfill_done = true
+            GROUP BY symbol
+            HAVING COUNT(DISTINCT period) = %s
+            """,
+            (pds, n),
+        )
+        return {str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]}
+
+
+def mark_taker_buy_sell_volume_initial_backfill_done(
+    conn: PsycopgConnection, symbol: str, period: str
+) -> None:
+    sym = symbol.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE taker_buy_sell_volume_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE symbol = %s AND period = %s
+            """,
+            (sym, pd),
+        )
+        if cur.rowcount:
+            return
+    last = max_sample_time_taker_buy_sell_volume(conn, sym, pd) or _EPOCH_UTC
+    upsert_taker_buy_sell_volume_cursor(conn, sym, pd, last)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE taker_buy_sell_volume_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE symbol = %s AND period = %s
+            """,
+            (sym, pd),
+        )
+
+
+def query_top_trader_long_short_symbols_initial_backfill_complete(
+    conn: PsycopgConnection, *, periods: Sequence[str]
+) -> set[str]:
+    pds = sorted({(p or "").strip() for p in periods if (p or "").strip()})
+    if not pds:
+        return set()
+    n = len(pds)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT symbol FROM top_trader_long_short_cursor
+            WHERE period = ANY(%s) AND initial_backfill_done = true
+            GROUP BY symbol
+            HAVING COUNT(DISTINCT period) = %s
+            """,
+            (pds, n),
+        )
+        return {str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]}
+
+
+def mark_top_trader_long_short_initial_backfill_done(
+    conn: PsycopgConnection, symbol: str, period: str
+) -> None:
+    sym = symbol.strip().upper()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE top_trader_long_short_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE symbol = %s AND period = %s
+            """,
+            (sym, pd),
+        )
+        if cur.rowcount:
+            return
+    last = max_sample_time_top_trader_long_short(conn, sym, pd) or _EPOCH_UTC
+    upsert_top_trader_long_short_cursor(conn, sym, pd, last)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE top_trader_long_short_cursor
+            SET initial_backfill_done = true,
+                initial_backfill_at = now(),
+                updated_at = now()
+            WHERE symbol = %s AND period = %s
+            """,
+            (sym, pd),
         )
