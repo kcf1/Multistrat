@@ -229,6 +229,6 @@ Micro constants (`market_data/config.py`):
 - [x] [C11] Keep PMS startup initialization (`init_assets_stables` + `sync_assets_from_symbols`) for rollout compatibility.
 - [x] [C12] Add gated periodic PMS universe pull to refresh `assets` / `usd_symbol` mappings after startup.
 - [x] [C13] Add PMS admission filter (tradable + pricing-resolvable) before writing/updating PMS `assets` feed scope.
-- [ ] [T] Add unit/storage/job/integration tests listed above.
-- [ ] [T] Update `market_data/README.md` with operating notes and failure behavior.
+- [x] [T] Add unit/storage/job/integration tests listed above.
+- [x] [T] Update `market_data/README.md` with operating notes and failure behavior.
 

@@ -13,6 +13,7 @@ from market_data.config import (
     BINANCE_FUTURES_30D_DATASET_BACKFILL_DAYS,
     DEFAULT_BINANCE_PERPS_REST_URL,
     DEFAULT_BINANCE_REST_URL,
+    DEFAULT_CMC_BASE_URL,
     FUTURES_CORRECT_WINDOW_MAX_WORKERS,
     FUTURES_REPAIR_GAP_MAX_WORKERS,
     OPEN_INTEREST_CONTRACT_TYPES,
@@ -114,6 +115,26 @@ def test_binance_perps_rest_url_from_market_data_binance_perps_base_url(
     )
     s = MarketDataSettings()
     assert s.binance_perps_rest_url == "https://fapi.binance.com"
+
+
+def test_cmc_base_url_default(minimal_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MARKET_DATA_CMC_BASE_URL", raising=False)
+
+    class NoDotEnv(MarketDataSettings):
+        model_config = SettingsConfigDict(env_file=None, extra="ignore")
+
+    s = NoDotEnv()
+    assert s.cmc_base_url == DEFAULT_CMC_BASE_URL
+
+
+def test_cmc_base_url_override(minimal_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MARKET_DATA_CMC_BASE_URL", "https://example.com/")
+
+    class NoDotEnv(MarketDataSettings):
+        model_config = SettingsConfigDict(env_file=None, extra="ignore")
+
+    s = NoDotEnv()
+    assert s.cmc_base_url == "https://example.com"
 
 
 def test_scheduler_cadence_is_module_constants() -> None:

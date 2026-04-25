@@ -71,9 +71,31 @@ Notes for perps history endpoints (basis + open interest, `period=1h`):
 | `MARKET_DATA_DATABASE_URL` | Overrides `DATABASE_URL` when set |
 | `MARKET_DATA_BINANCE_BASE_URL` | Public REST base (e.g. testnet) |
 | `MARKET_DATA_BINANCE_PERPS_BASE_URL` | Perps REST base for basis / funding / open-interest / top-trader datasets |
+| `MARKET_DATA_CMC_API_KEY` | CoinMarketCap API key (required for universe refresh/bootstrap) |
+| `MARKET_DATA_CMC_BASE_URL` | Optional CMC base URL override (default: `https://pro-api.coinmarketcap.com`) |
 
 Scheduler timing is **not** env — edit `OHLCV_SCHEDULER_*`, `BASIS_SCHEDULER_*`, and `OPEN_INTEREST_SCHEDULER_*`
 constants in [`config.py`](config.py).
+
+## Universe-driven symbol set (Top-100 expansion)
+
+Market-data ingestion symbol sets are driven by:
+
+- **Universe membership**: `market_data.universe_assets` (asset-only)
+- **Tradability mapping**: `oms.symbols` (e.g. Binance spot `USDT`)
+
+There is **no static fallback** in runtime ingestion: if the universe table is empty or `oms.symbols` has no mapping, the ingest step fails loudly.
+
+### One-time bootstrap (per environment)
+
+After migrations:
+
+```bash
+python scripts/seed_universe_from_static.py
+python scripts/bootstrap_universe_from_cmc.py
+```
+
+Then run the service normally (`python -m market_data.main` or via Docker). The scheduler will periodically refresh the universe from CMC and run one-time all-dataset backfills for newly eligible symbols.
 
 See [docs/PHASE4_DETAILED_PLAN.md](../docs/PHASE4_DETAILED_PLAN.md) §9, [docs/market_data/STANDARD_DATA_PIPELINE.md](../docs/market_data/STANDARD_DATA_PIPELINE.md), [docs/market_data/OPEN_INTEREST_IMPLEMENTATION_PLAN.md](../docs/market_data/OPEN_INTEREST_IMPLEMENTATION_PLAN.md), and [docs/oms/BINANCE_API_RULES.md](../docs/oms/BINANCE_API_RULES.md).
 
