@@ -20,6 +20,11 @@ ASSET_PRICE_FEED_SOURCE: str = "ohlcv_db"
 # Bases to update from the price feed — same as ``market_data.universe.DATA_COLLECTION_BASE_ASSETS``.
 ASSET_PRICE_FEED_ASSETS: tuple[str, ...] = DATA_COLLECTION_BASE_ASSETS
 
+# Phase C: PMS periodic universe pull (micro; gated).
+PMS_UNIVERSE_PULL_ENABLED: bool = False
+PMS_UNIVERSE_PULL_INTERVAL_SECONDS: float = 3600.0
+PMS_UNIVERSE_PULL_MODE: str = "ever_seen"  # "ever_seen" or "current_only"
+
 # Internal OHLCV DB feed config (micro, in-code): interval and freshness guard.
 ASSET_PRICE_FEED_OHLCV_INTERVAL: str = "1h"
 ASSET_PRICE_FEED_OHLCV_MAX_STALENESS_SECONDS: int = 1800

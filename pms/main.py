@@ -10,6 +10,7 @@ When ASSET_PRICE_FEED_SOURCE is set (e.g. binance), runs asset price feed before
 
 import argparse
 import sys
+import time
 
 from pms.asset_init import init_assets_stables, sync_assets_from_symbols
 from pms.asset_price_feed import run_asset_price_feed_step
@@ -18,6 +19,9 @@ from pms.config import (
     ASSET_PRICE_FEED_OHLCV_INTERVAL,
     ASSET_PRICE_FEED_OHLCV_MAX_STALENESS_SECONDS,
     ASSET_PRICE_FEED_SOURCE,
+    PMS_UNIVERSE_PULL_ENABLED,
+    PMS_UNIVERSE_PULL_INTERVAL_SECONDS,
+    PMS_UNIVERSE_PULL_MODE,
     PMS_TICK_INTERVAL_SECONDS,
 )
 from pms.asset_price_providers import get_asset_price_provider
@@ -25,6 +29,7 @@ from pms.config import PmsSettings
 from pms.log import logger
 from pms.loop import run_one_tick, run_pms_loop
 from pms.mark_price import get_mark_price_provider
+from pms.universe_pull import run_pms_universe_pull
 
 
 def main() -> None:
@@ -65,6 +70,7 @@ def main() -> None:
     # Asset price feed (optional): update assets.usd_price before each tick
     feed_provider = None
     feed_assets = []
+    last_universe_pull_s = 0.0
     if ASSET_PRICE_FEED_SOURCE and ASSET_PRICE_FEED_SOURCE.strip():
         feed_provider = get_asset_price_provider(
             ASSET_PRICE_FEED_SOURCE.strip(),
@@ -76,7 +82,36 @@ def main() -> None:
         if feed_provider is not None:
             feed_assets = list(ASSET_PRICE_FEED_ASSETS)
 
+    def maybe_universe_pull() -> None:
+        nonlocal feed_assets, last_universe_pull_s
+        if not PMS_UNIVERSE_PULL_ENABLED:
+            return
+        now = time.time()
+        if last_universe_pull_s and (now - last_universe_pull_s) < float(PMS_UNIVERSE_PULL_INTERVAL_SECONDS):
+            return
+        last_universe_pull_s = now
+        try:
+            admitted, res = run_pms_universe_pull(
+                settings.database_url,
+                mode=PMS_UNIVERSE_PULL_MODE,
+                quote_asset="USDT",
+                broker="binance",
+                feed_source=ASSET_PRICE_FEED_SOURCE.strip(),
+            )
+            if admitted:
+                feed_assets = admitted
+            logger.info(
+                "PMS universe pull: seen={} admitted={} upserted_assets={} skipped={}",
+                res.bases_seen,
+                res.bases_admitted,
+                res.assets_upserted,
+                len(res.skipped),
+            )
+        except Exception as e:
+            logger.warning("PMS universe pull failed (continuing): {}", e)
+
     def run_feed_step() -> None:
+        maybe_universe_pull()
         if feed_provider is not None and feed_assets:
             try:
                 n = run_asset_price_feed_step(
