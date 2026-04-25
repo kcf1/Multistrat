@@ -54,6 +54,8 @@ from market_data.config import (
     TAKER_BUYSELL_VOLUME_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
     TAKER_BUYSELL_VOLUME_SCHEDULER_INGEST_INTERVAL_SECONDS,
     TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+    UNIVERSE_BACKFILL_CHECK_INTERVAL_SECONDS,
+    UNIVERSE_REFRESH_INTERVAL_SECONDS,
     load_settings,
 )
 from market_data.jobs.correct_window_basis_rate import run_correct_window_basis_rate
@@ -81,6 +83,9 @@ from market_data.jobs.correct_window_top_trader_long_short import (
 from market_data.jobs.repair_gap_top_trader_long_short import (
     run_repair_top_trader_long_short_gaps_policy_window_all_series,
 )
+from market_data.jobs.universe_backfill_new_symbols import run_universe_backfill_new_symbols
+from market_data.jobs.universe_refresh_top100 import run_universe_refresh_top100
+from market_data.universe_runtime import resolve_runtime_symbols
 
 
 def _next_periodic_deadline_after(completed_at: float, period_seconds: int) -> float:
@@ -147,7 +152,9 @@ def _log_series_keys_summary(step_name: str, results: list[Any]) -> None:
 
 def _run_ingest_step() -> None:
     settings = load_settings()
-    results = run_ingest_ohlcv(settings)
+    static_syms = getattr(settings, "symbols", ()) or ()
+    syms = resolve_runtime_symbols(settings, static_fallback=static_syms)
+    results = run_ingest_ohlcv(settings, symbols=syms)
     n = sum(r.bars_upserted for r in results)
     logger.info(
         "ingest_ohlcv: {} series, {} bars upserted",
@@ -159,6 +166,7 @@ def _run_ingest_step() -> None:
 
 def _run_correct_step() -> None:
     settings = load_settings()
+    # correct_window currently reads symbols from settings; keep static list during cutover.
     results = run_correct_window(settings)
     d = sum(r.drift_rows for r in results)
     logger.info(
@@ -185,7 +193,8 @@ def _run_repair_step() -> None:
 
 def _run_basis_ingest_step() -> None:
     settings = load_settings()
-    results = run_ingest_basis_rate(settings)
+    pairs = resolve_runtime_symbols(settings, static_fallback=())
+    results = run_ingest_basis_rate(settings, pairs=pairs)
     n = sum(r.rows_upserted for r in results)
     logger.info(
         "ingest_basis_rate: {} series, {} rows upserted",
@@ -223,7 +232,8 @@ def _run_basis_repair_step() -> None:
 
 def _run_open_interest_ingest_step() -> None:
     settings = load_settings()
-    results = run_ingest_open_interest(settings)
+    syms = resolve_runtime_symbols(settings, static_fallback=())
+    results = run_ingest_open_interest(settings, symbols=syms)
     n = sum(r.rows_upserted for r in results)
     logger.info(
         "ingest_open_interest: {} series, {} rows upserted",
@@ -235,7 +245,8 @@ def _run_open_interest_ingest_step() -> None:
 
 def _run_taker_ingest_step() -> None:
     settings = load_settings()
-    results = run_ingest_taker_buy_sell_volume(settings)
+    syms = resolve_runtime_symbols(settings, static_fallback=())
+    results = run_ingest_taker_buy_sell_volume(settings, symbols=syms)
     n = sum(r.rows_upserted for r in results)
     logger.info(
         "ingest_taker_buy_sell_volume: {} series, {} rows upserted",
@@ -247,7 +258,8 @@ def _run_taker_ingest_step() -> None:
 
 def _run_top_trader_ingest_step() -> None:
     settings = load_settings()
-    results = run_ingest_top_trader_long_short(settings)
+    syms = resolve_runtime_symbols(settings, static_fallback=())
+    results = run_ingest_top_trader_long_short(settings, symbols=syms)
     n = sum(r.rows_upserted for r in results)
     logger.info(
         "ingest_top_trader_long_short: {} series, {} rows upserted",
@@ -352,6 +364,8 @@ def run_scheduler_loop(
     taker_ingest_interval_seconds: int,
     taker_correct_interval_seconds: int,
     taker_repair_interval_seconds: int,
+    universe_refresh_interval_seconds: int,
+    universe_backfill_check_interval_seconds: int,
     stop_event: threading.Event,
 ) -> None:
     next_ingest: float | None = None
@@ -376,6 +390,9 @@ def run_scheduler_loop(
         None if taker_repair_interval_seconds > 0 else float("inf")
     )
 
+    next_universe_refresh: float | None = None
+    next_universe_backfill: float | None = None
+
     repair_cadence = (
         f"every {repair_interval_seconds}s"
         if repair_interval_seconds > 0
@@ -395,7 +412,8 @@ def run_scheduler_loop(
         "repair_gap_open_interest {} ({}), "
         "ingest_top_trader_long_short every {}s, correct_window_top_trader_long_short every {}s, "
         "repair_gap_top_trader_long_short {} ({}), "
-        "ingest_taker_buy_sell_volume every {}s, correct_window_taker_buy_sell_volume every {}s",
+        "ingest_taker_buy_sell_volume every {}s, correct_window_taker_buy_sell_volume every {}s, "
+        "universe_refresh every {}s, universe_backfill_check every {}s",
         ingest_interval_seconds,
         correct_interval_seconds,
         repair_cadence,
@@ -420,6 +438,8 @@ def run_scheduler_loop(
         "enabled" if top_trader_repair_interval_seconds > 0 else "disabled",
         taker_ingest_interval_seconds,
         taker_correct_interval_seconds,
+        universe_refresh_interval_seconds,
+        universe_backfill_check_interval_seconds,
     )
 
     while not stop_event.is_set():
@@ -472,6 +492,30 @@ def run_scheduler_loop(
                 logger.exception("ingest_taker_buy_sell_volume step failed")
             next_taker_ingest = _next_periodic_deadline_after(
                 time.time(), taker_ingest_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_universe_refresh):
+            try:
+                settings = load_settings()
+                run_universe_refresh_top100(settings, n=100)
+            except Exception:
+                logger.exception("universe_refresh_top100 step failed")
+            next_universe_refresh = _next_periodic_deadline_after(
+                time.time(), universe_refresh_interval_seconds
+            )
+
+        now = time.time()
+        if _due(now, next_universe_backfill):
+            try:
+                settings = load_settings()
+                n = run_universe_backfill_new_symbols(settings)
+                if n:
+                    logger.info("universe_backfill_new_symbols: backfilled {} new symbol(s)", n)
+            except Exception:
+                logger.exception("universe_backfill_new_symbols step failed")
+            next_universe_backfill = _next_periodic_deadline_after(
+                time.time(), universe_backfill_check_interval_seconds
             )
 
         now = time.time()
@@ -586,6 +630,8 @@ def run_scheduler_loop(
             _sleep_deadline(next_taker_ingest),
             _sleep_deadline(next_taker_correct),
             _sleep_deadline(next_taker_repair),
+            _sleep_deadline(next_universe_refresh),
+            _sleep_deadline(next_universe_backfill),
         )
         sleep_for = max(0.0, min(1.0, deadline - time.time()))
         if sleep_for > 0:
@@ -676,6 +722,8 @@ def main() -> None:
         taker_ingest_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_INGEST_INTERVAL_SECONDS,
         taker_correct_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_CORRECT_WINDOW_INTERVAL_SECONDS,
         taker_repair_interval_seconds=TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
+        universe_refresh_interval_seconds=UNIVERSE_REFRESH_INTERVAL_SECONDS,
+        universe_backfill_check_interval_seconds=UNIVERSE_BACKFILL_CHECK_INTERVAL_SECONDS,
         stop_event=stop,
     )
 

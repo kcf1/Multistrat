@@ -12,7 +12,7 @@ Callers own transactions: these functions **do not** ``commit``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -26,6 +26,7 @@ from market_data.schemas import (
     TakerBuySellVolumePoint,
     TopTraderLongShortPoint,
 )
+from market_data.universe_schemas import UniverseRefreshResult, UniverseTopNMember
 
 _OHLCV_UPSERT_SQL = """
 INSERT INTO ohlcv (
@@ -1022,3 +1023,187 @@ def top_trader_long_short_window_stats(
         return 0, None, None
     n = int(row[0]) if row[0] is not None else 0
     return n, row[1], row[2]
+
+
+_UNIVERSE_ASSETS_UPSERT_SQL = """
+INSERT INTO universe_assets (
+    base_asset, source, first_seen_date, last_seen_date,
+    current_rank, is_current_top100, was_ever_top100, updated_at
+) VALUES %s
+ON CONFLICT (base_asset) DO UPDATE SET
+    source = EXCLUDED.source,
+    first_seen_date = COALESCE(universe_assets.first_seen_date, EXCLUDED.first_seen_date),
+    last_seen_date = CASE
+        WHEN universe_assets.last_seen_date IS NULL THEN EXCLUDED.last_seen_date
+        WHEN EXCLUDED.last_seen_date IS NULL THEN universe_assets.last_seen_date
+        ELSE GREATEST(universe_assets.last_seen_date, EXCLUDED.last_seen_date)
+    END,
+    current_rank = EXCLUDED.current_rank,
+    is_current_top100 = EXCLUDED.is_current_top100,
+    was_ever_top100 = EXCLUDED.was_ever_top100,
+    updated_at = now()
+"""
+
+
+def upsert_universe_topn_members(
+    conn: PsycopgConnection,
+    *,
+    as_of_date: date,
+    source: str,
+    members: Sequence[UniverseTopNMember],
+) -> UniverseRefreshResult:
+    """
+    Upsert top-N members for *as_of_date* into `universe_assets`.
+
+    - Members are normalized to uppercase base assets.
+    - Marks present members `is_current_top100=true`, `was_ever_top100=true`.
+    - Marks previously-current assets not present as `is_current_top100=false`, clears rank.
+
+    This function does NOT commit; caller owns the transaction.
+    """
+    if not members:
+        raise ValueError("members must be non-empty for refresh")
+    src = (source or "cmc_top100").strip() or "cmc_top100"
+
+    # Deduplicate by base_asset keeping best (lowest) rank.
+    best: dict[str, int] = {}
+    for m in members:
+        b = (m.base_asset or "").strip().upper()
+        if not b:
+            continue
+        r = int(m.rank)
+        if r < 1:
+            continue
+        if b not in best or r < best[b]:
+            best[b] = r
+
+    base_assets = sorted(best.keys())
+    rows = [
+        (
+            b,
+            src,
+            as_of_date,
+            as_of_date,
+            best[b],
+            True,
+            True,
+            datetime.now(timezone.utc),
+        )
+        for b in base_assets
+    ]
+
+    with conn.cursor() as cur:
+        execute_values(cur, _UNIVERSE_ASSETS_UPSERT_SQL, rows, page_size=1000)
+
+        # Mark dropped assets (previously current, now absent).
+        cur.execute(
+            """
+            UPDATE universe_assets
+            SET is_current_top100 = false,
+                current_rank = NULL,
+                updated_at = now()
+            WHERE is_current_top100 = true
+              AND NOT (base_asset = ANY(%s))
+            """,
+            (base_assets,),
+        )
+        dropped = int(cur.rowcount or 0)
+
+        # Count newly added (first_seen_date == as_of_date).
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM universe_assets
+            WHERE first_seen_date = %s
+            """,
+            (as_of_date,),
+        )
+        newly = int((cur.fetchone() or [0])[0] or 0)
+
+    return UniverseRefreshResult(
+        as_of_date=as_of_date,
+        requested=len(members),
+        valid_members=len(base_assets),
+        newly_added_base_assets=newly,
+        dropped_base_assets=dropped,
+    )
+
+
+def upsert_universe_seed_base_assets(
+    conn: PsycopgConnection,
+    *,
+    base_assets: Sequence[str],
+    source: str = "static_seed",
+) -> int:
+    """
+    Seed universe table with base assets (asset-only). Does not set top-100 flags.
+
+    This function does NOT commit; caller owns the transaction.
+    """
+    if not base_assets:
+        return 0
+    src = (source or "static_seed").strip() or "static_seed"
+    uniq = sorted({(b or "").strip().upper() for b in base_assets if (b or "").strip()})
+    if not uniq:
+        return 0
+    now = datetime.now(timezone.utc)
+    rows = [(b, src, None, None, None, False, False, now) for b in uniq]
+    with conn.cursor() as cur:
+        execute_values(cur, _UNIVERSE_ASSETS_UPSERT_SQL, rows, page_size=1000)
+    return len(uniq)
+
+
+def query_universe_base_assets(
+    conn: PsycopgConnection,
+    *,
+    mode: str = "ever_seen",
+) -> list[str]:
+    """
+    Return list of base assets from `universe_assets`.
+
+    mode:
+      - `current_only`: is_current_top100=true
+      - `ever_seen`: was_ever_top100=true OR present in table (fallback)
+    """
+    m = (mode or "ever_seen").strip()
+    where = "was_ever_top100 = true"
+    if m == "current_only":
+        where = "is_current_top100 = true"
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT base_asset
+            FROM universe_assets
+            WHERE {where}
+            ORDER BY base_asset ASC
+            """
+        )
+        return [str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]]
+
+
+def universe_backfill_is_done(conn: PsycopgConnection, *, symbol: str) -> bool:
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM universe_symbol_backfills WHERE symbol = %s
+            """,
+            (sym,),
+        )
+        return cur.fetchone() is not None
+
+
+def mark_universe_backfill_done(conn: PsycopgConnection, *, symbol: str) -> None:
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO universe_symbol_backfills (symbol, backfilled_at, updated_at)
+            VALUES (%s, now(), now())
+            ON CONFLICT (symbol) DO UPDATE SET updated_at = now()
+            """,
+            (sym,),
+        )

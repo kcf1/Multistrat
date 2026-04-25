@@ -264,6 +264,7 @@ def ingest_top_trader_long_short_series(
 def run_ingest_top_trader_long_short(
     settings: MarketDataSettings,
     *,
+    symbols: Sequence[str] | None = None,
     provider: TopTraderLongShortPositionRatioProvider | None = None,
     provider_executor: ProviderExecutor[IngestTopTraderLongShortSeriesResult] | None = None,
     use_watermark: bool = True,
@@ -278,9 +279,10 @@ def run_ingest_top_trader_long_short(
         )
         own_executor = True
 
+    sym_list = list(symbols) if symbols is not None else list(TOP_TRADER_LONG_SHORT_SYMBOLS)
     tasks: list[tuple[str, str]] = [
         (symbol, period)
-        for symbol in TOP_TRADER_LONG_SHORT_SYMBOLS
+        for symbol in sym_list
         for period in TOP_TRADER_LONG_SHORT_PERIODS
     ]
 

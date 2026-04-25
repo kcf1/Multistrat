@@ -115,6 +115,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="Comma-separated dataset keys. Available: " + ", ".join(sorted(DATASET_TO_SCRIPT.keys())),
     )
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing.")
+    parser.add_argument(
+        "--symbols",
+        default=None,
+        metavar="SYMBOLS",
+        help="Optional comma-separated symbols to backfill (passed through to underlying scripts).",
+    )
+    parser.add_argument(
+        "--pairs",
+        default=None,
+        metavar="PAIRS",
+        help="Optional comma-separated pairs to backfill for basis (passed through).",
+    )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -122,6 +134,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     os.chdir(str(REPO_ROOT))
 
     invocations = build_backfill_plan(only=args.only, skip_existing=args.skip_existing)
+    if args.symbols:
+        for i, inv in enumerate(invocations):
+            invocations[i] = BackfillInvocation(inv.dataset, inv.cmd + ["--symbols", args.symbols])
+    if args.pairs:
+        for i, inv in enumerate(invocations):
+            invocations[i] = BackfillInvocation(inv.dataset, inv.cmd + ["--pairs", args.pairs])
     if not invocations:
         print("No datasets selected; nothing to run.", flush=True)
         return 0

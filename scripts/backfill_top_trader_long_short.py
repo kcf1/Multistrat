@@ -124,6 +124,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Top trader long/short backfill / catch-up into Postgres.")
     parser.add_argument("--no-watermark", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument(
+        "--symbols",
+        default=None,
+        help="Optional comma-separated symbols to run (overrides default TOP_TRADER_LONG_SHORT_SYMBOLS).",
+    )
     args = parser.parse_args()
     if args.skip_existing and not args.no_watermark:
         parser.error("--skip-existing requires --no-watermark")
@@ -146,9 +151,12 @@ def main() -> int:
     prov = build_binance_perps_provider(settings)
     conn = psycopg2.connect(settings.database_url)
     configure_for_market_data(conn)
+    symbols = TOP_TRADER_LONG_SHORT_SYMBOLS
+    if args.symbols:
+        symbols = tuple(s.strip().upper() for s in args.symbols.split(",") if s.strip())
     results = []
     try:
-        for symbol in TOP_TRADER_LONG_SHORT_SYMBOLS:
+        for symbol in symbols:
             for period in TOP_TRADER_LONG_SHORT_PERIODS:
                 end_ms = utc_now_ms()
                 total_est = _expected_total(

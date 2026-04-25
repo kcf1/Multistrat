@@ -255,6 +255,7 @@ def ingest_basis_series(
 def run_ingest_basis_rate(
     settings: MarketDataSettings,
     *,
+    pairs: Sequence[str] | None = None,
     provider: BasisProvider | None = None,
     provider_executor: ProviderExecutor[IngestBasisSeriesResult] | None = None,
     use_watermark: bool = True,
@@ -269,9 +270,10 @@ def run_ingest_basis_rate(
         )
         own_executor = True
 
+    pair_list = list(pairs) if pairs is not None else list(BASIS_PAIRS)
     tasks: list[tuple[str, str, str]] = [
         (pair, contract_type, period)
-        for pair in BASIS_PAIRS
+        for pair in pair_list
         for contract_type in BASIS_CONTRACT_TYPES
         for period in BASIS_PERIODS
     ]

@@ -253,6 +253,7 @@ def ingest_open_interest_series(
 def run_ingest_open_interest(
     settings: MarketDataSettings,
     *,
+    symbols: Sequence[str] | None = None,
     provider: OpenInterestProvider | None = None,
     provider_executor: ProviderExecutor[IngestOpenInterestSeriesResult] | None = None,
     use_watermark: bool = True,
@@ -267,9 +268,10 @@ def run_ingest_open_interest(
         )
         own_executor = True
 
+    sym_list = list(symbols) if symbols is not None else list(OPEN_INTEREST_SYMBOLS)
     tasks: list[tuple[str, str, str]] = [
         (symbol, contract_type, period)
-        for symbol in OPEN_INTEREST_SYMBOLS
+        for symbol in sym_list
         for contract_type in OPEN_INTEREST_CONTRACT_TYPES
         for period in OPEN_INTEREST_PERIODS
     ]

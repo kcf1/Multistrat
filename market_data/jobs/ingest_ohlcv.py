@@ -313,6 +313,7 @@ def ingest_ohlcv_series(
 def run_ingest_ohlcv(
     settings: MarketDataSettings,
     *,
+    symbols: Sequence[str] | None = None,
     provider: KlinesProvider | None = None,
     provider_executor: ProviderExecutor[IngestSeriesResult] | None = None,
     use_watermark: bool = True,
@@ -352,7 +353,8 @@ def run_ingest_ohlcv(
 
     try:
         t0 = time.perf_counter()
-        n_tasks = len(settings.symbols)
+        sym_list = list(symbols) if symbols is not None else list(settings.symbols)
+        n_tasks = len(sym_list)
         logger.info(
             "ingest_ohlcv run start: tasks={} workers={}",
             n_tasks,
@@ -360,7 +362,7 @@ def run_ingest_ohlcv(
         )
         out: list[IngestSeriesResult] = []
         if ex.max_workers <= 1:
-            for sym in settings.symbols:
+            for sym in sym_list:
                 out.extend(_ingest_symbol(sym))
             logger.info(
                 "ingest_ohlcv run done: submitted={} completed={} failed=0 wall_clock_s={:.3f}",
@@ -372,7 +374,7 @@ def run_ingest_ohlcv(
 
         futures: list[Future[list[IngestSeriesResult]]] = []
         future_to_symbol: dict[Future[list[IngestSeriesResult]], str] = {}
-        for sym in settings.symbols:
+        for sym in sym_list:
             fut = ex.submit(_ingest_symbol, sym)
             futures.append(fut)
             future_to_symbol[fut] = sym

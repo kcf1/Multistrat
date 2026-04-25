@@ -6,7 +6,7 @@ This plan defines a daily universe-refresh pipeline that:
 - keeps expanding the universe over time,
 - marks whether an asset is in the **current** top 100.
 
-It is designed to seed from the existing static list in `market_data/universe.py`, then fully switch runtime reads to DB-managed universe tables.
+It is designed to seed from the existing static list in `market_data/universe.py`, then fully switch runtime reads to a DB-managed universe table.
 
 ---
 
@@ -14,44 +14,45 @@ It is designed to seed from the existing static list in `market_data/universe.py
 
 - Keep historical universe membership permanently (append/retain, no destructive deletes).
 - Track current top-100 membership with a direct flag for easy runtime reads.
-- Preserve ranking history for audit/research.
+- Preserve membership and rank state needed for runtime and operational audit.
 - Keep runtime ingestion stable when external source/API has transient failures.
-- Reuse existing `symbols` reference table for venue-valid symbol filtering.
+- Reuse existing `symbols` reference table at runtime symbol-resolution time.
 
 ---
 
 ## 2) Source-of-truth decision
 
-- **Primary runtime source:** Postgres universe tables.
+- **Primary runtime source:** Postgres universe table.
 - **Bootstrap seed source (one-time):** `market_data/universe.py` (`DATA_COLLECTION_BASE_ASSETS`) to initialize DB before runtime cutover.
 - **Input source:** CoinMarketCap top 100 daily fetch (with API key).
-- **Venue filter:** intersect candidates with Binance spot `USDT` symbols from `symbols` table.
+- **Venue mapping:** resolve venue tradable symbols from `symbols` during runtime reads.
 
 This makes DB the only runtime authority after cutover, while keeping `universe.py` as historical/bootstrap reference.
+
+Architecture contract:
+
+- **Asset universe:** `market_data_universe_assets` stores only base-asset membership/lifecycle state.
+- **Data availability/tradability:** resolved by dedicated runtime mappers/checks (for example `symbols` joins and venue-specific eligibility logic), not by the universe table.
 
 ---
 
 ## 3) Data model (expand over time, never delete)
 
-Use two tables:
+Use one table:
 
-### 3.1 `market_data_universe_assets` (current-state + lifetime flags)
+### 3.1 `market_data_universe_assets` (shared base-asset reference + lifetime flags)
 
 One row per base asset (for example `BTC`).
 
 Suggested fields:
 
 - `base_asset` (PK)
-- `quote_asset` (default `USDT`)
-- `symbol` (`BASEUSDT`)
 - `source` (for example `cmc_top100`)
 - `first_seen_date` (date first entered top 100)
 - `last_seen_date` (latest date observed in top 100)
 - `current_rank` (int nullable)
 - `is_current_top100` (bool)
 - `was_ever_top100` (bool, always true once observed)
-- `listed_at` (timestamptz nullable; first time we confirmed venue-listing and started tracking)
-- `delisted_at` (timestamptz nullable; set when symbol is no longer venue-listed/eligible)
 - `updated_at` (timestamptz)
 
 Rules:
@@ -59,28 +60,7 @@ Rules:
 - Never delete rows.
 - If asset drops out of top 100, set `is_current_top100=false`, keep row/history.
 - If asset re-enters later, set `is_current_top100=true`, update `current_rank`, `last_seen_date`.
-- Set `listed_at` once (first confirmed venue-listed state); do not overwrite on later runs.
-- Set `delisted_at` only when venue-listing check confirms symbol is no longer tradable.
-- If venue relists later, clear `delisted_at` and keep original `listed_at` for lineage.
-
-### 3.2 `market_data_universe_daily` (append-only membership snapshots)
-
-One row per `(as_of_date, base_asset, source)`.
-
-Suggested fields:
-
-- `as_of_date` (date)
-- `base_asset`
-- `rank` (1..100)
-- `symbol` (`BASEUSDT`)
-- `source` (`cmc_top100`)
-- `is_in_top100` (bool, normally true for stored rows)
-- `inserted_at` (timestamptz)
-
-Constraints:
-
-- Unique: `(as_of_date, base_asset, source)`.
-- Append-only by date; no back-deletes.
+- Venue/pair tradability is not stored in this table; resolve it from `symbols` at read/use time.
 
 ---
 
@@ -88,21 +68,19 @@ Constraints:
 
 1. Fetch CMC top 100 for `as_of_date = today (UTC)`.
 2. Normalize ticker/base values (`strip().upper()`), drop obvious invalids.
-3. Build candidate Binance spot symbols (`BASEUSDT`).
-4. Filter to venue-valid pairs using `symbols` table (`quote_asset='USDT'`, broker `binance`).
-5. Upsert `market_data_universe_assets` for all valid daily members:
+3. Upsert `market_data_universe_assets` for daily top-100 base assets:
    - set `is_current_top100=true`
    - set `current_rank`
    - set `last_seen_date=today`
    - initialize `first_seen_date` if new
-   - detect newly added symbols (`first_seen_date=today` / not previously present)
-6. Mark previously current assets not seen today as:
+   - detect newly added base assets (`first_seen_date=today` / not previously present)
+4. Mark previously current assets not seen today as:
    - `is_current_top100=false`
    - `current_rank=NULL`
    - keep all other historical fields
-7. Insert daily snapshot rows into `market_data_universe_daily` (idempotent upsert/do-nothing on conflict).
-8. Trigger initial backfill for newly added symbols across enabled datasets (OHLCV, basis, open interest, top-trader, taker buy/sell), with per-symbol retry and give-up logging.
-9. Emit summary logs: requested=100, venue_valid_count, active_current_count, dropped_today_count, newly_added_count, backfill_started_count, cumulative_ever_count.
+5. Trigger initial backfill for newly added base assets across enabled datasets (OHLCV, basis, open interest, top-trader, taker buy/sell), using runtime symbol resolution and per-symbol retry/give-up logging.
+   - This trigger must be scheduler-managed: once a new eligible symbol is detected, enqueue/run all dataset backfills once for that symbol.
+6. Emit summary logs: requested=100, active_current_count, dropped_today_count, newly_added_count, backfill_started_count, cumulative_ever_count.
 
 Failure policy:
 
@@ -113,7 +91,9 @@ Failure policy:
 
 ## 5) Runtime consumption
 
-Add a runtime resolver helper (for market-data jobs) that reads from DB universe tables only.
+Add a runtime resolver helper (for market-data jobs) that:
+- reads base assets from `market_data_universe_assets`, then
+- resolves venue tradable symbols via dedicated data-availability/tradability logic (for example `symbols` table join/filter rules).
 
 Recommended read modes:
 
@@ -126,16 +106,25 @@ Given requirement "do not remove delisted coins, just expand table along time", 
 
 ## 6) Integration points to update
 
-- Add Alembic migration(s) for the two universe tables + indexes.
+- Add Alembic migration for `market_data_universe_assets` + indexes.
 - Add storage helpers in `market_data/storage.py` for:
   - upsert assets state rows
-  - append/upsert daily rows
-  - query current/ever symbol sets
+  - query current/ever base-asset sets (universe only)
+  - update membership/visibility fields from daily top-100 input
+- Add Pydantic schema models for universe contracts:
+  - universe asset row/state payloads (asset-only),
+  - daily updater input/output payloads,
+  - runtime symbol-resolution results,
+  - PMS admission-filter decisions (tradable + pricing-resolvable).
+- Add dedicated symbol-resolution helper(s) for data jobs (separate from universe storage contract).
 - Add daily updater job in `market_data/jobs/` (or scheduler if preferred).
 - Wire daily updater cadence in `market_data/main.py` scheduler loop.
-- Add "new-symbol backfill trigger" helper that runs right after a successful daily refresh.
-- Update ingest jobs to read symbols from runtime resolver, not only import-time constants.
-- Optional: update PMS feed universe to consume DB runtime set (if desired in same phase).
+- Add scheduler-managed "new-symbol backfill" job that runs after successful daily refresh and executes all dataset backfills once per newly eligible symbol.
+- Update market-data ingest/correct/repair jobs to read runtime-resolved symbols (from base assets + separate tradability resolution), not only import-time constants.
+- PMS wiring (phase-split):
+  - keep current startup initialization flow (`init_assets_stables` + `sync_assets_from_symbols`) for safe cutover.
+  - add follow-up periodic PMS pull from universe to refresh `assets` / `usd_symbol` mappings without requiring restart.
+  - enforce PMS symbol filter on writes to `assets`: only keep rows that are both tradable (eligible symbol mapping exists) and pricing-resolvable (supported price source path exists).
 
 ---
 
@@ -158,20 +147,25 @@ Micro constants (`market_data/config.py`):
 
 ### Phase A - schema + writer
 
-1. Add migration for universe tables and indexes.
-2. Implement storage helpers and updater job.
-3. Implement/verify immediate backfill trigger for newly added symbols.
-4. Run updater manually to populate initial dataset.
+1. Add migration for universe table and indexes. ✅
+2. Implement storage helpers and updater job. ✅ (A2 core pieces)
+3. Run one-time seed from `market_data/universe.py` into DB universe table. ✅ (script added)
+4. Run one-time CMC upsert to reconcile seeded universe with latest top-100 before read switch. ✅ (script added)
+5. Implement/verify immediate backfill trigger for newly added base assets.
+6. Run updater manually to validate initial daily refresh behavior.
+7. Verify scheduler executes one-time all-dataset backfills for each newly detected eligible symbol.
 
 ### Phase B - read switch
 
-5. Add runtime universe resolver.
-6. Switch market-data ingest/correct/repair jobs to runtime resolver.
-7. Keep static universe fallback enabled.
+8. Add runtime universe resolver.
+9. Switch market-data ingest/correct/repair jobs to runtime resolver (wiring-only rollout; behavior remains consistent).
+10. Keep static universe fallback enabled during cutover.
 
-### Phase C - optional PMS adoption
+### Phase C - PMS staged adoption
 
-8. Move PMS asset feed universe read to same DB resolver (optional, gated).
+11. Keep PMS startup initialization wiring as-is for initial rollout.
+12. Add gated periodic PMS universe pull to upsert missing `assets` rows / `usd_symbol` mappings after startup.
+13. Apply PMS admission filter so only tradable + pricing-resolvable symbols are retained/active in PMS asset feed scope.
 
 ---
 
@@ -179,8 +173,7 @@ Micro constants (`market_data/config.py`):
 
 ### Unit tests
 
-- CMC payload normalization and symbol mapping.
-- Venue filtering via `symbols` table rules.
+- CMC payload normalization and base-asset extraction.
 - State transitions:
   - new member enters top 100,
   - member drops out (flag false, row retained),
@@ -190,20 +183,27 @@ Micro constants (`market_data/config.py`):
 ### Storage tests
 
 - `market_data_universe_assets` upsert behavior.
-- `market_data_universe_daily` uniqueness by date/asset/source.
 - Query helpers for `current_only` and `ever_seen`.
 
 ### Job-level tests
 
 - successful daily refresh path,
 - API failure path (no destructive state change),
-- partial invalid symbols path (skip invalid, continue).
-- newly added symbol path triggers backfill once,
+- partial invalid/unknown base assets path (skip invalid, continue).
+- newly added base-asset path triggers backfill once,
 - repeated daily run does not re-trigger duplicate initial backfill for already-known symbols.
+- tradability resolution tests (asset exists in universe but has no tradable symbol => handled gracefully by data jobs).
+- scheduler orchestration test: when a new symbol is detected, all dataset backfills are invoked once for that symbol.
+- idempotency test: already-backfilled symbol is not re-enqueued/re-run on subsequent daily cycles unless policy explicitly allows.
+- PMS compatibility tests: startup-only initialization path still works before periodic universe pull is enabled.
+- PMS filter tests:
+  - universe asset with no tradable symbol is excluded from PMS `assets` feed scope,
+  - tradable symbol without pricing path is excluded or marked inactive for PMS feed,
+  - asset becomes eligible later (symbol/pricing available) and is admitted on next periodic pull.
 
 ### Integration/smoke tests
 
-- run one-time seed + daily update + ingest once; verify symbol set expansion over days.
+- run one-time seed + one-time CMC upsert + daily update + ingest once; verify base-asset set expansion over days.
 - verify dropped coins remain in DB and are still returned in `ever_seen` mode.
 - verify startup/run failure is explicit if DB universe is not seeded.
 
@@ -211,16 +211,24 @@ Micro constants (`market_data/config.py`):
 
 ## 10) Concrete to-do checklist
 
-- [ ] Add Alembic migration for `market_data_universe_assets`.
-- [ ] Add Alembic migration for `market_data_universe_daily`.
-- [ ] Add storage/query helpers in `market_data/storage.py`.
-- [ ] Implement CMC top-100 fetch client and parser.
-- [ ] Implement daily universe updater job.
-- [ ] Wire updater into `market_data/main.py` scheduler loop.
-- [ ] Implement one-time seed job from `market_data/universe.py` into DB tables.
-- [ ] Implement runtime universe resolver (DB-only; no static fallback).
-- [ ] Unwire market_data runtime from import-time static symbol constants.
-- [ ] Switch ingest/correct/repair jobs to runtime universe resolver.
-- [ ] Add unit/storage/job/integration tests listed above.
-- [ ] Update `market_data/README.md` with operating notes and failure behavior.
+- [x] [A1] Add Alembic migration for `market_data_universe_assets`.
+- [x] [A2] Add storage/query helpers in `market_data/storage.py`.
+- [x] [A2] Add Pydantic schema models for universe updater/resolver/filter contracts.
+- [x] [A2] Implement CMC top-100 fetch client and parser.
+- [x] [A2] Implement daily universe updater job.
+- [x] [A3] Implement one-time seed job from `market_data/universe.py` into DB universe table.
+- [x] [A4] Implement one-time CMC bootstrap upsert before runtime read switch.
+- [x] [A5] Add scheduler-managed new-symbol detector + one-time all-dataset backfill job.
+- [x] [A6] Wire updater into `market_data/main.py` scheduler loop.
+- [ ] [A6] Run updater manually to validate initial daily refresh behavior.
+- [x] [A7] Verify scheduler executes one-time all-dataset backfills for each newly detected eligible symbol.
+- [x] [B8] Implement runtime universe resolver (DB-only; no static fallback).
+- [x] [B9] Unwire market_data runtime from import-time static symbol constants.
+- [x] [B9] Switch ingest/correct/repair jobs to runtime universe resolver.
+- [x] [B10] Keep static universe fallback enabled during cutover.
+- [ ] [C11] Keep PMS startup initialization (`init_assets_stables` + `sync_assets_from_symbols`) for rollout compatibility.
+- [ ] [C12] Add gated periodic PMS universe pull to refresh `assets` / `usd_symbol` mappings after startup.
+- [ ] [C13] Add PMS admission filter (tradable + pricing-resolvable) before writing/updating PMS `assets` feed scope.
+- [ ] [T] Add unit/storage/job/integration tests listed above.
+- [ ] [T] Update `market_data/README.md` with operating notes and failure behavior.
 

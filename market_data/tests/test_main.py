@@ -25,7 +25,7 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
     calls: list[str] = []
     monkeypatch.setattr(
         "market_data.main.run_ingest_ohlcv",
-        lambda _s: calls.append("ingest") or [],
+        lambda _s, **_kw: calls.append("ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window",
@@ -37,7 +37,7 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
     )
     monkeypatch.setattr(
         "market_data.main.run_ingest_basis_rate",
-        lambda _s: calls.append("basis_ingest") or [],
+        lambda _s, **_kw: calls.append("basis_ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window_basis_rate",
@@ -49,7 +49,7 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
     )
     monkeypatch.setattr(
         "market_data.main.run_ingest_open_interest",
-        lambda _s: calls.append("oi_ingest") or [],
+        lambda _s, **_kw: calls.append("oi_ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window_open_interest",
@@ -61,7 +61,7 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
     )
     monkeypatch.setattr(
         "market_data.main.run_ingest_top_trader_long_short",
-        lambda _s: calls.append("top_ingest") or [],
+        lambda _s, **_kw: calls.append("top_ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window_top_trader_long_short",
@@ -69,7 +69,7 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
     )
     monkeypatch.setattr(
         "market_data.main.run_ingest_taker_buy_sell_volume",
-        lambda _s: calls.append("taker_ingest") or [],
+        lambda _s, **_kw: calls.append("taker_ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window_taker_buy_sell_volume",
@@ -95,7 +95,7 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
     calls: list[str] = []
     monkeypatch.setattr(
         "market_data.main.run_ingest_ohlcv",
-        lambda _s: calls.append("ingest") or [],
+        lambda _s, **_kw: calls.append("ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window",
@@ -107,7 +107,7 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(
         "market_data.main.run_ingest_basis_rate",
-        lambda _s: calls.append("basis_ingest") or [],
+        lambda _s, **_kw: calls.append("basis_ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window_basis_rate",
@@ -119,7 +119,7 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(
         "market_data.main.run_ingest_open_interest",
-        lambda _s: calls.append("oi_ingest") or [],
+        lambda _s, **_kw: calls.append("oi_ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window_open_interest",
@@ -127,7 +127,7 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(
         "market_data.main.run_ingest_top_trader_long_short",
-        lambda _s: calls.append("top_ingest") or [],
+        lambda _s, **_kw: calls.append("top_ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window_top_trader_long_short",
@@ -143,7 +143,7 @@ def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(
         "market_data.main.run_ingest_taker_buy_sell_volume",
-        lambda _s: calls.append("taker_ingest") or [],
+        lambda _s, **_kw: calls.append("taker_ingest") or [],
     )
     monkeypatch.setattr(
         "market_data.main.run_correct_window_taker_buy_sell_volume",
@@ -209,6 +209,8 @@ def test_scheduler_loop_respects_immediate_stop(monkeypatch: pytest.MonkeyPatch)
         taker_ingest_interval_seconds=300,
         taker_correct_interval_seconds=3600,
         taker_repair_interval_seconds=0,
+        universe_refresh_interval_seconds=86_400,
+        universe_backfill_check_interval_seconds=300,
         stop_event=stop,
     )
     assert called == []
@@ -253,6 +255,8 @@ def test_scheduler_loop_runs_ingest_once(monkeypatch: pytest.MonkeyPatch) -> Non
         taker_ingest_interval_seconds=300,
         taker_correct_interval_seconds=3600,
         taker_repair_interval_seconds=0,
+        universe_refresh_interval_seconds=86_400,
+        universe_backfill_check_interval_seconds=300,
         stop_event=stop,
     )
     assert stop.is_set()
@@ -277,13 +281,13 @@ def test_open_interest_ingest_step_calls_run_ingest(mock_settings: SimpleNamespa
     monkeypatch.setattr("market_data.main.load_settings", lambda: mock_settings)
     monkeypatch.setattr(
         "market_data.main.run_ingest_open_interest",
-        lambda s: called.append(s) or [],
+        lambda s, **kwargs: called.append((s, kwargs)) or [],
     )
     from market_data.main import _run_open_interest_ingest_step
 
     _run_open_interest_ingest_step()
     assert len(called) == 1
-    assert called[0] is mock_settings
+    assert called[0][0] is mock_settings
 
 
 def test_open_interest_repair_step_calls_policy_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,13 +309,13 @@ def test_taker_ingest_step_calls_run_ingest(mock_settings: SimpleNamespace, monk
     monkeypatch.setattr("market_data.main.load_settings", lambda: mock_settings)
     monkeypatch.setattr(
         "market_data.main.run_ingest_taker_buy_sell_volume",
-        lambda s: called.append(s) or [],
+        lambda s, **kwargs: called.append((s, kwargs)) or [],
     )
     from market_data.main import _run_taker_ingest_step
 
     _run_taker_ingest_step()
     assert len(called) == 1
-    assert called[0] is mock_settings
+    assert called[0][0] is mock_settings
 
 
 def test_taker_correct_step_calls_run_correct(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -347,13 +351,13 @@ def test_top_trader_ingest_step_calls_run_ingest(mock_settings: SimpleNamespace,
     monkeypatch.setattr("market_data.main.load_settings", lambda: mock_settings)
     monkeypatch.setattr(
         "market_data.main.run_ingest_top_trader_long_short",
-        lambda s: called.append(s) or [],
+        lambda s, **kwargs: called.append((s, kwargs)) or [],
     )
     from market_data.main import _run_top_trader_ingest_step
 
     _run_top_trader_ingest_step()
     assert len(called) == 1
-    assert called[0] is mock_settings
+    assert called[0][0] is mock_settings
 
 
 def test_top_trader_correct_step_calls_run_correct(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:

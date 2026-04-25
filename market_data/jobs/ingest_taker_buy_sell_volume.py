@@ -264,6 +264,7 @@ def ingest_taker_buy_sell_volume_series(
 def run_ingest_taker_buy_sell_volume(
     settings: MarketDataSettings,
     *,
+    symbols: Sequence[str] | None = None,
     provider: TakerBuySellVolumeProvider | None = None,
     provider_executor: ProviderExecutor[IngestTakerBuySellVolumeSeriesResult] | None = None,
     use_watermark: bool = True,
@@ -278,9 +279,10 @@ def run_ingest_taker_buy_sell_volume(
         )
         own_executor = True
 
+    sym_list = list(symbols) if symbols is not None else list(TAKER_BUYSELL_VOLUME_SYMBOLS)
     tasks: list[tuple[str, str]] = [
         (symbol, period)
-        for symbol in TAKER_BUYSELL_VOLUME_SYMBOLS
+        for symbol in sym_list
         for period in TAKER_BUYSELL_VOLUME_PERIODS
     ]
 

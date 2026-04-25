@@ -25,6 +25,14 @@ DEFAULT_BINANCE_REST_URL: str = "https://api.binance.com"
 # Do **not** fall back to spot ``api.binance.com`` — USD-M futures REST is on ``fapi``.
 DEFAULT_BINANCE_PERPS_REST_URL: str = "https://fapi.binance.com"
 
+# CoinMarketCap (universe source) defaults.
+DEFAULT_CMC_BASE_URL: str = "https://pro-api.coinmarketcap.com"
+
+# Universe refresh / bootstrap cadence (micro, not env).
+UNIVERSE_REFRESH_INTERVAL_SECONDS: int = 86_400
+# Check for newly eligible symbols to backfill (micro).
+UNIVERSE_BACKFILL_CHECK_INTERVAL_SECONDS: int = 300
+
 # Min seconds between REST calls **per provider instance** (shared by all jobs on that instance).
 # ``None`` = **unlimited** (default) until venue weight/QPS is documented.
 MARKET_DATA_MIN_REQUEST_INTERVAL_SEC: float | None = None
@@ -158,6 +166,7 @@ class MarketDataSettings(BaseSettings):
     - **DATABASE_URL** or **MARKET_DATA_DATABASE_URL** (latter wins if both set).
     - Optional **MARKET_DATA_BINANCE_BASE_URL** for public REST klines (testnet vs mainnet).
     - Optional **MARKET_DATA_BINANCE_PERPS_BASE_URL** for basis/funding futures data.
+    - Optional **MARKET_DATA_CMC_API_KEY** and **MARKET_DATA_CMC_BASE_URL** for universe refresh.
 
     Micro: OHLCV_SYMBOLS, OHLCV_INTERVALS, OHLCV_SCHEDULER_* cadence, DEFAULT_BINANCE_REST_URL in this file.
     """
@@ -186,6 +195,18 @@ class MarketDataSettings(BaseSettings):
         description="REST base for Binance perps public endpoints used by market_data.",
     )
 
+    market_data_cmc_api_key: str | None = Field(
+        default=None,
+        validation_alias="MARKET_DATA_CMC_API_KEY",
+        description="CoinMarketCap API key (used for top-100 universe refresh).",
+    )
+
+    market_data_cmc_base_url: str | None = Field(
+        default=None,
+        validation_alias="MARKET_DATA_CMC_BASE_URL",
+        description="CoinMarketCap base URL override (default pro API host).",
+    )
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def binance_rest_url(self) -> str:
@@ -197,6 +218,12 @@ class MarketDataSettings(BaseSettings):
     def binance_perps_rest_url(self) -> str:
         u = (self.market_data_binance_perps_base_url or "").strip().rstrip("/")
         return u if u else DEFAULT_BINANCE_PERPS_REST_URL
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cmc_base_url(self) -> str:
+        u = (self.market_data_cmc_base_url or "").strip().rstrip("/")
+        return u if u else DEFAULT_CMC_BASE_URL
 
     @computed_field  # type: ignore[prop-decorator]
     @property
