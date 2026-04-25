@@ -159,7 +159,7 @@ Micro constants (`market_data/config.py`):
 
 8. Add runtime universe resolver.
 9. Switch market-data ingest/correct/repair jobs to runtime resolver (wiring-only rollout; behavior remains consistent).
-10. Keep static universe fallback enabled during cutover.
+10. No static fallback: market-data symbol set is DB-driven (fail loudly if universe/symbols mapping is unavailable).
 
 ### Phase C - PMS staged adoption
 
@@ -225,7 +225,7 @@ Micro constants (`market_data/config.py`):
 - [x] [B8] Implement runtime universe resolver (DB-only; no static fallback).
 - [x] [B9] Unwire market_data runtime from import-time static symbol constants.
 - [x] [B9] Switch ingest/correct/repair jobs to runtime universe resolver.
-- [x] [B10] Keep static universe fallback enabled during cutover.
+- [x] [B10] No static fallback (DB universe is required).
 - [ ] [C11] Keep PMS startup initialization (`init_assets_stables` + `sync_assets_from_symbols`) for rollout compatibility.
 - [ ] [C12] Add gated periodic PMS universe pull to refresh `assets` / `usd_symbol` mappings after startup.
 - [ ] [C13] Add PMS admission filter (tradable + pricing-resolvable) before writing/updating PMS `assets` feed scope.

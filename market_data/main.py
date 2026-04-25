@@ -152,8 +152,7 @@ def _log_series_keys_summary(step_name: str, results: list[Any]) -> None:
 
 def _run_ingest_step() -> None:
     settings = load_settings()
-    static_syms = getattr(settings, "symbols", ()) or ()
-    syms = resolve_runtime_symbols(settings, static_fallback=static_syms)
+    syms = resolve_runtime_symbols(settings)
     results = run_ingest_ohlcv(settings, symbols=syms)
     n = sum(r.bars_upserted for r in results)
     logger.info(
@@ -193,7 +192,7 @@ def _run_repair_step() -> None:
 
 def _run_basis_ingest_step() -> None:
     settings = load_settings()
-    pairs = resolve_runtime_symbols(settings, static_fallback=())
+    pairs = resolve_runtime_symbols(settings)
     results = run_ingest_basis_rate(settings, pairs=pairs)
     n = sum(r.rows_upserted for r in results)
     logger.info(
@@ -232,7 +231,7 @@ def _run_basis_repair_step() -> None:
 
 def _run_open_interest_ingest_step() -> None:
     settings = load_settings()
-    syms = resolve_runtime_symbols(settings, static_fallback=())
+    syms = resolve_runtime_symbols(settings)
     results = run_ingest_open_interest(settings, symbols=syms)
     n = sum(r.rows_upserted for r in results)
     logger.info(
@@ -245,7 +244,7 @@ def _run_open_interest_ingest_step() -> None:
 
 def _run_taker_ingest_step() -> None:
     settings = load_settings()
-    syms = resolve_runtime_symbols(settings, static_fallback=())
+    syms = resolve_runtime_symbols(settings)
     results = run_ingest_taker_buy_sell_volume(settings, symbols=syms)
     n = sum(r.rows_upserted for r in results)
     logger.info(
@@ -258,7 +257,7 @@ def _run_taker_ingest_step() -> None:
 
 def _run_top_trader_ingest_step() -> None:
     settings = load_settings()
-    syms = resolve_runtime_symbols(settings, static_fallback=())
+    syms = resolve_runtime_symbols(settings)
     results = run_ingest_top_trader_long_short(settings, symbols=syms)
     n = sum(r.rows_upserted for r in results)
     logger.info(

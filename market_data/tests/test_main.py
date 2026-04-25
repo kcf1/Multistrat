@@ -23,6 +23,7 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
+    monkeypatch.setattr("market_data.main.resolve_runtime_symbols", lambda _s: ())
     monkeypatch.setattr(
         "market_data.main.run_ingest_ohlcv",
         lambda _s, **_kw: calls.append("ingest") or [],
@@ -93,6 +94,7 @@ def test_once_invokes_ingest_and_correct(mock_settings: SimpleNamespace, monkeyp
 
 def test_once_with_repair(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
+    monkeypatch.setattr("market_data.main.resolve_runtime_symbols", lambda _s: ())
     monkeypatch.setattr(
         "market_data.main.run_ingest_ohlcv",
         lambda _s, **_kw: calls.append("ingest") or [],
@@ -279,6 +281,7 @@ def test_due_and_sleep_deadline() -> None:
 def test_open_interest_ingest_step_calls_run_ingest(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[object] = []
     monkeypatch.setattr("market_data.main.load_settings", lambda: mock_settings)
+    monkeypatch.setattr("market_data.main.resolve_runtime_symbols", lambda _s: ())
     monkeypatch.setattr(
         "market_data.main.run_ingest_open_interest",
         lambda s, **kwargs: called.append((s, kwargs)) or [],
@@ -307,6 +310,7 @@ def test_open_interest_repair_step_calls_policy_repair(mock_settings: SimpleName
 def test_taker_ingest_step_calls_run_ingest(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[object] = []
     monkeypatch.setattr("market_data.main.load_settings", lambda: mock_settings)
+    monkeypatch.setattr("market_data.main.resolve_runtime_symbols", lambda _s: ())
     monkeypatch.setattr(
         "market_data.main.run_ingest_taker_buy_sell_volume",
         lambda s, **kwargs: called.append((s, kwargs)) or [],
@@ -349,6 +353,7 @@ def test_taker_repair_step_calls_policy_repair(mock_settings: SimpleNamespace, m
 def test_top_trader_ingest_step_calls_run_ingest(mock_settings: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[object] = []
     monkeypatch.setattr("market_data.main.load_settings", lambda: mock_settings)
+    monkeypatch.setattr("market_data.main.resolve_runtime_symbols", lambda _s: ())
     monkeypatch.setattr(
         "market_data.main.run_ingest_top_trader_long_short",
         lambda s, **kwargs: called.append((s, kwargs)) or [],
