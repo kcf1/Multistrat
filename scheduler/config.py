@@ -62,21 +62,21 @@ NOOP_HEARTBEAT_INTERVAL_SECONDS: int = SCHEDULER_HOURLY_INTERVAL_SECONDS
 JOB_SPECS: tuple[JobSpec, ...] = (
     JobSpec(
         job_id="order_reconciliation_binance",
-        enabled=True,
+        enabled=False,
         interval_seconds=SCHEDULER_HOURLY_INTERVAL_SECONDS,
         cron_expression=None,
         timeout_seconds=DEFAULT_JOB_TIMEOUT_SECONDS,
     ),
     JobSpec(
         job_id="position_reconciliation_binance",
-        enabled=True,
+        enabled=False,
         interval_seconds=SCHEDULER_HOURLY_INTERVAL_SECONDS,
         cron_expression=None,
         timeout_seconds=DEFAULT_JOB_TIMEOUT_SECONDS,
     ),
     JobSpec(
         job_id="position_snapshot_hourly",
-        enabled=True,
+        enabled=False,
         interval_seconds=SCHEDULER_HOURLY_INTERVAL_SECONDS,
         cron_expression=None,
         timeout_seconds=DEFAULT_JOB_TIMEOUT_SECONDS,
