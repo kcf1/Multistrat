@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-One-time bootstrap: fetch CMC top-100 and upsert into market_data universe table.
+One-time bootstrap: fetch CMC top-N (UNIVERSE_CMC_TOP_N) and upsert into market_data universe table.
 
 Requires:
   - MARKET_DATA_DATABASE_URL (or DATABASE_URL)
@@ -23,7 +23,7 @@ from market_data.jobs.universe_refresh_top100 import run_universe_refresh_top100
 
 def main() -> int:
     settings = load_settings()
-    run_universe_refresh_top100(settings, n=100)
+    run_universe_refresh_top100(settings)
     return 0
 
 

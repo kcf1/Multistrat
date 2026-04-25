@@ -32,6 +32,9 @@ DEFAULT_CMC_BASE_URL: str = "https://pro-api.coinmarketcap.com"
 # Per-dataset initial backfills run on the same scheduler tick after a successful refresh attempt.
 UNIVERSE_REFRESH_INTERVAL_SECONDS: int = 86_400
 
+# CMC listings/latest limit: top N by market cap (column names in DB still say top100; semantics follow N).
+UNIVERSE_CMC_TOP_N: int = 200
+
 # Min seconds between REST calls **per provider instance** (shared by all jobs on that instance).
 # ``None`` = **unlimited** (default) until venue weight/QPS is documented.
 MARKET_DATA_MIN_REQUEST_INTERVAL_SEC: float | None = None
@@ -197,7 +200,7 @@ class MarketDataSettings(BaseSettings):
     market_data_cmc_api_key: str | None = Field(
         default=None,
         validation_alias="MARKET_DATA_CMC_API_KEY",
-        description="CoinMarketCap API key (used for top-100 universe refresh).",
+        description="CoinMarketCap API key (used for top-N universe refresh; N from UNIVERSE_CMC_TOP_N).",
     )
 
     market_data_cmc_base_url: str | None = Field(

@@ -8,7 +8,7 @@ from loguru import logger
 from pgconn import configure_for_market_data
 
 from market_data.cmc import CmcClient
-from market_data.config import MarketDataSettings
+from market_data.config import UNIVERSE_CMC_TOP_N, MarketDataSettings
 from market_data.storage import upsert_universe_topn_members
 
 
@@ -16,7 +16,7 @@ def run_universe_refresh_top100(
     settings: MarketDataSettings,
     *,
     as_of_date: date | None = None,
-    n: int = 100,
+    n: int = UNIVERSE_CMC_TOP_N,
     source: str = "cmc_top100",
 ) -> None:
     """

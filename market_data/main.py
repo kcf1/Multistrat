@@ -521,7 +521,7 @@ def run_scheduler_loop(
         if _due(now, next_universe_refresh):
             settings = load_settings()
             try:
-                run_universe_refresh_top100(settings, n=100)
+                run_universe_refresh_top100(settings)
             except Exception:
                 logger.exception("universe_refresh_top100 step failed")
             _run_per_dataset_initial_backfills(settings)
@@ -684,7 +684,7 @@ def main() -> None:
 
             settings_once = load_settings()
             try:
-                run_universe_refresh_top100(settings_once, n=100)
+                run_universe_refresh_top100(settings_once)
             except Exception:
                 logger.exception("universe_refresh_top100 (--once) failed")
             _run_per_dataset_initial_backfills(settings_once)
