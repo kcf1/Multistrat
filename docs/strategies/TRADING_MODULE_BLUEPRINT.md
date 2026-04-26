@@ -26,11 +26,11 @@
 All strategy “daily” feature tables are keyed by a **UTC trading-day key**:
 
 - Use `bar_ts timestamptz` as **`<trading_date> 00:00:00+00:00` (GMT/UTC)**. This is the stable per-day join key across strategy tables (it is **not** necessarily equal to the last intraday `open_time`).
-- `l1_daily`: `bar_ts` (UTC midnight day key), `symbol`, daily-aggregated inputs (`close` last, volumes/taker base summed), `log_return`, `ewvol_20` (EWM 20), `norm_close` (scaled `log_return` then per-symbol cumulative sum, per notebook), `vwap_250` (250-day ratio, must be computed per symbol), `log_volume`, `log_quote_volume` (no `taker_buy_quote_volume`).
-- `sig_raw_daily`: `bar_ts`, `symbol`, per-family **raw** columns *inside* each `get_*_score` **before** `combine_features` (no scalar `*_score` here; no duplication of L1; optional deep-audit table).
-- `sig_comb_daily`: `bar_ts`, `symbol`, the **13** scalar `*_score` values after `combine_features` (the inputs cross-sectionally ranked into `x_cols`; see Phase 1 plan).
-- `sig_xsec_daily`: `bar_ts`, `symbol`, the **13** `*_rank` features for `x_cols` (regime bins like `mom_bin` are research-only/optional; see Phase 1 plan).
-- `lab_daily`: `bar_ts`, `symbol`, one row per day/symbol, **wide** columns: `fwd_log_return_<h>` (and optional `fwd_simple_return_<h>`) per configured step `h`, plus notebook `y_cols` as suffixed fields (e.g. `vol_weight_1`, `vol_weighted_return_1`); **no** `horizon` column (Phase 1 plan).
+- `l1feats_daily`: `bar_ts` (UTC midnight day key), `symbol`, daily-aggregated inputs (`close` last, volumes/taker base summed), `log_return`, `ewvol_20` (EWM 20), `norm_close` (scaled `log_return` then per-symbol cumulative sum, per notebook), `vwap_250` (250-day ratio, must be computed per symbol), `log_volume`, `log_quote_volume` (no `taker_buy_quote_volume`).
+- `signals_daily`: `bar_ts`, `symbol`, per-family **raw** columns *inside* each `get_*_score` **before** `combine_features` (no scalar `*_score` here; no duplication of L1; optional deep-audit table).
+- `factors_daily`: `bar_ts`, `symbol`, the **13** scalar `*_score` values after `combine_features` (the inputs cross-sectionally ranked into `x_cols`; see Phase 1 plan).
+- `xsecs_daily`: `bar_ts`, `symbol`, the **13** `*_rank` features for `x_cols` (regime bins like `mom_bin` are research-only/optional; see Phase 1 plan).
+- `labels_daily`: `bar_ts`, `symbol`, one row per day/symbol, **wide** columns: `fwd_log_return_<h>` (and optional `fwd_simple_return_<h>`) per configured step `h`, plus notebook `y_cols` as suffixed fields (e.g. `vol_weight_1`, `vol_weighted_return_1`); **no** `horizon` column (Phase 1 plan).
 - `model_runs`: train window, hyperparameters, artifact reference, and metrics.
 - `predictions_daily`: per `(symbol, bar_ts)` predicted return and score ranks.
 - `target_weights_daily`: `bar_ts`, per-symbol target gross/net/risk-scaled weights and policy version.
