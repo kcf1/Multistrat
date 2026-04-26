@@ -6,11 +6,15 @@ Build a production-grade daily pipeline that transforms market data into determi
 
 Phase 1 must deliver:
 
-- `features_l1_daily`
-- `signals_precombined_daily` (per-family **raw precombined series** produced *inside* each `get_*_score` **before** the family-level final reduction step (often `combine_features`) — the internal horizon stacks / intermediate columns that the score functions use; do **not** duplicate L1 or post-L1 “helper frame” fields here; L1 is finalized and not re-expanded via this table)
-- `signals_combined_daily` (the **10** final `*_score` series after each family applies its final reduction step; `combine_features` is one implementation option, not a requirement — the inputs to cross-sectional ranking for `x_cols`)
-- `signals_xsection_daily` (10 percentile ranks that materialize the notebook’s `x_cols` selection, ranked from `signals_combined_daily`)
-- `labels_daily` (one row per day/symbol, **wide** supervised targets: forward returns and notebook `y_cols` **as suffixed columns** e.g. `_1`, `_5` — **no** `horizon` column; **not** stored in `signals_precombined_daily`)
+| Group | Table | What it stores |
+| --- | --- | --- |
+| **L1** | `l1_daily` | Per-`(bar_ts, symbol)` daily aggregates and L1 factors (returns, vol, normalization, market stats, etc.) — the single source of truth for inputs to signal code; see §1. |
+| **Signals** | `sig_raw_daily` | Per-family **raw** columns produced *inside* each `get_*_score` **before** the family-level final reduction (`combine_features` is typical); horizon stacks only — **no** scalar `*_score`, **no** L1 duplication, **no** widening L1 via this table. |
+| **Signals** | `sig_comb_daily` | The **13** scalar `*_score` values after each family’s final reduction (`combine_features` is optional); feeds cross-sectional ranking for `x_cols`. |
+| **Signals** | `sig_xsec_daily` | **13** percentile ranks (or equivalent) over `bar_ts` from the combined scores — the model’s `x_cols` contract in rank space. |
+| **Labels** | `lab_daily` | One row per `(bar_ts, symbol)`, **wide** supervised targets: forward returns and notebook `y_cols` as suffixed columns (e.g. `_1`, `_5`); **no** `horizon` column; targets are **not** stored in `sig_raw_daily`. |
+
+Order in the pipeline: **L1 →** (optional) **precombined → combined → xsection** → labels consume scores/ranks and add forwards/`y_cols` separately.
 
 No model training, inference, portfolio optimization, or order publishing in this phase.
 
@@ -43,17 +47,17 @@ strategies/modules/double_sort_daily/
   __init__.py
   config.py
   data_loader.py
+  validators.py
   features_l1.py
   signals_precombined.py
   signals_combined.py
+  signals_xsection.py
   labels.py
   persistence.py
   pipeline.py
-  signals_xsection.py
-  validators.py
 ```
 
-Test layout:
+Test layout (same grouping: L1, then signals, then labels / persistence / pipeline):
 
 ```text
 strategies/tests/double_sort_daily/
@@ -108,7 +112,7 @@ These columns are recommended on every Phase 1 table:
 | `pipeline_version` | `text` not null | semantic version of code + config |
 | `source` | `text` null | optional, e.g. `market_data.ohlcv` |
 
-### 1) `features_l1_daily`
+### 1) `l1_daily`
 
 **Grain / primary key:** one row per `(bar_ts, symbol)`.
 
@@ -125,36 +129,43 @@ These columns are recommended on every Phase 1 table:
 | `ewvol_20` | `double precision` null | per-symbol EWM volatility: `ewm(span=20, adjust=False).std()` on `log_return` (this replaces notebook `log_vol`) |
 | `norm_return` | `double precision` null | per day: `log_return / ewvol_20` (guard divide-by-zero on `ewvol_20`); same as notebook intermediate `x` before cumsum |
 | `norm_close` | `double precision` null | per `symbol`, ordered by `bar_ts`: `norm_return.cumsum()` (matches notebook `cumsum(x)` after `x = log_return / ewvol_20`) |
+| `market_return` | `double precision` null | per `bar_ts`: arithmetic mean of `norm_return` across `BTCUSDT`, `ETHUSDT`, `BNBUSDT`, `XRPUSDT` (all four must have finite `norm_return` that day; otherwise null). Same scalar on every `(bar_ts, symbol)` row for that day. |
+| `market_ewvol_20` | `double precision` null | `ewm(span=20, adjust=False).std()` on the **global** `market_return` series ordered by `bar_ts` (not per `symbol`; same scalar on every row for that `bar_ts`). |
+| `beta_250` | `double precision` null | rolling 250 **daily** bars **per `symbol`**, ordered by `bar_ts`, with `market_return` aligned on the same `bar_ts`: `cov(market_return, norm_return) / var(market_return)` over the window (guard divide-by-zero on `var(market_return)`; null until the window is usable / insufficient finite pairs). |
+| `resid_return` | `double precision` null | per row: `norm_return - beta_250 * market_return` (null if any operand is null). Same structure as notebook `log_return - beta * mkt_return`, but uses L1 `norm_return`, `beta_250`, and `market_return` so the residual matches the `beta_250` regression pair. |
 | `log_volume` | `double precision` null | `log(volume)` (daily `volume` is a sum) |
 | `log_quote_volume` | `double precision` null | `log(quote_volume)` (daily `quote_volume` is a sum) |
 | `vwap_250` | `double precision` null | rolling 250 **daily** bars: `quote_volume.rolling(250).sum() / volume.rolling(250).sum()` **per `symbol`**, ordered by `bar_ts`, using the **L1** `quote_volume` and `volume` from the same summation as the rest of the row (see **VWAP (`vwap_250`) and the same L1 inputs** above; the notebook’s expression is written without a `groupby`, but production must not mix symbols in the rolling window) |
 
 Recommended indexes (in addition to the primary key):
 
-- `CREATE INDEX ... ON features_l1_daily (bar_ts);`
-- `CREATE INDEX ... ON features_l1_daily (symbol, bar_ts);`
+- `CREATE INDEX ... ON l1_daily (bar_ts);`
+- `CREATE INDEX ... ON l1_daily (symbol, bar_ts);`
 
-### 2) `signals_precombined_daily`
+### 2) `sig_raw_daily`
 
 **Grain / primary key:** one row per `(bar_ts, symbol)`.
 
-`signals_precombined_daily` stores the **per-family raw “variation” series** *inside* each `get_*_score` implementation **up to, but not including,** the family-level final reduction step (commonly `combine_features(...)`) that collapses internal horizons into the scalar `*_score` for that family.
+`sig_raw_daily` stores the **per-family raw “variation” series** *inside* each `get_*_score` implementation **up to, but not including,** the family-level final reduction step (commonly `combine_features(...)`) that collapses internal horizons into the scalar `*_score` for that family.
 
-Concretely: for each selected score family, materialize the **wide internal frame** the function builds (multi-horizon columns / pre-aggregation features), with **namespaced column names** so different families do not collide. **Persisted column names** are **`{family}_{n}`** — a family base (`mom`, `trend`, `breakout`, `vwaprev`, `takerratio`, `skew`, `vol`, **`vlm`**, **`quotevlm`**, **`retvlmcor`**, …) and a numeric suffix **`n`** (the only horizon you vary within that family; **three** values of `n` per family, **30** columns total). The notebook’s compound labels (e.g. `10m5`) map to a single `n` (e.g. `10` for the leading span); implement that mapping in `validators.py` if names differ. Notebook helpers `get_volume_score` / `get_quotevol_score` / `get_retvolcor_score` still feed **`vlm_*`**, **`quotevlm_*`**, and **`retvlmcor_*`** columns in persistence.
+Concretely: for each selected score family, materialize the **wide internal frame** the function builds (multi-horizon columns / pre-aggregation features), with **namespaced column names** so different families do not collide. **Persisted column names** are **`{abbr}_{n}`**, using the **Abbr** (`family` prefix) from the §2.2 table plus horizon suffix **`n`** (the only span you vary within that family; **three** values of `n` per family, **39** columns total). The notebook’s compound labels (e.g. `10m5`) map to a single `n` (e.g. `10` for the leading span); implement that mapping in `validators.py` if names differ. Notebook helpers `get_volume_score` / `get_quotevol_score` / `get_retvolcor_score` still feed **`vlm_*`**, **`quotevlm_*`**, and **`retvlmcor_*`** columns in persistence.
 
 **What does *not* belong here (by design):**
 
-- **No** `*_score` outputs (those live in `signals_combined_daily`).
-- **No** duplication of `features_l1_daily` fields (for example, do not store `vwap_250` / `ewvol_20` / `log_return` here “for convenience”). Downstream code should **join** to `features_l1_daily` as needed. L1 is finalized; this table is **not** a backdoor to expand L1.
-- **No** notebook `y_cols` / supervised targets (those live in `labels_daily`).
+- **No** `*_score` outputs (those live in `sig_comb_daily`).
+- **No** duplication of `l1_daily` fields (for example, do not store `vwap_250` / `ewvol_20` / `log_return` here “for convenience”). Downstream code should **join** to `l1_daily` as needed. L1 is finalized; this table is **not** a backdoor to expand L1.
+- **No** notebook `y_cols` / supervised targets (those live in `lab_daily`).
 
-**Model path selection (per notebook `x_cols` lines 1-5 in `double_sort.ipynb`, user-selected):** only materialize the **families** needed to recompute the **10** `*_score` values that feed `x_cols` ranks:
+**Model path selection (per notebook `x_cols` / score helpers in `double_sort.ipynb`, user-selected):** only materialize the **families** needed to recompute the **13** `*_score` values that feed `x_cols` ranks (same **momentum → reversal → volatility → liquidity** order as §2.2):
 
-- `get_mom_score`, `get_trend_score`, `get_breakout_score`, `get_vwaprev_score`, `get_takerratio_score`, `get_skew_score`, `get_vol_score`, `get_volume_score`, `get_quotevol_score`, `get_retvolcor_score`
+- **Momentum:** `get_mom_score`, `get_trend_score`, `get_breakout_score`
+- **Reversal:** `get_vwaprev_score`, `get_resrev_score`
+- **Volatility:** `get_skew_score`, `get_vol_score`, `get_betasq_score`, `get_maxret_score`
+- **Liquidity:** `get_takerratio_score`, `get_volume_score`, `get_quotevol_score`, `get_retvolcor_score`
 
 Do **not** materialize other families for Phase 1 unless you have a non-model consumer (the research notebook may still define helpers like `get_drawdown_score`, but they are not in your `x_cols`).
 
-**Note on repo drift:** the checked-in `double_sort.ipynb` may still show an older `x_cols` list; treat the **10-family** `x_cols` in this plan as the contract for the trading module.
+**Note on repo drift:** the checked-in `double_sort.ipynb` may still show an older `x_cols` list; treat the **13-family** `x_cols` in this plan as the contract for the trading module.
 
 #### 2.1) Optional debugging / QA columns
 
@@ -164,72 +175,85 @@ Do **not** materialize other families for Phase 1 unless you have a non-model co
 
 #### 2.2) Precombined column schema (per `get_*_score`, before family-level final reduction)
 
-For each family, materialize **three** `double precision` columns `family_n` (see **`n` values** column), one **general formula** in terms of `n` (and helpers like `d` where noted). All series: **per `symbol`**, ordered by `bar_ts`. `log_return`, `log_volume`, `log_quote_volume` are from L1; **`vwap` in these formulas** is L1 **`vwap_250`**. Warmup / null edges follow the underlying windows. Match `strategies/research/double_sort.ipynb` where the intent is the same; breakout here uses `n ∈ {10, 20, 40}` (not 20/40/80 from the notebook).
+For each family, materialize **three** `double precision` columns `{abbr}_{n}` (see **Abbr** and **`n` values** columns), one **general formula** in terms of `n` (and helpers like `d` where noted). All series: **per `symbol`**, ordered by `bar_ts`. `log_return`, `log_volume`, `log_quote_volume`, **`beta_250`**, **`resid_return`** are from L1; **`vwap` in these formulas** is L1 **`vwap_250`**. **`beta` in `get_betasq_score`** maps to L1 **`beta_250`**. Warmup / null edges follow the underlying windows. Match `strategies/research/double_sort.ipynb` where the intent is the same; breakout here uses `n ∈ {10, 20, 40}` (not 20/40/80 from the notebook).
 
-**Naming in Postgres:** columns are **`{family}_{n}`** (e.g. `mom_10`, `vlm_10`, `quotevlm_20`, `retvlmcor_40`). Optional table-wide prefix in `validators.py` (e.g. `pre_mom_10`, `pre_vlm_10`).
+The **Group** column buckets families as **Momentum** (return and price *continuation*), **Reversal** (anchor / VWAP mean reversion and market-residual level), **Volatility** (return shape, level vol, β², and rolling **max** `log_return` / tail realized spikes per `get_maxret_score`), **Liquidity** (volume, flow mix, return–volume link) — same four-way split in §3 and §4.
 
-| Family (feeds `*_score` in `signals_combined_daily`) | `n` values (suffix) | General formula (pandas-style; integer spans) |
-| --- | --- | --- |
-| Momentum | 10, 20, 40 | `mom_n = (log_return.ewm(span=n).sum() - log_return.ewm(span=n // 2).sum()) / (n - n // 2)` — use `ewm(..., adjust=False)` if matching the notebook. |
-| Trend | 5, 10, 20 | `d = close.diff().ewm(span=20).std()` (guard divide-by-zero). `trend_n = (close.ewm(span=n).mean() - close.ewm(span=4 * n).mean()) / d` |
-| Breakout | 10, 20, 40 | `roll_max = close.rolling(n).max()`, `roll_min = close.rolling(n).min()`; `breakout_n = ((close - (roll_max - roll_min) / 2) / (roll_max - roll_min)).ewm(span=5).mean()` (rolling `n` **daily** bars) |
-| VWAP reversion | 5, 10, 20 | `d = close.diff().ewm(span=20).std()` (guarded). `vwaprev_n = (close - vwap.ewm(span=n).mean()) / d` |
-| Taker ratio | 10, 20, 40 | `takerratio_n = (taker_buy_base_volume / volume).ewm(span=n).mean()` |
-| Return skew | 10, 20, 40 | `skew_n = log_return.rolling(n).skew()` |
-| Volatility level | 10, 20, 40 | `vol_n = log_return.ewm(span=n).std()` |
-| Volume level | 10, 20, 40 | `vlm_n = log_volume.ewm(span=n).mean()` |
-| Quote volume level | 10, 20, 40 | `quotevlm_n = log_quote_volume.ewm(span=n).mean()` |
-| Return–volume correlation | 10, 20, 40 | `retvlmcor_n = log_return.rolling(n).corr(log_volume)` |
+**Naming in Postgres:** columns are **`{abbr}_{n}`** where **Abbr** is the `family` prefix in the table below (e.g. `mom_10`, `trend_5`, `breakout_10`, `vwaprev_5`, `resrev_5`, `skew_10`, `vol_10`, `betasq_10`, `maxret_40`, `vlm_10`, `quotevlm_20`, `retvlmcor_40`). Optional table-wide prefix in `validators.py` (e.g. `pre_mom_10`, `pre_vlm_10`).
 
-**Column count:** 10 families × 3 series = **30** precombined numeric columns, plus `bar_ts` / `symbol` / common metadata / optional `n_nonfinite`.
+| Group | Abbr | Family (feeds `*_score` in `sig_comb_daily`) | `n` values (suffix) | General formula (pandas-style; integer spans) |
+| --- | --- | --- | --- | --- |
+| **Momentum** | `mom` | Momentum | 10, 20, 40 | `mom_n = (log_return.ewm(span=n).sum() - log_return.ewm(span=n // 2).sum()) / (n - n // 2)` — use `ewm(..., adjust=False)` if matching the notebook. |
+| **Momentum** | `trend` | Trend | 5, 10, 20 | `d = close.diff().ewm(span=20).std()` (guard divide-by-zero). `trend_n = (close.ewm(span=n).mean() - close.ewm(span=4 * n).mean()) / d` |
+| **Momentum** | `breakout` | Breakout | 10, 20, 40 | `roll_max = close.rolling(n).max()`, `roll_min = close.rolling(n).min()`; `breakout_n = ((close - (roll_max - roll_min) / 2) / (roll_max - roll_min)).ewm(span=5).mean()` (rolling `n` **daily** bars) |
+| **Reversal** | `vwaprev` | VWAP reversion | 5, 10, 20 | `d = close.diff().ewm(span=20).std()` (guarded). `vwaprev_n = (close - vwap.ewm(span=n).mean()) / d` |
+| **Reversal** | `resrev` | Residual return level (EWM sum / span) | 5, 10, 20 | `resrev_n = resid_return.ewm(span=n).sum() / n` (`get_resrev_score`; notebook uses `resid_return` built from `log_return - beta * mkt_return`; L1 uses **`resid_return`** from `l1_daily` as defined there). |
+| **Volatility** | `skew` | Return skew | 10, 20, 40 | `skew_n = log_return.rolling(n).skew()` |
+| **Volatility** | `vol` | Volatility level | 10, 20, 40 | `vol_n = log_return.ewm(span=n).std()` |
+| **Volatility** | `betasq` | Beta squared (EWM of β²) | 10, 20, 40 | `betasq_n = (beta_250 ** 2).ewm(span=n).mean()` — use `ewm(..., adjust=False)` if matching the notebook (`get_betasq_score`). |
+| **Volatility** | `maxret` | Max log return (rolling window max) | 10, 20, 40 | `maxret_n = log_return.rolling(n).max()` (`get_maxret_score`; per `symbol`, ordered by `bar_ts`). |
+| **Liquidity** | `takerratio` | Taker ratio | 10, 20, 40 | `takerratio_n = (taker_buy_base_volume / volume).ewm(span=n).mean()` |
+| **Liquidity** | `vlm` | Volume level | 10, 20, 40 | `vlm_n = log_volume.ewm(span=n).mean()` |
+| **Liquidity** | `quotevlm` | Quote volume level | 10, 20, 40 | `quotevlm_n = log_quote_volume.ewm(span=n).mean()` |
+| **Liquidity** | `retvlmcor` | Return–volume correlation | 10, 20, 40 | `retvlmcor_n = log_return.rolling(n).corr(log_volume)` |
 
-**Not in scope for the 10-feature model** (notebook defines them, do not materialize in Phase 1 unless you add them to the model path): e.g. `get_drawdown_score`, `get_ddath_score`, `get_maxret_score`, `get_logprc_score`, `get_takervol_score`, etc.
+**Column count:** 13 families × 3 series = **39** precombined numeric columns, plus `bar_ts` / `symbol` / common metadata / optional `n_nonfinite`.
 
-### 3) `signals_combined_daily` (the scalar `*_score` layer; input to `x_cols` ranks)
+**Not in scope for the 13-feature model** (notebook defines them, do not materialize in Phase 1 unless you add them to the model path): e.g. `get_drawdown_score`, `get_ddath_score`, `get_logprc_score`, `get_takervol_score`, etc.
+
+### 3) `sig_comb_daily` (the scalar `*_score` layer; input to `x_cols` ranks)
 
 **Grain / primary key:** one row per `(bar_ts, symbol)`.
 
-`signals_combined_daily` stores the **10** scalar `*_score` values produced *after* each `get_*_score` runs its final reduction step. `combine_features(...)` is one valid implementation pattern, but this table is not coupled to that specific function, so model-specific reductions are also valid if they produce the same per-`(bar_ts, symbol)` scalar `*_score` contract. These are the values cross-sectionally ranked into `signals_xsection_daily`.
+`sig_comb_daily` stores the **13** scalar `*_score` values produced *after* each `get_*_score` runs its final reduction step. `combine_features(...)` is one valid implementation pattern, but this table is not coupled to that specific function, so model-specific reductions are also valid if they produce the same per-`(bar_ts, symbol)` scalar `*_score` contract. These are the values cross-sectionally ranked into `sig_xsec_daily`.
 
-Required `*_score` columns (10):
+Required `*_score` columns (13), same **momentum → reversal → volatility → liquidity** order as §2.2:
 
-- `mom_score`, `trend_score`, `breakout_score`, `vwaprev_score`, `takerratio_score`, `skew_score`, `vol_score`, `vlm_score`, `quotevlm_score`, `retvlmcor_score`
+- **Momentum:** `mom_score`, `trend_score`, `breakout_score`
+- **Reversal:** `vwaprev_score`, `resrev_score`
+- **Volatility:** `skew_score`, `vol_score`, `betasq_score`, `maxret_score`
+- **Liquidity:** `takerratio_score`, `vlm_score`, `quotevlm_score`, `retvlmcor_score`
 
 #### 3.1) Optional debugging / QA columns
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `n_nonfinite` | `int` | count of non-finite values across the 10 `*_score` fields (after computing, before persistence) |
+| `n_nonfinite` | `int` | count of non-finite values across the 13 `*_score` fields (after computing, before persistence) |
 
-### 4) `signals_xsection_daily` (the model feature vector in rank space)
+### 4) `sig_xsec_daily` (the model feature vector in rank space)
 
 **Grain / primary key:** one row per `(bar_ts, symbol)`.
 
-`signals_xsection_daily` materializes the notebook’s `x_cols` (lines 1-5) from the selected `*_score` fields in **`signals_combined_daily`**. **Percentile ranking is the default implementation for Phase 1 parity with the notebook, not a hard requirement**; other cross-sectional transforms are valid if they preserve the same per-`(bar_ts, symbol)` feature contract for `x_cols`.
+`sig_xsec_daily` materializes the notebook’s `x_cols` (this plan: **13** ranks from section 3; older notebook snapshots may list fewer) from the selected `*_score` fields in **`sig_comb_daily`**. **Percentile ranking is the default implementation for Phase 1 parity with the notebook, not a hard requirement**; other cross-sectional transforms are valid if they preserve the same per-`(bar_ts, symbol)` feature contract for `x_cols`.
 
 - ranks: `df.groupby([bar_ts]).rank(pct=True)` (same as the notebook; in SQL/Python, `bar_ts` is the day key and replaces notebook `ts`)
 
-| Column | Type | Notebook grouping for cross-sectional rank | Notes |
-| --- | --- | --- | --- |
-| `mom_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `mom_score` |
-| `trend_rank` | `double precision` null | `groupby(bar_ts)` | `trend_score` |
-| `breakout_rank` | `double precision` null | `groupby(bar_ts)` | `breakout_score` |
-| `vwaprev_rank` | `double precision` null | `groupby(bar_ts)` | `vwaprev_score` |
-| `takerratio_rank` | `double precision` null | `groupby(bar_ts)` | `takerratio_score` |
-| `skew_rank` | `double precision` null | `groupby(bar_ts)` | `skew_score` |
-| `vol_rank` | `double precision` null | `groupby(bar_ts)` | `vol_score` |
-| `vlm_rank` | `double precision` null | `groupby(bar_ts)` | `vlm_score` |
-| `quotevlm_rank` | `double precision` null | `groupby(bar_ts)` | `quotevlm_score` |
-| `retvlmcor_rank` | `double precision` null | `groupby(bar_ts)` | `retvlmcor_score` |
-| `n_symbols_xs` | `int` null | n/a | optional: `count(*)` within `bar_ts` for diagnostics |
+Ranks below follow the same **momentum / reversal / volatility / liquidity** group order as §2.2 (not necessarily the column order in an older `x_cols` list in the notebook).
+
+| Group | Column | Type | Notebook grouping for cross-sectional rank | Notes |
+| --- | --- | --- | --- | --- |
+| **Momentum** | `mom_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `mom_score` |
+| **Momentum** | `trend_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `trend_score` |
+| **Momentum** | `breakout_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `breakout_score` |
+| **Reversal** | `vwaprev_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `vwaprev_score` |
+| **Reversal** | `resrev_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `resrev_score` |
+| **Volatility** | `skew_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `skew_score` |
+| **Volatility** | `vol_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `vol_score` |
+| **Volatility** | `betasq_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `betasq_score` |
+| **Volatility** | `maxret_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `maxret_score` |
+| **Liquidity** | `takerratio_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `takerratio_score` |
+| **Liquidity** | `vlm_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `vlm_score` |
+| **Liquidity** | `quotevlm_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `quotevlm_score` |
+| **Liquidity** | `retvlmcor_rank` | `double precision` null | `groupby(bar_ts)` | `rank(pct=True)` of `retvlmcor_score` |
+| *Diagnostics* | `n_symbols_xs` | `int` null | n/a | optional: `count(*)` within `bar_ts` for diagnostics |
 
 #### 4.1) Optional: research-only regime bins (not in `x_cols`)
 
-The notebook also constructs `mom_bin` / `vol_bin` / `volume_bin` for analysis / sorting experiments. If you want parity with those notebook sections, store them in a separate table or as nullable columns, but do **not** treat them as part of the 10-feature model unless you explicitly add them to `x_cols`.
+The notebook also constructs `mom_bin` / `vol_bin` / `volume_bin` for analysis / sorting experiments. If you want parity with those notebook sections, store them in a separate table or as nullable columns, but do **not** treat them as part of the 13-feature model unless you explicitly add them to `x_cols`.
 
-> Why split tables: `signals_precombined_daily` is the optional deep audit layer (raw per-family state before score reduction). `signals_combined_daily` is the compact on-symbol score layer. `signals_xsection_daily` is the cross-sectional `x_cols` contract (rank space).
+> Why split tables: `sig_raw_daily` is the optional deep audit layer (raw per-family state before score reduction). `sig_comb_daily` is the compact on-symbol score layer. `sig_xsec_daily` is the cross-sectional `x_cols` contract (rank space; **13** ranks in this plan).
 
-### 5) `labels_daily`
+### 5) `lab_daily`
 
 **Grain / primary key:** one row per `(bar_ts, symbol)`.
 
@@ -256,7 +280,7 @@ In `double_sort.ipynb` lines 1-5, the supervised frame is `['ts','symbol','vol_w
 
 If you add targets for other steps \(h>1\), add parallel columns for the persisted supervised outputs (for example `normret_fwd_<h> = log(close).diff(h).shift(-h) / <configured_vol_field>`) only when the notebook’s **definitions** for those steps are agreed (default Phase 1: persist **`_1` supervised columns** and forward-return columns for any extra `h` you configure).
 
-For Phase 1, treat **`labels_daily` as the canonical place** to reproduce the notebook’s `y_cols` in wide form. **Do not** put `y_cols` in `signals_precombined_daily`.
+For Phase 1, treat **`lab_daily` as the canonical place** to reproduce the notebook’s `y_cols` in wide form. **Do not** put `y_cols` in `sig_raw_daily`.
 
 #### 5.3) Provenance (recommended)
 
@@ -267,9 +291,9 @@ For Phase 1, treat **`labels_daily` as the canonical place** to reproduce the no
 
 Retention recommendation:
 
-- Keep `features_l1_daily`, `signals_combined_daily`, and `signals_xsection_daily` long-term (these are the minimal training/inference “wide path” for the 10-rank `x_cols` model).
-- Keep `signals_precombined_daily` long-term if you want the deepest audit trail of pre-score internals; otherwise it can be a shorter retention tier.
-- Keep `labels_daily` long-term: it stores **wide** suffixed return and supervised columns (add columns when you add configured steps `h` — migrate schema or use a JSON column only if you intentionally defer; Phase 1 assumes fixed known suffixes in code + migration).
+- Keep `l1_daily`, `sig_comb_daily`, and `sig_xsec_daily` long-term (these are the minimal training/inference “wide path” for the 13-rank `x_cols` model).
+- Keep `sig_raw_daily` long-term if you want the deepest audit trail of pre-score internals; otherwise it can be a shorter retention tier.
+- Keep `lab_daily` long-term: it stores **wide** suffixed return and supervised columns (add columns when you add configured steps `h` — migrate schema or use a JSON column only if you intentionally defer; Phase 1 assumes fixed known suffixes in code + migration).
 
 ---
 
@@ -296,7 +320,7 @@ Execution semantics:
 - Deterministic transforms only; no random components.
 - Idempotent persistence via upsert keyed on table PKs.
 - Fail-fast if data coverage is below configured threshold.
-- `BuildSignalsCombinedScores` should not depend on reading back `signals_precombined_daily` (scores are a function of `features_l1_daily` + the same `get_*_score` codepaths); `signals_precombined_daily` exists to persist intermediate bundles for audit/debug, not to be the computational prerequisite for `*_score` outputs.
+- `BuildSignalsCombinedScores` should not depend on reading back `sig_raw_daily` (scores are a function of `l1_daily` + the same `get_*_score` codepaths); `sig_raw_daily` exists to persist intermediate bundles for audit/debug, not to be the computational prerequisite for `*_score` outputs.
 
 ---
 
@@ -315,19 +339,19 @@ Execution semantics:
   - Compute `vwap_250` from L1 `quote_volume` and `volume` (same row / same intraday summation; see *VWAP (`vwap_250`) and the same L1 inputs* under Data schema design); wire vwapreversion to L1 `close` + L1 `vwap_250`.
   - Add deterministic null handling and per-symbol warmup trimming logic.
 
-- [ ] **Task 4: Implement `signals_precombined_daily` (raw per-family pre-final-reduction bundles)**
-  - Port the **10** `get_*_score` families listed in section 2 into `signals_precombined.py`, persisting the **internal multi-column bundles** *before* the family-level final reduction (often `combine_features`; no scalar `*_score` columns in this table), with persisted column names **`{family}_{n}`** and the **general formula per family** in *Precombined column schema* (section 2.2) (rename in `validators.py` if the notebook’s intermediate names are not already `family_n`).
-  - Do **not** re-materialize L1 fields here; read joins to `features_l1_daily` when a score function needs inputs like `vwap_250`.
+- [ ] **Task 4: Implement `sig_raw_daily` (raw per-family pre-final-reduction bundles)**
+  - Port the **13** `get_*_score` families listed in section 2 into `signals_precombined.py`, persisting the **internal multi-column bundles** *before* the family-level final reduction (often `combine_features`; no scalar `*_score` columns in this table), with persisted column names **`{abbr}_{n}`** (§2.2 **Abbr** column) and the **general formula per family** in *Precombined column schema* (section 2.2) (rename in `validators.py` if the notebook’s intermediate names are not already `abbr_n`).
+  - Do **not** re-materialize L1 fields here; read joins to `l1_daily` when a score function needs inputs like `vwap_250`.
 
-- [ ] **Task 5: Implement `signals_combined_daily` (final `*_score` before cross-sectional ranking)**
-  - Implement `signals_combined.py` to produce the **10** scalar `*_score` values (section 3), using the same `get_*_score` definitions as the notebook and deterministically reading inputs from `features_l1_daily` (and any internal temporaries not persisted).
+- [ ] **Task 5: Implement `sig_comb_daily` (final `*_score` before cross-sectional ranking)**
+  - Implement `signals_combined.py` to produce the **13** scalar `*_score` values (section 3), using the same `get_*_score` definitions as the notebook and deterministically reading inputs from `l1_daily` (and any internal temporaries not persisted).
 
-- [ ] **Task 6: Implement `signals_xsection_daily` (`x_cols` from notebook lines 1-5)**
-  - Add cross-sectional feature assembly in `signals_xsection.py` to reproduce the **10** `x_cols` features using **only** the selected `*_score` fields from `signals_combined_daily`.
+- [ ] **Task 6: Implement `sig_xsec_daily` (`x_cols` / 13 ranks per section 4)**
+  - Add cross-sectional feature assembly in `signals_xsection.py` to reproduce the **13** `x_cols` features using **only** the selected `*_score` fields from `sig_comb_daily`.
   - For Phase 1 parity, use notebook-style percentile ranking (`groupby(bar_ts)` + `rank(pct=True)`), but keep the implementation boundary explicit so alternative cross-sectional transforms can be swapped in later.
   - Enforce per-`bar_ts` invariants for the chosen transform (for ranking, ranks in `[0,1]` where applicable) and no NaN when scores are valid.
 
-- [ ] **Task 7: Implement `labels_daily` (returns + notebook `y_cols`)**
+- [ ] **Task 7: Implement `lab_daily` (returns + notebook `y_cols`)**
   - Build a **wide** label frame in `labels.py`: one row per `(bar_ts, symbol)` with `logret_fwd_<h>` / optional `simpret_fwd_<h>` for each configured suffix `h`.
   - Persist notebook `y_cols` as **`_1` suffixed** columns in section 5.2; strict no-lookahead rules.
 
@@ -355,7 +379,7 @@ Unit tests:
 
 - Feature determinism: same input DataFrame yields identical outputs.
 - `vwap_250` on L1 matches `quote_volume.rolling(250).sum() / volume.rolling(250).sum()` on the **same** daily `quote_volume` and `volume` columns (not from `log_*` or a second raw read).
-- Shape invariants: `signals_precombined_daily` contains **no** L1 re-duplication columns and **no** scalar `*_score` fields; `signals_combined_daily` includes **10** `*_score` columns (section 3); `signals_xsection_daily` includes **10** `*_rank` columns matching the `x_cols` list in `double_sort.ipynb` lines 1-5; `labels_daily` can reproduce the notebook `y_cols` for supervised learning (section 5.2).
+- Shape invariants: `sig_raw_daily` contains **no** L1 re-duplication columns and **no** scalar `*_score` fields; `sig_comb_daily` includes **13** `*_score` columns (section 3); `sig_xsec_daily` includes **13** `*_rank` columns matching the `x_cols` contract in this plan (align `double_sort.ipynb` when the notebook list catches up); `lab_daily` can reproduce the notebook `y_cols` for supervised learning (section 5.2).
 - Cross-sectional invariants: normalization/rank constraints per `bar_ts`.
 - Label integrity: each `logret_fwd_<h>` uses the correct forward shift; nulls at series ends and warmup are correct.
 - Leakage guard: labels never use the same bar or past-only mishandled offsets.
@@ -370,17 +394,17 @@ Integration tests:
 - E2E smoke over a small historical window (for example 30-60 days).
 - With the **24-bar** / **01:00** default, validate that a production-mode run only touches the expected `bar_ts` range (ends at the day that closed at 00:00 before the run) and that the **extract** is bounded with predicates on **`ohlcv.open_time`**, not `close_time`, per *Pipeline schedule and lookback*.
 - Validate non-empty outputs and minimum symbol coverage.
-- Validate joins across `features_l1_daily`, `signals_combined_daily`, and `signals_xsection_daily` by `(bar_ts, symbol)` without orphan rows.
-- If `signals_precombined_daily` is enabled, validate it joins 1:1 to `(bar_ts, symbol)` and that its internal bundles can reproduce `signals_combined_daily` (spot-check a small window, if you add a consistency check).
+- Validate joins across `l1_daily`, `sig_comb_daily`, and `sig_xsec_daily` by `(bar_ts, symbol)` without orphan rows.
+- If `sig_raw_daily` is enabled, validate it joins 1:1 to `(bar_ts, symbol)` and that its internal bundles can reproduce `sig_comb_daily` (spot-check a small window, if you add a consistency check).
 
 ---
 
 ## Acceptance criteria
 
-- All Phase 1 tables exist and are populated for a target historical window (`features_l1_daily`, `signals_precombined_daily`, `signals_combined_daily`, `signals_xsection_daily`, and `labels_daily`).
+- All Phase 1 tables exist and are populated for a target historical window (`l1_daily`, `sig_raw_daily`, `sig_comb_daily`, `sig_xsec_daily`, and `lab_daily`).
 - Re-running the pipeline for the same window produces identical results and row counts.
 - Unit and integration tests pass in CI/local.
-- A sample audit query can explain one `(symbol, bar_ts)` from `features_l1_daily` to `signals_combined_daily` to `signals_xsection_daily` to `labels_daily` (and optionally through `signals_precombined_daily` for internal pre-score columns).
+- A sample audit query can explain one `(symbol, bar_ts)` from `l1_daily` to `sig_comb_daily` to `sig_xsec_daily` to `lab_daily` (and optionally through `sig_raw_daily` for internal pre-score columns).
 - No lookahead leakage detected by tests.
 
 ---
@@ -398,4 +422,4 @@ Integration tests:
 
 ## Handoff to Phase 2
 
-Phase 2 consumes `signals_xsection_daily` for `X`, `labels_daily` for `y` (including the notebook’s `y_cols` mapped to **wide** `*_1` columns in section 5.2, unless you change the target definition), and optionally `signals_precombined_daily` for debugging/explainability of the internal per-family pre-score state. `signals_combined_daily` remains the canonical place to fetch scalar `*_score` values for monitoring and for recomputing ranks offline.
+Phase 2 consumes `sig_xsec_daily` for `X`, `lab_daily` for `y` (including the notebook’s `y_cols` mapped to **wide** `*_1` columns in section 5.2, unless you change the target definition), and optionally `sig_raw_daily` for debugging/explainability of the internal per-family pre-score state. `sig_comb_daily` remains the canonical place to fetch scalar `*_score` values for monitoring and for recomputing ranks offline.
