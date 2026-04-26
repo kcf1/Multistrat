@@ -428,7 +428,7 @@ Integration tests:
 
 - **Window:** For persisted daily keys from `first_bar_ts` through `last_bar_ts` (UTC midnights), load intraday OHLCV with `open_time_ge = first_bar_ts - WARMUP_CALENDAR_DAYS` and `open_time_lt = last_bar_ts + 1 calendar day` (half-open), then filter persistence to `[first_bar_ts, last_bar_ts]`. See [`scripts/backfill_factor_ls.py`](../../scripts/backfill_factor_ls.py).
 - **Sparse `bar_ts`:** Days with fewer than `min(MIN_DISTINCT_SYMBOLS_PER_BAR, len(syms))` symbols in L1 are **skipped** (logged, omitted from outputs), not fail-fast. Features still use the full daily series for continuity; cross-section ranks run only on kept days.
-- **Gates (``factor_ls`` config):** `MIN_DISTINCT_SYMBOLS_PER_BAR` (default 100, capped by `len(syms)` for small test universes).
+- **Gates (``factor_ls`` config):** `MIN_DISTINCT_SYMBOLS_PER_BAR` (default 50, capped by `len(syms)` for small test universes).
 - **Post-load SQL checks:** [`scripts/validate_factor_ls_backfill.sql`](../../scripts/validate_factor_ls_backfill.sql).
 
 ---

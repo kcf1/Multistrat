@@ -23,6 +23,6 @@ def test_production_load_window_covers_output_and_warmup():
 
 
 def test_plan_coverage_and_vol_weight_constants():
-    assert config.MIN_DISTINCT_SYMBOLS_PER_BAR == 100
+    assert config.MIN_DISTINCT_SYMBOLS_PER_BAR == 50
     assert abs(config.VOL_WEIGHT_NUMERATOR - 0.50 / (250**0.5)) < 1e-15
     assert config.INCLUDE_SIMPRET_IN_LABELS is False

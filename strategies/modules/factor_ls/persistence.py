@@ -80,9 +80,15 @@ def _upsert_table(
     )
 
     rows = []
+    meta_tail: tuple[Any, ...] = tuple()
+    if "pipeline_version" not in write_order:
+        meta_tail += (pipeline_version,)
+    if "source" not in write_order:
+        meta_tail += (source,)
+
     for _, r in df.iterrows():
         base = _ordered_row(r, write_order, pipeline_version, source)
-        rows.append(base)
+        rows.append(base + meta_tail)
 
     with conn.cursor() as cur:
         execute_values(cur, insert_sql, rows, page_size=500)

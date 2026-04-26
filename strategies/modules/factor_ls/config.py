@@ -31,7 +31,7 @@ WARMUP_CALENDAR_DAYS: Final[int] = 320
 
 # Minimum distinct symbols with an L1 row per ``bar_ts`` (capped by ``len(syms)`` in pipeline).
 # ``bar_ts`` that do not meet this count are **skipped** (dropped from outputs), not raised.
-MIN_DISTINCT_SYMBOLS_PER_BAR: Final[int] = 100
+MIN_DISTINCT_SYMBOLS_PER_BAR: Final[int] = 50
 
 # Notebook-style inverse-vol weight numerator: ``vol_weight = VOL_WEIGHT_NUM / ewvol_20``.
 VOL_WEIGHT_NUMERATOR: Final[float] = 0.50 / (250**0.5)
