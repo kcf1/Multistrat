@@ -122,6 +122,20 @@ services:
       postgres:
         condition: service_healthy
 
+  strategies_runner:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-multistrat}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-multistrat}
+      STRATEGIES_PIPELINE_DATABASE_URL: postgresql://${POSTGRES_USER:-multistrat}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-multistrat}
+    command: ["python", "-m", "strategies.runner"]
+    restart: unless-stopped
+    networks:
+      - multistrat
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   scheduler:
     build: .
     env_file: .env

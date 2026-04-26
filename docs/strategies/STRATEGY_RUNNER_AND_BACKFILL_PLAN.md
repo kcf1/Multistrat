@@ -4,6 +4,23 @@ This plan covers **deploying** `strategies_daily` population (`factor_ls`), **ba
 
 ---
 
+## Strategies runner service (Milestone 1 — implemented)
+
+A first-class **long-running process** (same deployment class as `pms` / `market_data`), structured like **OMS broker registration**:
+
+| OMS | Strategies runner |
+|-----|---------------------|
+| [`oms/registry.py`](../../oms/registry.py) `AdapterRegistry` | [`strategies/runner/module_registry.py`](../../strategies/runner/module_registry.py) `RunnerModuleRegistry` |
+| [`BrokerAdapter`](../../oms/brokers/base.py) | [`StrategyModule`](../../strategies/runner/types.py) (`module_id`, `book_id`, `run_tick`) |
+| [`get_registry()`](../../oms/main.py) | [`build_runner_registry()`](../../strategies/runner/bootstrap.py) |
+
+- **Run locally / container:** `python -m strategies.runner` (see `docker-compose.yml` service `strategies_runner`).
+- **Tick interval:** [`RUNNER_TICK_INTERVAL_SECONDS`](../../strategies/config.py) (code constant; not `.env`).
+- **Trading intent scaffold** [`strategies/registry.py`](../../strategies/registry.py) `STRATEGY_BUILDERS` / [`strategies/runner/loop.py`](../../strategies/runner/loop.py) remains separate until deliberately unified.
+- **Next:** implement `factor_ls` (and others) as `StrategyModule` and register them in `build_runner_registry()`; avoid scheduling the same work twice elsewhere (e.g. duplicate daily cron + runner).
+
+---
+
 ## 0. Backfill `strategies_daily`
 
 You have two families of approaches; both can land on the **same** persisted tables and PKs `(bar_ts, symbol)`.
