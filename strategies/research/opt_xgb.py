@@ -7,7 +7,13 @@ Sklearn XGBRegressor kwargs vs native `xgb.train`:
   learning_rate → eta          reg_alpha → alpha          reg_lambda → "lambda"
   n_estimators → num_boost_round (train() argument)
 
-Run configuration is set in-code below (OPTUNA_METRIC, decile settings, XGB device).
+Run configuration is set in-code below.
+
+The reported "best" model is the best trial **within your search budget** (trial count
+and/or timeout), not a global optimum. Optuna's default **TPESampler** uses past
+trials to propose new points (not i.i.d. uniform draws). For stronger coverage,
+raise ``OPTUNA_N_TRIALS`` / timeout, run multiple studies with different seeds, or
+narrow spaces after an exploratory pass.
 """
 
 from __future__ import annotations
@@ -30,11 +36,16 @@ from create_data import load_data  # noqa: E402
 
 # --- Run configuration (edit here) ---
 # Optuna objective: rmse | spearman | cs_spearman | decile_spread | decile_sharpe
-OPTUNA_METRIC = "decile_spread"
+OPTUNA_METRIC = "cs_spearman"
 OPTUNA_DECILE_FRAC = 0.1
 # For metric decile_sharpe: multiply mean/std by sqrt(252) when True
 OPTUNA_DECILE_ANNUALIZE = True
 XGBOOST_DEVICE = "cuda"
+
+# Search budget (best trial = argmax/min over this budget only)
+OPTUNA_N_TRIALS = 500
+OPTUNA_TIMEOUT_SEC = 3600
+OPTUNA_SEED = 42  # TPESampler seed for reproducibility
 
 
 def _rmse(y_true, y_pred) -> float:
@@ -329,6 +340,10 @@ def main() -> None:
     if optuna_metric in ("decile_spread", "decile_sharpe"):
         print(f"OPTUNA_DECILE_FRAC={decile_frac} OPTUNA_DECILE_ANNUALIZE={OPTUNA_DECILE_ANNUALIZE}")
     print("XGB search includes: reg_objective, tree_method, booster, grow_policy, eval_metric, …")
+    print(
+        f"Optuna: TPESampler(seed={OPTUNA_SEED}), "
+        f"n_trials<={OPTUNA_N_TRIALS}, timeout<={OPTUNA_TIMEOUT_SEC}s"
+    )
 
     train_x, train_y, valid_x, valid_y, test_x, test_y = load_data()
     objective = make_objective(
@@ -340,8 +355,17 @@ def main() -> None:
         decile_frac=decile_frac,
         decile_annualize=OPTUNA_DECILE_ANNUALIZE,
     )
-    study = optuna.create_study(direction=direction, study_name="xgb_vol_wt_return")
-    study.optimize(objective, n_trials=100, timeout=600, show_progress_bar=True)
+    study = optuna.create_study(
+        direction=direction,
+        study_name="xgb_vol_wt_return",
+        sampler=optuna.samplers.TPESampler(seed=OPTUNA_SEED),
+    )
+    study.optimize(
+        objective,
+        n_trials=OPTUNA_N_TRIALS,
+        timeout=OPTUNA_TIMEOUT_SEC,
+        show_progress_bar=True,
+    )
 
     print("Number of finished trials:", len(study.trials))
     print(f"Best trial value ({optuna_metric}):", study.best_value)
