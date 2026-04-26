@@ -123,8 +123,8 @@ fi
 wait_healthy postgres
 wait_healthy redis
 
-echo "Running DB migrations (alembic upgrade head)..."
-run docker compose "${COMPOSE_ARGS[@]}" run --rm oms python -m alembic upgrade head
+echo "Running DB migrations (alembic upgrade heads)..."
+run docker compose "${COMPOSE_ARGS[@]}" run --rm oms python -m alembic upgrade heads
 
 echo "Starting OMS only (symbol sync before backfill; pms/risk/scheduler after market_data)..."
 run docker compose "${COMPOSE_ARGS[@]}" up -d oms

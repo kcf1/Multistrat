@@ -116,8 +116,8 @@ fi
 wait_healthy postgres
 wait_healthy redis
 
-echo "Running DB migrations (alembic upgrade head)..."
-run docker compose "${COMPOSE_ARGS[@]}" run --rm oms python -m alembic upgrade head
+echo "Running DB migrations (alembic upgrade heads)..."
+run docker compose "${COMPOSE_ARGS[@]}" run --rm oms python -m alembic upgrade heads
 
 echo "Restarting app services with latest image/code..."
 run docker compose "${COMPOSE_ARGS[@]}" up -d --force-recreate "${APP_SERVICES[@]}"

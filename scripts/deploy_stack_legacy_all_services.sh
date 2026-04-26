@@ -71,8 +71,8 @@ if [[ "${NO_BUILD}" -eq 0 ]]; then
   docker compose build --pull "${APP_SERVICES[@]}"
 fi
 
-echo "Running database migrations (alembic upgrade head)..."
-docker compose run --rm oms python -m alembic upgrade head
+echo "Running database migrations (alembic upgrade heads)..."
+docker compose run --rm oms python -m alembic upgrade heads
 
 if [[ "${DESTRUCTIVE_SEED}" -eq 1 ]]; then
   echo "Seeding assets (destructive: reset_and_seed_assets)..."

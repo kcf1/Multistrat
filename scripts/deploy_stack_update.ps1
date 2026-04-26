@@ -94,8 +94,8 @@ if ($WithTools) {
 Wait-Healthy "postgres"
 Wait-Healthy "redis"
 
-Write-Host "Running DB migrations (alembic upgrade head)..."
-$cmd = @("docker", "compose") + $ComposeArgs + @("run", "--rm", "oms", "python", "-m", "alembic", "upgrade", "head")
+Write-Host "Running DB migrations (alembic upgrade heads)..."
+$cmd = @("docker", "compose") + $ComposeArgs + @("run", "--rm", "oms", "python", "-m", "alembic", "upgrade", "heads")
 Run-Cmd $cmd
 
 Write-Host "Restarting app services with latest image/code..."
