@@ -123,7 +123,8 @@ These columns are recommended on every Phase 1 table:
 | `log_close` | `double precision` not null | `log(close)` |
 | `log_return` | `double precision` null | per-symbol `log_close.diff()` on the daily bar series (the first day per symbol is null by construction) |
 | `ewvol_20` | `double precision` null | per-symbol EWM volatility: `ewm(span=20, adjust=False).std()` on `log_return` (this replaces notebook `log_vol`) |
-| `norm_close` | `double precision` null | notebook: `x = log_return / ewvol_20` then `groupby(symbol) cumsum(x)` (guard divide-by-zero on `ewvol_20`) |
+| `norm_return` | `double precision` null | per day: `log_return / ewvol_20` (guard divide-by-zero on `ewvol_20`); same as notebook intermediate `x` before cumsum |
+| `norm_close` | `double precision` null | per `symbol`, ordered by `bar_ts`: `norm_return.cumsum()` (matches notebook `cumsum(x)` after `x = log_return / ewvol_20`) |
 | `log_volume` | `double precision` null | `log(volume)` (daily `volume` is a sum) |
 | `log_quote_volume` | `double precision` null | `log(quote_volume)` (daily `quote_volume` is a sum) |
 | `vwap_250` | `double precision` null | rolling 250 **daily** bars: `quote_volume.rolling(250).sum() / volume.rolling(250).sum()` **per `symbol`**, ordered by `bar_ts`, using the **L1** `quote_volume` and `volume` from the same summation as the rest of the row (see **VWAP (`vwap_250`) and the same L1 inputs** above; the notebook’s expression is written without a `groupby`, but production must not mix symbols in the rolling window) |
