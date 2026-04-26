@@ -12,6 +12,13 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(_ROOT / ".env", override=True)
+except ImportError:
+    pass
+
 from strategies.modules.factor_ls import run_pipeline
 
 

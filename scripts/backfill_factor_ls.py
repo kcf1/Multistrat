@@ -22,6 +22,13 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(_ROOT / ".env", override=True)
+except ImportError:
+    pass
+
 import pandas as pd
 
 from strategies.modules.factor_ls import config
@@ -29,7 +36,11 @@ from strategies.modules.factor_ls.pipeline import run_pipeline
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Backfill strategies_daily via one wide factor_ls run.")
+    p = argparse.ArgumentParser(
+        description="Backfill strategies_daily via one wide factor_ls run.",
+        epilog="Requires DATABASE_URL (or STRATEGIES_PIPELINE_DATABASE_URL / MARKET_DATA_DATABASE_URL). "
+        "Loads repo .env automatically if python-dotenv is installed.",
+    )
     p.add_argument(
         "--first-bar-ts",
         type=str,
