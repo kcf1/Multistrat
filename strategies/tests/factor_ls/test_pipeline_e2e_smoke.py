@@ -31,6 +31,7 @@ def test_run_pipeline_smoke_with_persist_off():
         open_time_lt=end,
         persist=False,
         interval=config.DEFAULT_OHLCV_INTERVAL,
+        quiet=True,
     )
     if res.l1.empty:
         pytest.skip("No OHLCV rows in window for chosen symbols")

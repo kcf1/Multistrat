@@ -14,6 +14,7 @@ from ``l1feats_daily``—prefer one wide run when memory allows.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -57,7 +58,11 @@ def main() -> None:
     p.add_argument("--interval", type=str, default=None, help="OHLCV interval (default from config).")
     p.add_argument("--no-persist", action="store_true", help="Compute only.")
     p.add_argument("--pipeline-version", type=str, default=None, help="Tag rows in DB.")
+    p.add_argument("--quiet", action="store_true", help="Suppress factor_ls step logs.")
     args = p.parse_args()
+
+    if not args.quiet:
+        logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 
     first = pd.Timestamp(args.first_bar_ts, tz="UTC").normalize()
     last = pd.Timestamp(args.last_bar_ts, tz="UTC").normalize()
@@ -78,6 +83,7 @@ def main() -> None:
         persist=not args.no_persist,
         pipeline_version=args.pipeline_version,
         interval=args.interval,
+        quiet=args.quiet,
     )
     print("L1 rows:", len(res.l1))
     print("Pre rows:", len(res.pre))

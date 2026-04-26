@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,7 +44,11 @@ def main() -> None:
     p.add_argument("--interval", type=str, default=None, help="OHLCV interval (default from config).")
     p.add_argument("--no-persist", action="store_true", help="Compute only; do not write to Postgres.")
     p.add_argument("--pipeline-version", type=str, default=None, help="Override pipeline_version on rows.")
+    p.add_argument("--quiet", action="store_true", help="Suppress factor_ls step logs (no logging.basicConfig).")
     args = p.parse_args()
+
+    if not args.quiet:
+        logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 
     symbols = tuple(s.strip().upper() for s in args.symbols.split(",")) if args.symbols else None
 
@@ -52,6 +57,7 @@ def main() -> None:
         "persist": not args.no_persist,
         "pipeline_version": args.pipeline_version,
         "interval": args.interval,
+        "quiet": args.quiet,
     }
     if args.open_time_ge and args.open_time_lt:
         kwa["open_time_ge"] = args.open_time_ge
