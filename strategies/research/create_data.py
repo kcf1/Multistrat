@@ -363,7 +363,8 @@ def _time_splits(df: pd.DataFrame):
     )
 
 
-def load_data():
+def build_ranked_panel_df() -> pd.DataFrame:
+    """Full cross-sectional panel (same pipeline as ``load_data`` before train/valid/test split)."""
     ohlcv_df = _read_ohlcv()
     df = _daily_panel(ohlcv_df)
     df = _add_returns_and_liquidity(df)
@@ -371,4 +372,9 @@ def load_data():
     df = _add_score_columns(df)
     df = df.dropna()
     df = _add_rank_columns(df)
+    return df
+
+
+def load_data():
+    df = build_ranked_panel_df()
     return _time_splits(df)
