@@ -33,12 +33,25 @@ def _filter_bar_ts(df: pd.DataFrame, lo: pd.Timestamp, hi: pd.Timestamp) -> pd.D
     return df[(t >= lo) & (t <= hi)].copy()
 
 
-def _coverage_ok(l1: pd.DataFrame, symbols: Sequence[str], min_cov: float) -> None:
+def _coverage_ok(
+    l1: pd.DataFrame,
+    symbols: Sequence[str],
+    *,
+    min_cov: float,
+    min_distinct: int,
+) -> None:
     if l1.empty:
         raise RuntimeError("L1 frame is empty after load; cannot check coverage")
     n_sym = len(symbols)
+    need_distinct = min(min_distinct, n_sym)
     for ts, g in l1.groupby("bar_ts"):
-        frac = g["symbol"].nunique() / max(n_sym, 1)
+        nu = int(g["symbol"].nunique())
+        if nu < need_distinct:
+            raise RuntimeError(
+                f"Distinct symbols {nu} at bar_ts={ts} below required {need_distinct} "
+                f"(MIN_DISTINCT_SYMBOLS_PER_BAR={min_distinct}, universe size {n_sym})"
+            )
+        frac = nu / max(n_sym, 1)
         if frac < min_cov:
             raise RuntimeError(
                 f"Symbol coverage {frac:.3f} at bar_ts={ts} below MIN_SYMBOL_COVERAGE={min_cov}"
@@ -109,7 +122,12 @@ def run_pipeline(
     )
     daily = data_loader.aggregate_to_daily_bars(raw)
     l1_full = features_l1.compute_l1_features(daily)
-    _coverage_ok(l1_full, syms, config.MIN_SYMBOL_COVERAGE)
+    _coverage_ok(
+        l1_full,
+        syms,
+        min_cov=config.MIN_SYMBOL_COVERAGE,
+        min_distinct=config.MIN_DISTINCT_SYMBOLS_PER_BAR,
+    )
 
     def _as_utc(ts: object | None, fallback: pd.Timestamp) -> pd.Timestamp:
         if ts is None:

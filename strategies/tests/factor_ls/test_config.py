@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from strategies.modules.factor_ls import config
 from strategies.modules.factor_ls.config import PRODUCTION_OUTPUT_BARS, production_bar_ts_range
 
 
@@ -19,3 +20,10 @@ def test_production_load_window_covers_output_and_warmup():
     load_ge, load_lt, first, last = production_bar_ts_range(run)
     assert load_lt == last + pd.Timedelta(days=1)
     assert load_ge < first
+
+
+def test_plan_coverage_and_vol_weight_constants():
+    assert config.MIN_DISTINCT_SYMBOLS_PER_BAR == 100
+    assert config.MIN_SYMBOL_COVERAGE == 0.85
+    assert abs(config.VOL_WEIGHT_NUMERATOR - 0.50 / (250**0.5)) < 1e-15
+    assert config.INCLUDE_SIMPRET_IN_LABELS is False

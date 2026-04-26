@@ -424,6 +424,13 @@ Integration tests:
 - Slow backfills:
   - Mitigation: batch by time range and upsert in chunks with indexes.
 
+### Wide pandas backfill (operational)
+
+- **Window:** For persisted daily keys from `first_bar_ts` through `last_bar_ts` (UTC midnights), load intraday OHLCV with `open_time_ge = first_bar_ts - WARMUP_CALENDAR_DAYS` and `open_time_lt = last_bar_ts + 1 calendar day` (half-open), then filter persistence to `[first_bar_ts, last_bar_ts]`. See [`scripts/backfill_factor_ls.py`](../../scripts/backfill_factor_ls.py).
+- **First valid `bar_ts`:** Earliest day where `MIN_DISTINCT_SYMBOLS_PER_BAR` and `MIN_SYMBOL_COVERAGE` pass (often after the universe has enough listed symbols and OHLCV density). Very early history may fail gates by design.
+- **Gates (``factor_ls`` config):** `MIN_DISTINCT_SYMBOLS_PER_BAR` (default 100, capped by `len(syms)` for small test universes) and `MIN_SYMBOL_COVERAGE` (default 0.85) run on full L1 before the output `bar_ts` filter.
+- **Post-load SQL checks:** [`scripts/validate_factor_ls_backfill.sql`](../../scripts/validate_factor_ls_backfill.sql).
+
 ---
 
 ## Handoff to Phase 2

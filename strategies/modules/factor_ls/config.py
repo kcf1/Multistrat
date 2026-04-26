@@ -32,12 +32,15 @@ WARMUP_CALENDAR_DAYS: Final[int] = 320
 # Fail-fast: minimum fraction of configured symbols with a non-null daily row per ``bar_ts`` (0–1).
 MIN_SYMBOL_COVERAGE: Final[float] = 0.85
 
+# Fail-fast: minimum distinct symbols with an L1 row per ``bar_ts`` (capped by ``len(syms)`` in pipeline).
+MIN_DISTINCT_SYMBOLS_PER_BAR: Final[int] = 100
+
 # Notebook-style inverse-vol weight numerator: ``vol_weight = VOL_WEIGHT_NUM / ewvol_20``.
-VOL_WEIGHT_NUMERATOR: Final[float] = 0.90 / (250**0.5)
+VOL_WEIGHT_NUMERATOR: Final[float] = 0.50 / (250**0.5)
 
 # Optional feature flags
 PERSIST_SIGNALS_PRECOMBINED: Final[bool] = True
-INCLUDE_SIMPRET_IN_LABELS: Final[bool] = True
+INCLUDE_SIMPRET_IN_LABELS: Final[bool] = False
 
 
 @dataclass(frozen=True)
