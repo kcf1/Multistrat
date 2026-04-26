@@ -6,11 +6,11 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 
-from strategies.modules.double_sort_daily import run_pipeline
+from strategies.modules.factor_ls import run_pipeline
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Run double_sort_daily Phase 1 pipeline.")
+    p = argparse.ArgumentParser(description="Run factor_ls Phase 1 daily pipeline.")
     p.add_argument(
         "--run-at-utc",
         type=str,
@@ -21,7 +21,12 @@ def main() -> None:
     p.add_argument("--open-time-lt", type=str, default=None, help="Intraday load upper bound exclusive (ISO, UTC).")
     p.add_argument("--bar-ts-ge", type=str, default=None, help="Output bar_ts lower bound inclusive (ISO date or ts).")
     p.add_argument("--bar-ts-le", type=str, default=None, help="Output bar_ts upper bound inclusive.")
-    p.add_argument("--symbols", type=str, default=None, help="Comma-separated symbols (else env or basket).")
+    p.add_argument(
+        "--symbols",
+        type=str,
+        default=None,
+        help="Optional comma-separated subset; omit to load every symbol present in OHLCV for the window.",
+    )
     p.add_argument("--interval", type=str, default=None, help="OHLCV interval (default from config).")
     p.add_argument("--no-persist", action="store_true", help="Compute only; do not write to Postgres.")
     p.add_argument("--pipeline-version", type=str, default=None, help="Override pipeline_version on rows.")

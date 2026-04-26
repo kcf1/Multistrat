@@ -7,8 +7,8 @@ import os
 import pandas as pd
 import pytest
 
-from strategies.modules.double_sort_daily import config
-from strategies.modules.double_sort_daily.pipeline import run_pipeline
+from strategies.modules.factor_ls import config
+from strategies.modules.factor_ls.pipeline import run_pipeline
 
 
 def _pg_url() -> str | None:

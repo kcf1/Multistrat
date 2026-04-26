@@ -7,7 +7,7 @@ import os
 import pandas as pd
 import pytest
 
-from strategies.modules.double_sort_daily import persistence
+from strategies.modules.factor_ls import persistence
 
 
 def _pg_url() -> str | None:

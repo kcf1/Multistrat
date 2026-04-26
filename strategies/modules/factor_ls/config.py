@@ -1,10 +1,10 @@
-"""Micro-config for the daily double-sort pipeline (see env-and-config.mdc for DB URLs)."""
+"""Micro-config for the daily factor_ls pipeline (see env-and-config.mdc for DB URLs)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Final, Sequence
+from typing import Final
 
 PIPELINE_VERSION: Final[str] = "1.0.0"
 
@@ -20,8 +20,11 @@ SCHEMA_MARKET_DATA: Final[str] = "market_data"
 # Wide label columns use these integer suffixes (must match Alembic ``labels_daily`` migration).
 DEFAULT_LABEL_HORIZONS: Final[tuple[int, ...]] = (1, 5, 10)
 
-# Production batch: number of completed daily bars to persist per scheduled run.
+# Production batch: number of completed **daily** ``bar_ts`` rows to persist per scheduled run.
 PRODUCTION_OUTPUT_BARS: Final[int] = 24
+
+# Scheduled production run aligns to **00:00 UTC** (see PHASE1 plan: job at start of UTC day).
+PRODUCTION_SCHEDULE_UTC_HOUR: Final[int] = 0
 
 # Extra calendar days of intraday history loaded before the output window (warmup for L1).
 WARMUP_CALENDAR_DAYS: Final[int] = 320
@@ -61,11 +64,13 @@ def production_bar_ts_range(
     """
     Return ``(load_open_start, load_open_end_exclusive, first_bar_ts, last_bar_ts)``.
 
-    When the job runs at ``run_at_utc`` (default interpretation: UTC), the last completed
-    daily key is the **previous** UTC calendar date at midnight. The batch contains
-    ``output_bars`` consecutive ``bar_ts`` values ending there. Intraday load uses
-    ``open_time`` in ``[load_open_start, load_open_end_exclusive)`` plus warmup days before
-    ``first_bar_ts``.
+    **Schedule (UTC):** intended for a cron at **00:00** (see ``PRODUCTION_SCHEDULE_UTC_HOUR``).
+    The last completed daily ``bar_ts`` is always the **previous** UTC calendar date at
+    midnight (the trading day that has fully finished, including its 23:00 **1h** open when
+    using the default interval). The persisted batch contains ``output_bars`` consecutive
+    daily keys ending there. Intraday load spans ``open_time`` in
+    ``[load_open_start, load_open_end_exclusive)`` (warmup days before ``first_bar_ts`` plus
+    the output window).
     """
     import pandas as pd
 
@@ -83,15 +88,3 @@ def production_bar_ts_range(
     load_open_end_exclusive = last_bar_ts + timedelta(days=1)
 
     return load_open_start, load_open_end_exclusive, first_bar_ts, last_bar_ts
-
-
-def symbols_from_env(default: Sequence[str] | None = None) -> tuple[str, ...]:
-    """Comma-separated ``DOUBLE_SORT_DAILY_SYMBOLS`` or ``default``."""
-    import os
-
-    raw = os.environ.get("DOUBLE_SORT_DAILY_SYMBOLS", "").strip()
-    if raw:
-        return tuple(s.strip().upper() for s in raw.split(",") if s.strip())
-    if default:
-        return tuple(s.upper() for s in default)
-    return MARKET_BASKET

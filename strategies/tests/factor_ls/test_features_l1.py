@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from strategies.modules.double_sort_daily import config
-from strategies.modules.double_sort_daily.features_l1 import compute_l1_features
+from strategies.modules.factor_ls import config
+from strategies.modules.factor_ls.features_l1 import compute_l1_features
 
 
 def _synth_daily(symbols: list[str], n: int = 300) -> pd.DataFrame:

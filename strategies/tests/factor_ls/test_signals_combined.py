@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from strategies.modules.double_sort_daily import config
-from strategies.modules.double_sort_daily.features_l1 import compute_l1_features
-from strategies.modules.double_sort_daily.signals_combined import compute_factor_scores
-from strategies.modules.double_sort_daily.signals_precombined import compute_precombined
-from strategies.modules.double_sort_daily.validators import FACTORS_SCORE_COLUMNS
+from strategies.modules.factor_ls import config
+from strategies.modules.factor_ls.features_l1 import compute_l1_features
+from strategies.modules.factor_ls.signals_combined import compute_factor_scores
+from strategies.modules.factor_ls.signals_precombined import compute_precombined
+from strategies.modules.factor_ls.validators import FACTORS_SCORE_COLUMNS
 
 
 def _frames():

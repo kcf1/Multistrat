@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from strategies.modules.double_sort_daily.signals_precombined import _ewm_sum_diff_mom
+from strategies.modules.factor_ls.signals_precombined import _ewm_sum_diff_mom
 
 
 def test_mom_10_matches_notebook_style():

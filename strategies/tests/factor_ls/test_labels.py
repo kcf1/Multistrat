@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from strategies.modules.double_sort_daily.features_l1 import compute_l1_features
-from strategies.modules.double_sort_daily.labels import compute_labels
+from strategies.modules.factor_ls.features_l1 import compute_l1_features
+from strategies.modules.factor_ls.labels import compute_labels
 
 
 def test_logret_fwd_1_matches_manual_shift():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from strategies.modules.double_sort_daily.data_loader import aggregate_to_daily_bars
+from strategies.modules.factor_ls.data_loader import aggregate_to_daily_bars
 
 
 def test_aggregate_daily_last_close_and_sums():

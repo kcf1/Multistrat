@@ -61,11 +61,12 @@ def run_pipeline(
     **Modes:**
 
     - **Production default:** pass ``run_at_utc`` (or omit to use current UTC). Loads warmup
-      + 24-bar tail per ``config.production_bar_ts_range``.
+      + 24 daily ``bar_ts`` keys per ``config.production_bar_ts_range`` (intended **00:00 UTC** run).
+    - **Symbols:** pass ``symbols`` for a subset; omit (``None``) to load **every symbol**
+      that appears in ``ohlcv`` for the intraday window (no env list).
     - **Explicit intraday window:** ``open_time_ge`` and ``open_time_lt`` on ``ohlcv.open_time``.
       If ``bar_ts_ge`` / ``bar_ts_le`` are omitted, all daily ``bar_ts`` from that window are output.
     """
-    syms = tuple(symbols) if symbols is not None else config.symbols_from_env()
     iv = interval or config.DEFAULT_OHLCV_INTERVAL
 
     use_explicit = open_time_ge is not None and open_time_lt is not None
@@ -87,8 +88,21 @@ def run_pipeline(
     else:
         load_lt = load_lt.tz_convert("UTC")
 
+    if symbols is not None:
+        syms: tuple[str, ...] = tuple(s.strip().upper() for s in symbols if s and str(s).strip())
+        if not syms:
+            raise ValueError("symbols=() is invalid; pass None for full OHLCV universe")
+    else:
+        syms = data_loader.load_distinct_symbols(
+            interval=iv, open_time_ge=load_ge, open_time_lt=load_lt
+        )
+        if not syms:
+            raise RuntimeError(
+                "No symbols found in market_data.ohlcv for the load window; check interval and open_time bounds"
+            )
+
     raw = data_loader.load_intraday_ohlcv(
-        symbols=syms,
+        symbols=None if symbols is None else syms,
         interval=iv,
         open_time_ge=load_ge,
         open_time_lt=load_lt,

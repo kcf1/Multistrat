@@ -33,7 +33,7 @@ In scope:
 Out of scope:
 
 - `model_runs`, `predictions_daily`, `target_weights_daily`, `order_intents_daily`.
-- Which job runner invokes the 01:00 run (cron, Airflow, etc.); the **cadence and batch window** (including that bounds apply to `ohlcv.open_time`) are specified under *Pipeline schedule and lookback* in the Time alignment section.
+- Which job runner invokes the **00:00 UTC** run (cron, Airflow, etc.); the **cadence and batch window** (including that bounds apply to `ohlcv.open_time`) are specified under *Pipeline schedule and lookback* in the Time alignment section.
 - Risk/OMS integration.
 
 ---
@@ -43,7 +43,7 @@ Out of scope:
 Create a self-contained package under `strategies/modules`:
 
 ```text
-strategies/modules/double_sort_daily/
+strategies/modules/factor_ls/
   __init__.py
   config.py
   data_loader.py
@@ -60,12 +60,16 @@ strategies/modules/double_sort_daily/
 Test layout (same grouping: L1, then signals, then labels / persistence / pipeline):
 
 ```text
-strategies/tests/double_sort_daily/
+strategies/tests/factor_ls/
+  test_config.py
+  test_data_loader.py
   test_features_l1.py
   test_signals_precombined.py
   test_signals_combined.py
   test_signals_xsection.py
   test_labels.py
+  test_parity_mom_formula.py
+  test_validators.py
   test_persistence_idempotency.py
   test_pipeline_e2e_smoke.py
 ```
@@ -85,10 +89,12 @@ Use Alembic to add strategy-owned tables. Use schema: `strategies_daily`.
 
 ### Pipeline schedule and lookback
 
-- **When:** all Phase 1 data processing runs **once per day at 01:00** (in the same timezone the pipeline config uses for the trading-day cut; if unspecified, use **UTC** to stay aligned with the stored `bar_ts` convention above).
-- **What:** each run loads the **most recent 24 daily bars** per symbol — the 24 full bars in the **wall-clock** window **from yesterday 01:00 through today 00:00** (i.e. the 24 complete daily bars that are finished once the day closes at 00:00, with the job executing at 01:00 after that close). For rolling feature windows (e.g. 250-day VWAP), the implementation still orders by this daily series; the **batch** is always this 24-bar tail unless a backfill mode overrides the range.
-- **Timestamp column for that window (explicit):** any **time-range filter, predicate, or “from … to …”** condition tied to the pipeline schedule (including the 01:00 / yesterday–today window above) is evaluated on **`market_data.ohlcv.open_time`** — the kline / bar open timestamp — not on a different column (e.g. not `close_time` alone). L1 `close = last(close)` and sorting after ingest still use the same `open_time` ordering described under daily L1 bars; persisted **`bar_ts`** remains the UTC-midnight day key, separate from the raw `open_time` filter.
-- **Primary key in tables:** each row in that batch is still keyed by the normalized per-day `bar_ts` (UTC midnight for that bar’s day key), not by the 01:00 run timestamp.
+- **When:** the production job is intended to run **once per day at 00:00 UTC** (start of the UTC calendar day). If unspecified in code, use **UTC** so `bar_ts` and `open_time` filters stay aligned.
+- **What (daily output):** each run materializes the **most recent 24 daily** `bar_ts` rows per symbol (config `PRODUCTION_OUTPUT_BARS`), ending on the **last completed UTC calendar day** (the day that finished immediately before the run instant — i.e. at 00:00 on day *D*, the last daily key is *D−1* at `00:00` UTC). For rolling feature windows (e.g. 250-day VWAP), the implementation still orders by this daily series; the **persisted batch** is this 24-day tail unless a backfill mode overrides the range. A longer intraday **extract** window is used for warmup (see `factor_ls` `WARMUP_CALENDAR_DAYS`).
+- **Intraday → daily (default `1h` interval):** for each UTC calendar date and symbol, aggregate all `ohlcv` rows whose `open_time` lies in **`[bar_ts 00:00 UTC, bar_ts + 1 day)`** — i.e. the usual **24** hourly opens from **00:00 through 23:00** inclusive on that date (first bar opens at 00:00, last at 23:00).
+- **Symbol universe:** production uses **every `symbol` that appears in `market_data.ohlcv`** for the configured `interval` within the extract window. There is **no** env-driven symbol list; optional CLI/API may pass an explicit subset for dev or experiments.
+- **Timestamp column for that window (explicit):** any **time-range filter, predicate, or “from … to …”** condition tied to the pipeline schedule is evaluated on **`market_data.ohlcv.open_time`** — the kline / bar open timestamp — not on a different column (e.g. not `close_time` alone). L1 `close = last(close)` and sorting after ingest still use the same `open_time` ordering described under daily L1 bars; persisted **`bar_ts`** remains the UTC-midnight day key, separate from the raw `open_time` filter.
+- **Primary key in tables:** each row in that batch is still keyed by the normalized per-day `bar_ts` (UTC midnight for that bar’s day key), not by the run’s wall-clock timestamp.
 
 **Daily L1 bars (per current `double_sort.ipynb` math, with a storage-time tweak for `bar_ts`):** the research pipeline is **not** one row per raw intraday OHLCV print. It first collapses intraday `market_data.ohlcv` to **one row per (UTC calendar `date`, `symbol`)**, with:
 
@@ -316,7 +322,7 @@ flowchart LR
 
 Execution semantics:
 
-- **Production default:** one scheduled run per calendar day at **01:00**, processing the **24-bar** lookback (yesterday 01:00 → today 00:00) described under *Pipeline schedule and lookback*. Otherwise: run per `bar_ts` batch or bounded backfill over a time range.
+- **Production default:** one scheduled run per calendar day at **00:00 UTC**, processing the **24 completed daily** `bar_ts` keys described under *Pipeline schedule and lookback*. Otherwise: run per `bar_ts` batch or bounded backfill over a time range.
 - Deterministic transforms only; no random components.
 - Idempotent persistence via upsert keyed on table PKs.
 - Fail-fast if data coverage is below configured threshold.
@@ -326,48 +332,48 @@ Execution semantics:
 
 ## Detailed task breakdown
 
-- [ ] **Task 1: Define config and contracts**
-  - Create `config.py` constants for **label return suffixes** (e.g. `1, 5, 10`), the **24-bar** production lookback and **01:00** run assumption (aligned with *Pipeline schedule and lookback*), minimum symbol coverage, and clipping/ranking defaults.
+- [x] **Task 1: Define config and contracts**
+  - Create `config.py` constants for **label return suffixes** (e.g. `1, 5, 10`), the **24 daily bar** production lookback and **00:00 UTC** run assumption (aligned with *Pipeline schedule and lookback*), minimum symbol coverage, and clipping/ranking defaults.
   - Define column contracts for each output table in one place (`validators.py` or `persistence.py`).
 
-- [ ] **Task 2: Implement market data loader**
+- [x] **Task 2: Implement market data loader**
   - Add `data_loader.py` to read intraday `market_data.ohlcv` and **build the daily L1 bar** using the same aggregations as the notebook: per **UTC** `(date, symbol)` bucket, `close=last` after sorting, volumes/taker base `sum` (use `max(open_time)` only as an implementation detail to pick `last`, not as a stored column). For the production time window, **filter and partition by `ohlcv.open_time`** as in *Pipeline schedule and lookback* (not `close_time` for the schedule bounds).
   - Set `bar_ts` to **UTC midnight** for that bucket (`<date> 00:00:00+00:00`). All downstream daily tables use this normalized `bar_ts` as the join key.
 
-- [ ] **Task 3: Implement L1 feature builder**
+- [x] **Task 3: Implement L1 feature builder**
   - Port notebook return/volatility and first-level financial variables into `features_l1.py`.
   - Compute `vwap_250` from L1 `quote_volume` and `volume` (same row / same intraday summation; see *VWAP (`vwap_250`) and the same L1 inputs* under Data schema design); wire vwapreversion to L1 `close` + L1 `vwap_250`.
   - Add deterministic null handling and per-symbol warmup trimming logic.
 
-- [ ] **Task 4: Implement `signals_daily` (raw per-family pre-final-reduction bundles)**
+- [x] **Task 4: Implement `signals_daily` (raw per-family pre-final-reduction bundles)**
   - Port the **13** `get_*_score` families listed in section 2 into `signals_precombined.py`, persisting the **internal multi-column bundles** *before* the family-level final reduction (often `combine_features`; no scalar `*_score` columns in this table), with persisted column names **`{abbr}_{n}`** (§2.2 **Abbr** column) and the **general formula per family** in *Precombined column schema* (section 2.2) (rename in `validators.py` if the notebook’s intermediate names are not already `abbr_n`).
   - Do **not** re-materialize L1 fields here; read joins to `l1feats_daily` when a score function needs inputs like `vwap_250`.
 
-- [ ] **Task 5: Implement `factors_daily` (final `*_score` before cross-sectional ranking)**
+- [x] **Task 5: Implement `factors_daily` (final `*_score` before cross-sectional ranking)**
   - Implement `signals_combined.py` to produce the **13** scalar `*_score` values (section 3), using the same `get_*_score` definitions as the notebook and deterministically reading inputs from `l1feats_daily` (and any internal temporaries not persisted).
 
-- [ ] **Task 6: Implement `xsecs_daily` (`x_cols` / 13 ranks per section 4)**
+- [x] **Task 6: Implement `xsecs_daily` (`x_cols` / 13 ranks per section 4)**
   - Add cross-sectional feature assembly in `signals_xsection.py` to reproduce the **13** `x_cols` features using **only** the selected `*_score` fields from `factors_daily`.
   - For Phase 1 parity, use notebook-style percentile ranking (`groupby(bar_ts)` + `rank(pct=True)`), but keep the implementation boundary explicit so alternative cross-sectional transforms can be swapped in later.
   - Enforce per-`bar_ts` invariants for the chosen transform (for ranking, ranks in `[0,1]` where applicable) and no NaN when scores are valid.
 
-- [ ] **Task 7: Implement `labels_daily` (returns + notebook `y_cols`)**
+- [x] **Task 7: Implement `labels_daily` (returns + notebook `y_cols`)**
   - Build a **wide** label frame in `labels.py`: one row per `(bar_ts, symbol)` with `logret_fwd_<h>` / optional `simpret_fwd_<h>` for each configured suffix `h`.
   - Persist notebook `y_cols` as **`_1` suffixed** columns in section 5.2; strict no-lookahead rules.
 
-- [ ] **Task 8: Implement persistence layer**
+- [x] **Task 8: Implement persistence layer**
   - Add `persistence.py` with table writers and upsert behavior.
   - Ensure each write records `pipeline_version` and timestamps.
 
-- [ ] **Task 9: Implement phase entrypoint**
+- [x] **Task 9: Implement phase entrypoint**
   - Add `pipeline.py` orchestrating extract -> transform -> validate -> persist.
-  - Support run modes: **default production window** (24 bars, after the 00:00 close, as run at 01:00), single-`bar_ts` run, and time-range backfill.
+  - Support run modes: **default production window** (24 completed daily `bar_ts` keys; **00:00 UTC** schedule), single-`bar_ts` run, and time-range backfill.
 
-- [ ] **Task 10: Add migration and indexes**
+- [x] **Task 10: Add migration and indexes**
   - Add Alembic migration creating all Phase 1 tables and key indexes.
   - Add indexes for `bar_ts` range scans, `(bar_ts, symbol)` joins, and symbol lookups.
 
-- [ ] **Task 11: Add tests and acceptance checks**
+- [x] **Task 11: Add tests and acceptance checks**
   - Implement unit and integration tests listed below.
   - Add a smoke run command for local validation on a small time window.
 
@@ -392,7 +398,7 @@ Persistence tests:
 Integration tests:
 
 - E2E smoke over a small historical window (for example 30-60 days).
-- With the **24-bar** / **01:00** default, validate that a production-mode run only touches the expected `bar_ts` range (ends at the day that closed at 00:00 before the run) and that the **extract** is bounded with predicates on **`ohlcv.open_time`**, not `close_time`, per *Pipeline schedule and lookback*.
+- With the **24 daily bar** / **00:00 UTC** default, validate that a production-mode run only touches the expected `bar_ts` range (ends at the last completed UTC calendar day before the run) and that the **extract** is bounded with predicates on **`ohlcv.open_time`**, not `close_time`, per *Pipeline schedule and lookback*.
 - Validate non-empty outputs and minimum symbol coverage.
 - Validate joins across `l1feats_daily`, `factors_daily`, and `xsecs_daily` by `(bar_ts, symbol)` without orphan rows.
 - If `signals_daily` is enabled, validate it joins 1:1 to `(bar_ts, symbol)` and that its internal bundles can reproduce `factors_daily` (spot-check a small window, if you add a consistency check).

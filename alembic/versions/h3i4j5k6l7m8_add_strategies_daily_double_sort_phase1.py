@@ -1,4 +1,4 @@
-"""Add strategies_daily schema and Phase 1 double_sort_daily tables.
+"""Add strategies_daily schema and Phase 1 factor_ls (daily) tables.
 
 Revision ID: h3i4j5k6l7m8
 Revises: f2a3b4c5d6e7

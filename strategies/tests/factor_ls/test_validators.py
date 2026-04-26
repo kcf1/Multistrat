@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from strategies.modules.double_sort_daily.validators import assert_columns_subset, L1FEATS_COLUMNS
+from strategies.modules.factor_ls.validators import assert_columns_subset, L1FEATS_COLUMNS
 
 
 def test_rejects_unknown_columns():

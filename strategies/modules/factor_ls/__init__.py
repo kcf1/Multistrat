@@ -1,4 +1,4 @@
-"""Daily double-sort feature pipeline (Phase 1)."""
+"""Daily factor_ls feature pipeline (Phase 1)."""
 
 from .config import PIPELINE_VERSION, production_bar_ts_range
 from .pipeline import PipelineResult, run_pipeline
