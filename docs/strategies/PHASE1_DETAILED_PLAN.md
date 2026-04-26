@@ -428,4 +428,6 @@ Integration tests:
 
 ## Handoff to Phase 2
 
-Phase 2 consumes `xsecs_daily` for `X`, `labels_daily` for `y` (including the notebook’s `y_cols` mapped to **wide** `*_1` columns in section 5.2, unless you change the target definition), and optionally `signals_daily` for debugging/explainability of the internal per-family pre-score state. `factors_daily` remains the canonical place to fetch scalar `*_score` values for monitoring and for recomputing ranks offline.
+Phase 2 (**strategies**) consumes `xsecs_daily` for `X`, `labels_daily` for `y` (including the notebook’s `y_cols` mapped to **wide** `*_1` columns in section 5.2, unless you change the target definition), and optionally `signals_daily` for debugging/explainability of the internal per-family pre-score state. `factors_daily` remains the canonical place to fetch scalar `*_score` values for monitoring and for recomputing ranks offline.
+
+**Detailed plan:** [PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md) (`model_runs`, `predictions_daily`, `strategies/modules/model_daily`). Do not confuse with [../PHASE2_DETAILED_PLAN.md](../PHASE2_DETAILED_PLAN.md), which documents **OMS / PMS** integration under the same “Phase 2” numbering in the wider repo.

@@ -93,7 +93,9 @@ flowchart LR
 
 Detailed phase docs:
 
-- Phase 1: `docs/strategies/PHASE1_DETAILED_PLAN.md`
+- Phase 1 (factors / labels / `strategies_daily`): [docs/strategies/PHASE1_DETAILED_PLAN.md](PHASE1_DETAILED_PLAN.md)
+- Phase 2 (**strategies** — models / `model_runs` / `predictions_daily`): [docs/strategies/PHASE2_DETAILED_PLAN.md](PHASE2_DETAILED_PLAN.md)
+- OMS / broker “Phase 2” (execution stack — **different** scope): [docs/PHASE2_DETAILED_PLAN.md](../PHASE2_DETAILED_PLAN.md)
 
 ## Section planning queue
 

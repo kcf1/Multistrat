@@ -1,5 +1,7 @@
 # Phase 2: Detailed Plan — OMS, Account Management, Position (Binance first)
 
+**Note:** For **strategy modeling** Phase 2 (`model_runs`, `predictions_daily`, XGBoost/inference from `strategies_daily`), see [docs/strategies/PHASE2_DETAILED_PLAN.md](strategies/PHASE2_DETAILED_PLAN.md). This file is the **OMS / PMS / broker** Phase 2 plan.
+
 **Goal:** End-to-end order flow: approved orders → **generic OMS** (routes to broker adapters) → first broker **Binance** → fills → Postgres orders; OMS also manages account state (balances, positions) from broker streams → Postgres accounts/balances, positions in Redis; **PMS** as source of truth for PnL/margin. The OMS is broker-agnostic and handles all broker state (orders + accounts); Binance is the first broker adapter. Minimal Risk pass-through for testing.
 
 **Current architecture (codebase and schema):** See [docs/ARCHITECTURE.md](ARCHITECTURE.md) for module layout, Postgres tables (including **symbols**, **assets**, **positions**), and Redis streams/keys.
