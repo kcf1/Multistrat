@@ -34,9 +34,11 @@ import signal
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
+import psycopg2
 
 from market_data.config import (
     MarketDataSettings,
@@ -57,6 +59,14 @@ from market_data.config import (
     TAKER_BUYSELL_VOLUME_SCHEDULER_REPAIR_GAP_INTERVAL_SECONDS,
     UNIVERSE_REFRESH_INTERVAL_SECONDS,
     load_settings,
+)
+from market_data.config import (
+    BASIS_CONTRACT_TYPES,
+    BASIS_PERIODS,
+    OPEN_INTEREST_CONTRACT_TYPES,
+    OPEN_INTEREST_PERIODS,
+    TAKER_BUYSELL_VOLUME_PERIODS,
+    TOP_TRADER_LONG_SHORT_PERIODS,
 )
 from market_data.jobs.correct_window_basis_rate import run_correct_window_basis_rate
 from market_data.jobs.correct_window_open_interest import run_correct_window_open_interest
@@ -96,6 +106,8 @@ from market_data.jobs.ingest_top_trader_long_short import (
 )
 from market_data.jobs.universe_refresh_top100 import run_universe_refresh_top100
 from market_data.universe_runtime import resolve_runtime_symbols
+from market_data.storage import upsert_dataset_status
+from pgconn import configure_for_market_data
 
 
 def _run_per_dataset_initial_backfills(settings: MarketDataSettings) -> None:
@@ -113,6 +125,146 @@ def _run_per_dataset_initial_backfills(settings: MarketDataSettings) -> None:
                 logger.info("{} initial backfill: {} symbol(s)/pair(s) committed", name, n)
         except Exception:
             logger.exception("{} initial backfill step failed", name)
+
+
+def _max_ts(series: list[datetime | None]) -> datetime | None:
+    out: datetime | None = None
+    for t in series:
+        if t is None:
+            continue
+        out = t if out is None else max(out, t)
+    return out
+
+
+def _mark_dataset_status_ohlcv(settings: MarketDataSettings, symbols: tuple[str, ...]) -> None:
+    """Write dataset_status for OHLCV once per successful ingest run."""
+    if not symbols:
+        return
+    conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
+    try:
+        for iv in settings.intervals:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT max(last_open_time)
+                    FROM ingestion_cursor
+                    WHERE interval = %s AND symbol = ANY(%s)
+                    """,
+                    (iv, list(symbols)),
+                )
+                last = cur.fetchone()[0]
+            upsert_dataset_status(conn, dataset="ohlcv", period=iv, last_complete_time=last)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _mark_dataset_status_basis_rate(settings: MarketDataSettings, pairs: tuple[str, ...]) -> None:
+    if not pairs:
+        return
+    conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
+    try:
+        for period in BASIS_PERIODS:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT max(last_sample_time)
+                    FROM basis_cursor
+                    WHERE period = %s
+                      AND contract_type = ANY(%s)
+                      AND pair = ANY(%s)
+                    """,
+                    (period, list(BASIS_CONTRACT_TYPES), list(pairs)),
+                )
+                last = cur.fetchone()[0]
+            upsert_dataset_status(conn, dataset="basis_rate", period=period, last_complete_time=last)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _mark_dataset_status_open_interest(settings: MarketDataSettings, symbols: tuple[str, ...]) -> None:
+    if not symbols:
+        return
+    conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
+    try:
+        for period in OPEN_INTEREST_PERIODS:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT max(last_sample_time)
+                    FROM open_interest_cursor
+                    WHERE period = %s
+                      AND contract_type = ANY(%s)
+                      AND symbol = ANY(%s)
+                    """,
+                    (period, list(OPEN_INTEREST_CONTRACT_TYPES), list(symbols)),
+                )
+                last = cur.fetchone()[0]
+            upsert_dataset_status(conn, dataset="open_interest", period=period, last_complete_time=last)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _mark_dataset_status_taker_buy_sell_volume(settings: MarketDataSettings, symbols: tuple[str, ...]) -> None:
+    if not symbols:
+        return
+    conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
+    try:
+        for period in TAKER_BUYSELL_VOLUME_PERIODS:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT max(last_sample_time)
+                    FROM taker_buy_sell_volume_cursor
+                    WHERE period = %s AND symbol = ANY(%s)
+                    """,
+                    (period, list(symbols)),
+                )
+                last = cur.fetchone()[0]
+            upsert_dataset_status(conn, dataset="taker_buy_sell_volume", period=period, last_complete_time=last)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _mark_dataset_status_top_trader_long_short(settings: MarketDataSettings, symbols: tuple[str, ...]) -> None:
+    if not symbols:
+        return
+    conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
+    try:
+        for period in TOP_TRADER_LONG_SHORT_PERIODS:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT max(last_sample_time)
+                    FROM top_trader_long_short_cursor
+                    WHERE period = %s AND symbol = ANY(%s)
+                    """,
+                    (period, list(symbols)),
+                )
+                last = cur.fetchone()[0]
+            upsert_dataset_status(conn, dataset="top_trader_long_short", period=period, last_complete_time=last)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _mark_dataset_status_universe(settings: MarketDataSettings) -> None:
+    conn = psycopg2.connect(settings.database_url)
+    configure_for_market_data(conn)
+    try:
+        now = datetime.now(timezone.utc)
+        upsert_dataset_status(conn, dataset="universe", period="daily", last_complete_time=now)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _next_periodic_deadline_after(completed_at: float, period_seconds: int) -> float:
@@ -188,6 +340,7 @@ def _run_ingest_step() -> None:
         n,
     )
     _log_series_keys_summary("ingest_ohlcv", results)
+    _mark_dataset_status_ohlcv(settings, syms)
 
 
 def _run_correct_step() -> None:
@@ -228,6 +381,7 @@ def _run_basis_ingest_step() -> None:
         n,
     )
     _log_series_keys_summary("ingest_basis_rate", results)
+    _mark_dataset_status_basis_rate(settings, pairs)
 
 
 def _run_basis_correct_step() -> None:
@@ -267,6 +421,7 @@ def _run_open_interest_ingest_step() -> None:
         n,
     )
     _log_series_keys_summary("ingest_open_interest", results)
+    _mark_dataset_status_open_interest(settings, syms)
 
 
 def _run_taker_ingest_step() -> None:
@@ -280,6 +435,7 @@ def _run_taker_ingest_step() -> None:
         n,
     )
     _log_series_keys_summary("ingest_taker_buy_sell_volume", results)
+    _mark_dataset_status_taker_buy_sell_volume(settings, syms)
 
 
 def _run_top_trader_ingest_step() -> None:
@@ -293,6 +449,7 @@ def _run_top_trader_ingest_step() -> None:
         n,
     )
     _log_series_keys_summary("ingest_top_trader_long_short", results)
+    _mark_dataset_status_top_trader_long_short(settings, syms)
 
 
 def _run_open_interest_correct_step() -> None:
@@ -522,6 +679,7 @@ def run_scheduler_loop(
             settings = load_settings()
             try:
                 run_universe_refresh_top100(settings)
+                _mark_dataset_status_universe(settings)
             except Exception:
                 logger.exception("universe_refresh_top100 step failed")
             _run_per_dataset_initial_backfills(settings)

@@ -1,13 +1,8 @@
-"""Strategy runner package: registry + ``StrategyModule`` loop (see ``strategies.runner.main``)."""
+"""Strategy runner package (Milestone 1 scaffold).
 
-from strategies.runner.bootstrap import build_runner_registry
-from strategies.runner.module_registry import RunnerModuleRegistry
-from strategies.runner.types import RunnerContext, StrategyModule
+Avoid importing runner implementations here to prevent circular imports when
+modules depend on ``strategies.runner.types``.
+"""
 
-__all__ = (
-    "RunnerContext",
-    "RunnerModuleRegistry",
-    "StrategyModule",
-    "build_runner_registry",
-)
+__all__ = ()
 

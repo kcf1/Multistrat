@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from strategies.runner.module_registry import RunnerModuleRegistry
 from strategies.runner.noop_module import NoopStrategyModule
+from strategies.modules.factor_ls.runner_module import FactorLsRunnerModule
 
 
 def build_runner_registry() -> RunnerModuleRegistry:
     """
-    Milestone 1: register ``NoopStrategyModule`` only.
+    Register runner modules.
 
-    Later: register ``factor_ls`` and others when implementations exist.
+    Currently: Noop + factor_ls.
     """
     reg = RunnerModuleRegistry()
     reg.register(NoopStrategyModule())
+    reg.register(FactorLsRunnerModule())
     return reg

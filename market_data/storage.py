@@ -28,6 +28,17 @@ from market_data.schemas import (
 )
 from market_data.universe_schemas import UniverseRefreshResult, UniverseTopNMember
 
+_DATASET_STATUS_UPSERT_SQL = """
+INSERT INTO dataset_status (
+    dataset, period, last_complete_time, status, notes, updated_at
+) VALUES (%s, %s, %s, %s, %s, now())
+ON CONFLICT (dataset, period) DO UPDATE SET
+    last_complete_time = EXCLUDED.last_complete_time,
+    status = EXCLUDED.status,
+    notes = EXCLUDED.notes,
+    updated_at = now()
+"""
+
 _OHLCV_UPSERT_SQL = """
 INSERT INTO ohlcv (
     symbol, interval, open_time, open, high, low, close, volume,
@@ -645,6 +656,62 @@ def upsert_open_interest_cursor(
             """,
             (sym, ct, pd, last_sample_time.astimezone(timezone.utc)),
         )
+
+
+def upsert_dataset_status(
+    conn: PsycopgConnection,
+    *,
+    dataset: str,
+    period: str,
+    last_complete_time: datetime | None,
+    status: str = "ok",
+    notes: str | None = None,
+) -> None:
+    """
+    Upsert one aggregated dataset readiness marker into ``market_data.dataset_status``.
+
+    This is intended to be written **once per dataset job run** after the whole cycle
+    completes (not per symbol/series).
+    """
+    ds = dataset.strip().lower()
+    pd = period.strip()
+    if not ds or not pd:
+        raise ValueError("dataset and period must be non-empty")
+    lct = None
+    if last_complete_time is not None:
+        if last_complete_time.tzinfo is None:
+            raise ValueError("last_complete_time must be timezone-aware")
+        lct = last_complete_time.astimezone(timezone.utc)
+    st = (status or "").strip().lower() or "ok"
+    with conn.cursor() as cur:
+        cur.execute(_DATASET_STATUS_UPSERT_SQL, (ds, pd, lct, st, notes))
+
+
+def get_dataset_status(
+    conn: PsycopgConnection,
+    *,
+    dataset: str,
+    period: str,
+) -> tuple[datetime | None, datetime | None, str | None, str | None]:
+    """
+    Return `(last_complete_time, updated_at, status, notes)` for a dataset/period,
+    or all Nones when no row exists.
+    """
+    ds = dataset.strip().lower()
+    pd = period.strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT last_complete_time, updated_at, status, notes
+            FROM dataset_status
+            WHERE dataset = %s AND period = %s
+            """,
+            (ds, pd),
+        )
+        row = cur.fetchone()
+    if not row:
+        return (None, None, None, None)
+    return (row[0], row[1], row[2], row[3])
 
 
 def get_taker_buy_sell_volume_cursor(
