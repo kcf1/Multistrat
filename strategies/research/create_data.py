@@ -1,10 +1,16 @@
+from __future__ import annotations
+
 import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import sqlalchemy
 from dotenv import load_dotenv
-# Annualized vol scaling used for normalized returns (matches prior behavior).
+from sqlalchemy import create_engine, text
+
+# Annualized vol scaling used for normalized returns (legacy OHLCV path).
 _VOL_ANN_FACTOR = 0.90 / (250**0.5)
 
 MEGA_TOP_4 = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT")
@@ -13,6 +19,16 @@ OHLCV_SQL = "SELECT * FROM market_data.ohlcv"
 
 _POSTGRES_HOST = "192.168.1.249"
 _POSTGRES_PORT = "5432"
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_research_dir = Path(__file__).resolve().parent
+for _p in (_REPO_ROOT, _research_dir):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+from strategies.modules.factor_ls import config as factor_config  # noqa: E402
+from strategies.modules.factor_ls.data_loader import database_url  # noqa: E402
+from strategies.modules.factor_ls.validators import XSECS_RANK_COLUMNS  # noqa: E402
 
 
 def combine_features(X, rescale=True):
@@ -236,6 +252,75 @@ def _read_ohlcv() -> pd.DataFrame:
     return ohlcv_df
 
 
+def _notebook_y_aliases(label_horizon: int) -> dict[str, str]:
+    """Match naming expected by research scripts (opt_xgb / wf runner)."""
+    h = int(label_horizon)
+    return {
+        "bar_ts": "ts",
+        f"vol_weight_{h}": "vol_weight",
+        f"vol_weighted_return_{h}": "vol_weighted_return",
+        f"logret_fwd_{h}": "fwd_return",
+    }
+
+
+def load_backfilled_panel(
+    *,
+    label_horizon: int = 1,
+    bar_ts_ge: object | None = None,
+    bar_ts_le: object | None = None,
+) -> pd.DataFrame:
+    """
+    Load model-ready panel from backfilled tables:
+    `strategies_daily.labels_daily` (y/ids) joined to `strategies_daily.xsecs_daily` (x ranks).
+
+    Output columns include: `ts`, `symbol`, `vol_weight`, `vol_weighted_return`, `fwd_return`,
+    plus all `XSECS_RANK_COLUMNS` present.
+    """
+    if label_horizon not in factor_config.DEFAULT_LABEL_HORIZONS:
+        raise ValueError(
+            f"label_horizon={label_horizon} not in DEFAULT_LABEL_HORIZONS "
+            f"{factor_config.DEFAULT_LABEL_HORIZONS}"
+        )
+
+    schema = factor_config.SCHEMA_STRATEGIES_DAILY
+    rank_list = ", ".join(f'x."{c}"' for c in XSECS_RANK_COLUMNS)
+    h = int(label_horizon)
+
+    where_clauses: list[str] = []
+    params: dict[str, object] = {}
+    if bar_ts_ge is not None:
+        where_clauses.append("l.bar_ts >= :bar_ts_ge")
+        params["bar_ts_ge"] = pd.Timestamp(bar_ts_ge)
+    if bar_ts_le is not None:
+        where_clauses.append("l.bar_ts <= :bar_ts_le")
+        params["bar_ts_le"] = pd.Timestamp(bar_ts_le)
+    where_sql = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    sql = f"""
+    SELECT
+        l.bar_ts,
+        l.symbol,
+        l.logret_fwd_{h},
+        l.vol_weight_{h},
+        l.vol_weighted_return_{h},
+        {rank_list}
+    FROM "{schema}"."labels_daily" l
+    INNER JOIN "{schema}"."xsecs_daily" x
+      ON l.bar_ts = x.bar_ts AND l.symbol = x.symbol
+    WHERE 1=1
+    {where_sql}
+    ORDER BY l.bar_ts, l.symbol
+    """
+    engine = create_engine(database_url())
+    df = pd.read_sql(text(sql), engine, params=params)
+    if df.empty:
+        return df
+
+    df = df.rename(columns=_notebook_y_aliases(label_horizon))
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    return df
+
+
 def _daily_panel(ohlcv_df: pd.DataFrame) -> pd.DataFrame:
     df = ohlcv_df.copy()
     df["date"] = df["open_time"].dt.date
@@ -364,7 +449,19 @@ def _time_splits(df: pd.DataFrame):
 
 
 def build_ranked_panel_df() -> pd.DataFrame:
-    """Full cross-sectional panel (same pipeline as ``load_data`` before train/valid/test split)."""
+    """
+    Full cross-sectional panel used by research scripts.
+
+    **Default**: backfilled dataset (`labels_daily` + `xsecs_daily`) already contains the
+    cross-sectional rank features and target columns needed by `opt_xgb.py`.
+
+    Legacy OHLCV feature engineering is kept via `build_ranked_panel_df_legacy_ohlcv()`.
+    """
+    return load_backfilled_panel(label_horizon=1)
+
+
+def build_ranked_panel_df_legacy_ohlcv() -> pd.DataFrame:
+    """Legacy OHLCV-based feature engineering pipeline (kept for reference)."""
     ohlcv_df = _read_ohlcv()
     df = _daily_panel(ohlcv_df)
     df = _add_returns_and_liquidity(df)
@@ -375,6 +472,28 @@ def build_ranked_panel_df() -> pd.DataFrame:
     return df
 
 
-def load_data():
-    df = build_ranked_panel_df()
+def load_data(*, n_samples: int = 5000, label_horizon: int = 1):
+    """
+    Return train/valid/test splits for Optuna/XGB research.
+
+    - Uses backfilled dataset by default.
+    - Caps to `n_samples` rows (most-recent by `ts`) to keep experiments fast/reproducible.
+    """
+    df = load_backfilled_panel(label_horizon=label_horizon)
+    if df.empty:
+        raise SystemExit("Backfilled panel is empty (check DATABASE_URL / STRATEGIES_PIPELINE_DATABASE_URL).")
+
+    x_cols = [c for c in XSECS_RANK_COLUMNS if c in df.columns]
+    missing = [c for c in XSECS_RANK_COLUMNS if c not in df.columns]
+    if missing:
+        raise SystemExit(f"Backfilled panel missing xsec rank columns: {missing}")
+
+    y_cols = ["ts", "symbol", "vol_weight", "vol_weighted_return", "fwd_return"]
+    keep = y_cols + x_cols
+    df = df[keep].dropna()
+    df = df.sort_values(["ts", "symbol"], kind="mergesort").reset_index(drop=True)
+
+    if n_samples is not None and int(n_samples) > 0 and len(df) > int(n_samples):
+        df = df.iloc[-int(n_samples) :].reset_index(drop=True)
+
     return _time_splits(df)
