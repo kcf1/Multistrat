@@ -182,3 +182,4 @@ cython_debug/
 
 # Scheduler CSV reports (Phase 5; not versioned)
 scheduler/reports_out/
+**/*.parquet
