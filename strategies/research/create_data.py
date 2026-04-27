@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import numpy as np
 import pandas as pd
@@ -21,14 +21,55 @@ _POSTGRES_HOST = "192.168.1.249"
 _POSTGRES_PORT = "5432"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_research_dir = Path(__file__).resolve().parent
-for _p in (_REPO_ROOT, _research_dir):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
-from strategies.modules.factor_ls import config as factor_config  # noqa: E402
-from strategies.modules.factor_ls.data_loader import database_url  # noqa: E402
-from strategies.modules.factor_ls.validators import XSECS_RANK_COLUMNS  # noqa: E402
+# Backfilled dataset contract (duplicated here to avoid importing factor_ls internals).
+SCHEMA_STRATEGIES_DAILY = "strategies_daily"
+XSECS_RANK_COLUMNS: tuple[str, ...] = (
+    "mom_rank",
+    "trend_rank",
+    "breakout_rank",
+    "vwaprev_rank",
+    "resrev_rank",
+    "skew_rank",
+    "vol_rank",
+    "betasq_rank",
+    "maxret_rank",
+    "takerratio_rank",
+    "vlm_rank",
+    "quotevlm_rank",
+    "retvlmcor_rank",
+)
+
+# Legacy OHLCV pipeline rank features (older notebooks / local feature build).
+_LEGACY_OHLCV_X_COLS: tuple[str, ...] = (
+    "mom_rank",
+    "trend_rank",
+    "breakout_rank",
+    "vwaprev_rank",
+    "resrev_rank",
+    "takerratio_rank",
+    "vol_rank",
+    "betasq_rank",
+    "volume_rank",
+    "quotevol_rank",
+    "maxret_rank",
+    "skew_rank",
+)
+
+
+def _x_cols_for_frame(df: pd.DataFrame) -> list[str]:
+    """Feature columns for train/valid/test X: prefer DB xsecs contract, else legacy OHLCV ranks."""
+    xs = [c for c in XSECS_RANK_COLUMNS if c in df.columns]
+    if xs:
+        return xs
+    leg = [c for c in _LEGACY_OHLCV_X_COLS if c in df.columns]
+    if leg:
+        return leg
+    raise ValueError(
+        "No known feature columns found in frame "
+        f"(expected XSECS_RANK_COLUMNS subset or legacy OHLCV *_rank columns). "
+        f"Columns sample: {list(df.columns)[:30]}"
+    )
 
 
 def combine_features(X, rescale=True):
@@ -236,20 +277,40 @@ _RANK_BY_VOLUME_BIN = (
 )
 
 
+def _postgres_sqlalchemy_url(*, require_all: bool) -> str:
+    load_dotenv(_REPO_ROOT / ".env")
+    user = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+    db = os.getenv("POSTGRES_DB")
+    if require_all:
+        if not user or not password or not db:
+            raise RuntimeError(
+                "Set POSTGRES_USER, POSTGRES_PASSWORD, and POSTGRES_DB in .env "
+                f"(host={_POSTGRES_HOST!r} port={_POSTGRES_PORT!r})."
+            )
+    else:
+        user = user or "your_username"
+        password = password or "your_password"
+        db = db or "your_database"
+    u = quote_plus(user)
+    p = quote_plus(password)
+    return f"postgresql://{u}:{p}@{_POSTGRES_HOST}:{_POSTGRES_PORT}/{db}"
+
+
 def _create_postgres_engine():
-    user = os.getenv("POSTGRES_USER", "your_username")
-    password = os.getenv("POSTGRES_PASSWORD", "your_password")
-    db = os.getenv("POSTGRES_DB", "your_database")
-    uri = f"postgresql://{user}:{password}@{_POSTGRES_HOST}:{_POSTGRES_PORT}/{db}"
-    return sqlalchemy.create_engine(uri)
+    return sqlalchemy.create_engine(_postgres_sqlalchemy_url(require_all=False))
 
 
 def _read_ohlcv() -> pd.DataFrame:
-    load_dotenv()
     engine = _create_postgres_engine()
     ohlcv_df = pd.read_sql(OHLCV_SQL, engine)
     ohlcv_df["ts"] = pd.to_datetime(ohlcv_df["open_time"])
     return ohlcv_df
+
+
+def _pipeline_database_url() -> str:
+    """Backfilled panel: fixed host/port in this module; credentials from .env."""
+    return _postgres_sqlalchemy_url(require_all=True)
 
 
 def _notebook_y_aliases(label_horizon: int) -> dict[str, str]:
@@ -276,13 +337,7 @@ def load_backfilled_panel(
     Output columns include: `ts`, `symbol`, `vol_weight`, `vol_weighted_return`, `fwd_return`,
     plus all `XSECS_RANK_COLUMNS` present.
     """
-    if label_horizon not in factor_config.DEFAULT_LABEL_HORIZONS:
-        raise ValueError(
-            f"label_horizon={label_horizon} not in DEFAULT_LABEL_HORIZONS "
-            f"{factor_config.DEFAULT_LABEL_HORIZONS}"
-        )
-
-    schema = factor_config.SCHEMA_STRATEGIES_DAILY
+    schema = SCHEMA_STRATEGIES_DAILY
     rank_list = ", ".join(f'x."{c}"' for c in XSECS_RANK_COLUMNS)
     h = int(label_horizon)
 
@@ -311,7 +366,7 @@ def load_backfilled_panel(
     {where_sql}
     ORDER BY l.bar_ts, l.symbol
     """
-    engine = create_engine(database_url())
+    engine = create_engine(_pipeline_database_url())
     df = pd.read_sql(text(sql), engine, params=params)
     if df.empty:
         return df
@@ -423,20 +478,7 @@ def _time_splits(df: pd.DataFrame):
     train_df = df[df["ts"] < train_end]
     valid_df = df[(df["ts"] >= train_end) & (df["ts"] < valid_end)]
     test_df = df[df["ts"] >= valid_end]
-    x_cols = [
-        "mom_rank",
-        "trend_rank",
-        "breakout_rank",
-        "vwaprev_rank",
-        "resrev_rank",
-        "takerratio_rank",
-        "vol_rank",
-        "betasq_rank",
-        "volume_rank",
-        "quotevol_rank",
-        "maxret_rank",
-        "skew_rank",
-    ]
+    x_cols = _x_cols_for_frame(df)
     y_cols = ["ts", "symbol", "vol_weight", "vol_weighted_return", "fwd_return"]
     return (
         train_df[x_cols],
@@ -472,16 +514,20 @@ def build_ranked_panel_df_legacy_ohlcv() -> pd.DataFrame:
     return df
 
 
-def load_data(*, n_samples: int = 5000, label_horizon: int = 1):
+def load_data(*, n_samples: int | None = None, label_horizon: int = 1):
     """
     Return train/valid/test splits for Optuna/XGB research.
 
     - Uses backfilled dataset by default.
-    - Caps to `n_samples` rows (most-recent by `ts`) to keep experiments fast/reproducible.
+    - Optional cap: keep the most-recent `n_samples` rows (after sorting by `ts`, `symbol`).
+      Default ``None`` uses the full loaded panel, then applies the same 60/20/20 time split
+      as the legacy pipeline (see ``_time_splits``).
     """
     df = load_backfilled_panel(label_horizon=label_horizon)
     if df.empty:
-        raise SystemExit("Backfilled panel is empty (check DATABASE_URL / STRATEGIES_PIPELINE_DATABASE_URL).")
+        raise SystemExit(
+            "Backfilled panel is empty (check POSTGRES_* in .env and host/port in create_data.py)."
+        )
 
     x_cols = [c for c in XSECS_RANK_COLUMNS if c in df.columns]
     missing = [c for c in XSECS_RANK_COLUMNS if c not in df.columns]

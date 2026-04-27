@@ -43,9 +43,15 @@ OPTUNA_DECILE_ANNUALIZE = True
 XGBOOST_DEVICE = "cuda"
 
 # Search budget (best trial = argmax/min over this budget only)
-OPTUNA_N_TRIALS = 500
-OPTUNA_TIMEOUT_SEC = 3600
+# "Parameter sets" ~= Optuna trials (each trial proposes a full XGBoost hyperparam config).
+OPTUNA_N_TRIALS = 10_000
+OPTUNA_TIMEOUT_SEC = None  # set an int seconds cap if you want a hard wall-clock stop
 OPTUNA_SEED = 42  # TPESampler seed for reproducibility
+
+# XGBoost training budget inside each Optuna trial:
+# Each trial runs up to this many boosting rounds, but can stop earlier via early stopping.
+XGB_MAX_BOOST_ROUNDS = 10_000
+XGB_EARLY_STOPPING_ROUNDS = 50
 
 
 def _rmse(y_true, y_pred) -> float:
@@ -160,7 +166,7 @@ _SKLEARN_DEFAULTS = {
 
 def _suggest_params(trial: optuna.Trial) -> tuple[dict, int]:
     """Broad search: regression objective, tree build, booster, regularization."""
-    n_estimators = trial.suggest_int("n_estimators", 250, 900, step=50)
+    n_estimators = trial.suggest_int("n_estimators", 250, XGB_MAX_BOOST_ROUNDS, step=50)
 
     reg_objective = trial.suggest_categorical(
         "reg_objective",
@@ -289,7 +295,7 @@ def make_objective(
     valid_x,
     valid_y,
     *,
-    early_stopping_rounds: int = 50,
+    early_stopping_rounds: int = XGB_EARLY_STOPPING_ROUNDS,
     optuna_metric: str = OPTUNA_METRIC,
     decile_frac: float = OPTUNA_DECILE_FRAC,
     decile_annualize: bool = OPTUNA_DECILE_ANNUALIZE,
@@ -340,9 +346,18 @@ def main() -> None:
     if optuna_metric in ("decile_spread", "decile_sharpe"):
         print(f"OPTUNA_DECILE_FRAC={decile_frac} OPTUNA_DECILE_ANNUALIZE={OPTUNA_DECILE_ANNUALIZE}")
     print("XGB search includes: reg_objective, tree_method, booster, grow_policy, eval_metric, …")
+    timeout_part = (
+        f"timeout<={OPTUNA_TIMEOUT_SEC}s"
+        if OPTUNA_TIMEOUT_SEC is not None
+        else "timeout=none"
+    )
     print(
         f"Optuna: TPESampler(seed={OPTUNA_SEED}), "
-        f"n_trials<={OPTUNA_N_TRIALS}, timeout<={OPTUNA_TIMEOUT_SEC}s"
+        f"n_trials<={OPTUNA_N_TRIALS}, {timeout_part}"
+    )
+    print(
+        f"XGB (per trial): num_boost_round<= {XGB_MAX_BOOST_ROUNDS}, "
+        f"early_stopping_rounds={XGB_EARLY_STOPPING_ROUNDS}"
     )
 
     train_x, train_y, valid_x, valid_y, test_x, test_y = load_data()
@@ -351,6 +366,7 @@ def main() -> None:
         train_y,
         valid_x,
         valid_y,
+        early_stopping_rounds=XGB_EARLY_STOPPING_ROUNDS,
         optuna_metric=optuna_metric,
         decile_frac=decile_frac,
         decile_annualize=OPTUNA_DECILE_ANNUALIZE,
