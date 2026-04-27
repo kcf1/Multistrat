@@ -15,6 +15,7 @@ COPY pms/ pms/
 COPY risk/ risk/
 COPY market_data/ market_data/
 COPY scheduler/ scheduler/
+COPY strategies/ strategies/
 COPY scripts/ scripts/
 COPY alembic/ alembic/
 COPY alembic.ini .
