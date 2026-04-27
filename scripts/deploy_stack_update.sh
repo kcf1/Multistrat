@@ -96,7 +96,7 @@ wait_healthy() {
   exit 1
 }
 
-APP_SERVICES=(oms market_data pms risk scheduler)
+APP_SERVICES=(oms market_data pms risk scheduler strategies_runner)
 INFRA_SERVICES=(postgres redis)
 TOOLS_SERVICES=(pgadmin redisinsight)
 

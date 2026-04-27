@@ -104,7 +104,7 @@ wait_healthy() {
   exit 1
 }
 
-APP_SERVICES=(oms pms risk scheduler market_data)
+APP_SERVICES=(oms pms risk scheduler market_data strategies_runner)
 INFRA_SERVICES=(postgres redis)
 TOOLS_SERVICES=(pgadmin redisinsight)
 
@@ -148,8 +148,8 @@ done
 echo "Starting market_data..."
 run docker compose "${COMPOSE_ARGS[@]}" up -d market_data
 
-echo "Starting pms, risk, scheduler..."
-run docker compose "${COMPOSE_ARGS[@]}" up -d pms risk scheduler
+echo "Starting pms, risk, scheduler, strategies_runner..."
+run docker compose "${COMPOSE_ARGS[@]}" up -d pms risk scheduler strategies_runner
 
 echo "Done. Current status:"
 run docker compose "${COMPOSE_ARGS[@]}" ps

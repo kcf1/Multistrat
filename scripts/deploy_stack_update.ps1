@@ -71,7 +71,7 @@ function Wait-Healthy([string]$Service, [int]$Tries = 60) {
   throw "Error: timed out waiting for $Service to become healthy."
 }
 
-$AppServices = @("oms", "market_data", "pms", "risk", "scheduler")
+$AppServices = @("oms", "market_data", "pms", "risk", "scheduler", "strategies_runner")
 $InfraServices = @("postgres", "redis")
 $ToolsServices = @("pgadmin", "redisinsight")
 

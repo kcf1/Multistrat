@@ -53,7 +53,7 @@ if (-not (Test-Path ".env")) {
 $composeFile = "docker-compose.yml"
 $composeArgs = @("-f", $composeFile)
 
-$APP_SERVICES = @("oms", "pms", "risk", "scheduler", "market_data")
+$APP_SERVICES = @("oms", "pms", "risk", "scheduler", "market_data", "strategies_runner")
 $INFRA_SERVICES = @("postgres", "redis")
 $TOOLS_SERVICES = @("pgadmin", "redisinsight")
 
@@ -128,9 +128,9 @@ Write-Host "Starting market_data..."
   RunCmd $cmd
 }
 
-Write-Host "Starting pms, risk, scheduler..."
+Write-Host "Starting pms, risk, scheduler, strategies_runner..."
 {
-  $cmd = @("docker", "compose") + $composeArgs + @("up", "-d") + @("pms", "risk", "scheduler")
+  $cmd = @("docker", "compose") + $composeArgs + @("up", "-d") + @("pms", "risk", "scheduler", "strategies_runner")
   RunCmd $cmd
 }
 
